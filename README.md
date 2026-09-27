@@ -48,6 +48,8 @@ davai --print "add a test"         # plain text out, no TUI
 davai --json "add a test"          # newline-delimited JSON events
 davai --models                     # what the provider actually serves
 davai --sessions                   # recent sessions
+davai --resume                     # reopen the most recent session
+davai --resume 9ffcf35f            # reopen one by id, or any unique prefix
 davai --config                     # resolved configuration
 ```
 
@@ -139,6 +141,18 @@ snaps/            pre-change file snapshots
 
 API keys are redacted on the way in. Sessions are pruned by age and count at startup.
 
+`davai --resume [id]` rebuilds the ledger from a transcript — the events already on disk
+*are* the resume format, so there is no second thing to keep in sync. With no id it takes
+the most recent session; an id may be any unique prefix. Resume defaults to the working
+directory the session ran in, since grounding and the sandbox have to describe the tree
+the transcript talks about, and it starts a *new* session directory, so an undo log never
+spans two processes.
+
+Pastes, images and operator shell output are not in the transcript and so do not come
+back. Compaction is re-derived rather than replayed: a replay is capped at half the
+context window, and anything over the threshold is compacted on the next turn by the
+normal policy.
+
 ## Providers
 
 | Provider | Key | Notes |
@@ -162,8 +176,9 @@ build tooling.
 ## Development
 
 ```bash
-npm test          # 96 tests: ops engine, sandbox, parser, context, UI
+npm test          # 109 tests: ops engine, sandbox, parser, context, resume, UI
 npm run test:watch
+npm run lint      # eslint, flat config in eslint.config.js
 ```
 
 The agent, context and provider layers are Ink-free and testable without a terminal;

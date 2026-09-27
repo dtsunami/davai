@@ -58,7 +58,6 @@ export function completeInput(value, cursor, session) {
 }
 
 function completePath(partial, sandbox) {
-  const root = sandbox.writeRoot;
   const normalized = partial.replace(/\\/g, '/');
   const dirPart = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : '';
   const basePart = normalized.includes('/')

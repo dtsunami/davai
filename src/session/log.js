@@ -27,8 +27,8 @@ export function redact(value) {
 }
 
 export class SessionLog {
-  /** @param {{home: string, cfg: object, id?: string}} opts */
-  constructor({ home, cfg, id }) {
+  /** @param {{home: string, cfg: object, id?: string, resumedFrom?: string}} opts */
+  constructor({ home, cfg, id, resumedFrom }) {
     this.id = id || crypto.randomBytes(5).toString('hex');
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     this.dir = path.join(home, 'sessions', `${stamp}-${this.id}`);
@@ -46,6 +46,7 @@ export class SessionLog {
       effort: cfg.effort,
       roDirs: cfg.roDirs,
       argv: process.argv.slice(2),
+      ...(resumedFrom ? { resumedFrom } : {}),
     };
     this.#writeMeta();
   }
@@ -93,7 +94,7 @@ export class SessionLog {
 /** List sessions, newest first. */
 export function listSessions(home, limit = 25) {
   const root = path.join(home, 'sessions');
-  let names = [];
+  let names;
   try {
     names = fs.readdirSync(root);
   } catch {
@@ -131,8 +132,12 @@ export function readTranscript(dir) {
   }
 }
 
-/** Delete sessions older than `days` or beyond `keep` count. */
-export function pruneSessions(home, { days = 30, keep = 100 } = {}) {
+/**
+ * Delete sessions older than `days` or beyond `keep` count. `except` is a session
+ * directory to spare — startup prunes and `--resume` both run at startup, and pruning
+ * the session being resumed would empty its transcript out from under the replay.
+ */
+export function pruneSessions(home, { days = 30, keep = 100, except } = {}) {
   const root = path.join(home, 'sessions');
   let entries;
   try {
@@ -145,7 +150,8 @@ export function pruneSessions(home, { days = 30, keep = 100 } = {}) {
   const excess = Math.max(0, entries.length - keep);
   entries.forEach((name, i) => {
     const dir = path.join(root, name);
-    let old = false;
+    if (except && path.resolve(dir) === path.resolve(except)) return;
+    let old;
     try {
       old = fs.statSync(dir).mtimeMs < cutoff;
     } catch {

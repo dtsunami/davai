@@ -12,12 +12,28 @@ import { createSession } from './session/bootstrap.js';
  * @returns {Promise<number>} exit code
  */
 export async function runHeadless(input, opts = {}) {
-  const session = await createSession({ cwd: opts.cwd, overrides: opts.overrides });
+  const session = await createSession({
+    cwd: opts.cwd,
+    overrides: opts.overrides,
+    resume: opts.resume,
+  });
   const { agent, log } = session;
 
   const emit = (obj) => {
     if (opts.json) process.stdout.write(JSON.stringify(obj) + '\n');
   };
+
+  if (session.resumed) {
+    const r = session.resumed;
+    emit({ type: 'resume', ...r });
+    if (!opts.json) {
+      process.stderr.write(
+        `  resumed ${r.id}: ${r.turns} turn(s), ${r.segments} segment(s)` +
+          (r.omitted ? `, ${r.omitted} omitted` : '') +
+          '\n',
+      );
+    }
+  }
 
   let failed = false;
 

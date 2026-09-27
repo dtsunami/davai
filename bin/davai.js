@@ -16,6 +16,7 @@ USAGE
   davai                          start the interactive REPL
   davai "do the thing"           one-shot, then exit
   echo "do the thing" | davai    read the request from stdin
+  davai --resume [id]            reopen a past session (default: the most recent)
 
 OPTIONS
   -p, --print            one-shot, stream plain text to stdout (no TUI)
@@ -27,6 +28,7 @@ OPTIONS
   -C, --cwd <dir>        run against a different working directory
       --models [prov]    list models the provider actually serves
       --sessions         list recent sessions
+      --resume [id]      rebuild context from a past session; id may be a prefix
       --config           show resolved configuration
   -h, --help             this text
   -v, --version
@@ -82,6 +84,10 @@ function parseArgs(argv) {
         break;
       case '--sessions':
         out.listSessions = true;
+        break;
+      case '--resume':
+        // An optional value: `--resume` alone means the most recent session.
+        out.resume = argv[i + 1] && !argv[i + 1].startsWith('-') ? next() : true;
         break;
       case '--config':
         out.showConfig = true;
@@ -167,11 +173,12 @@ async function main() {
       yes: args.yes,
       cwd: args.cwd,
       overrides: args.overrides,
+      resume: args.resume,
     });
   }
 
   const { startTui } = await import('../src/ui/start.js');
-  return startTui({ input, cwd: args.cwd, overrides: args.overrides });
+  return startTui({ input, cwd: args.cwd, overrides: args.overrides, resume: args.resume });
 }
 
 main()

@@ -238,22 +238,28 @@ export class Agent extends EventEmitter {
     this.stats.ops += ops.length;
     this.log.addOps(ops.length);
     this.emit('ops-result', { outcome, ops });
-    this.log.event('ops-result', {
-      status: outcome.status,
-      errors: outcome.errors,
-      results: outcome.results.map((r) => ({ index: r.index, op: r.op, ok: r.ok })),
-    });
 
     const label =
       outcome.status === 'ok'
         ? `${ops.length} op${ops.length > 1 ? 's' : ''} ok`
         : `batch ${outcome.status}`;
+    const text = formatResults(outcome, ops);
+
+    // label and text are logged verbatim so --resume can rebuild this segment
+    // exactly, rather than re-deriving it from per-op status.
+    this.log.event('ops-result', {
+      status: outcome.status,
+      errors: outcome.errors,
+      results: outcome.results.map((r) => ({ index: r.index, op: r.op, ok: r.ok })),
+      label,
+      text,
+    });
 
     this.ledger.add({
       type: 'op-result',
       label,
       role: 'user',
-      text: formatResults(outcome, ops),
+      text,
     });
 
     if (this.controller.signal.aborted) return 'cancelled';

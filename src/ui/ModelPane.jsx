@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { MODELS, PROVIDERS, modelsFor, refineModel } from '../config/models.js';
+import { PROVIDERS, modelsFor, refineModel } from '../config/models.js';
 import { listRemoteModels, createProvider } from '../providers/index.js';
 import { saveSettings } from '../config/settings.js';
 import { colors, glyphs, formatTokens } from './theme.js';

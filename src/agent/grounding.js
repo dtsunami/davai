@@ -144,7 +144,7 @@ function listing(root, sandbox) {
   for (const ent of entries) {
     const p = path.join(root, ent.name);
     if (sandbox.isIgnored(p)) continue;
-    let mtime = 0;
+    let mtime;
     try {
       mtime = fs.statSync(p).mtimeMs;
     } catch {
@@ -201,7 +201,7 @@ function previewDir(dir, sandbox) {
   for (const ent of entries) {
     const p = path.join(dir, ent.name);
     if (sandbox.isIgnored(p)) continue;
-    let mtime = 0;
+    let mtime;
     try {
       mtime = fs.statSync(p).mtimeMs;
     } catch {

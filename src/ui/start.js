@@ -6,7 +6,7 @@ import { createSession } from '../session/bootstrap.js';
 import { prepareTerminal, glyphs, formatTokens } from './theme.js';
 import { registerJsx } from './jsx-register.js';
 
-export async function startTui({ input, cwd, overrides }) {
+export async function startTui({ input, cwd, overrides, resume }) {
   registerJsx();
   prepareTerminal();
 
@@ -16,8 +16,8 @@ export async function startTui({ input, cwd, overrides }) {
     import('./App.jsx'),
   ]);
 
-  const session = await createSession({ cwd, overrides });
-  const { cfg, log } = session;
+  const session = await createSession({ cwd, overrides, resume });
+  const { log } = session;
 
   banner(session);
 
@@ -64,6 +64,15 @@ function banner(session) {
   );
   w(dim(`  write ${glyphs.arrow} ${sandbox.writeRoot}`));
   if (cfg.roDirs.length) w(dim(`  read  ${glyphs.arrow} + ${cfg.roDirs.join(', ')}`));
+  if (session.resumed) {
+    const r = session.resumed;
+    w(
+      dim(
+        `  resumed ${r.id}: ${r.turns} turn(s), ${r.segments} segment(s)` +
+          (r.omitted ? `, ${r.omitted} omitted` : ''),
+      ),
+    );
+  }
   w(dim('  /help for commands · ctrl+g context · ctrl+a artifacts · esc cancel'));
   w('');
 }

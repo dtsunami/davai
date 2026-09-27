@@ -133,7 +133,7 @@ export function opGrep(op, ctx) {
     try {
       re = new RegExp(op.pattern, 'g');
     } catch (err) {
-      throw new Error(`invalid regex: ${err.message}`);
+      throw new Error(`invalid regex: ${err.message}`, { cause: err });
     }
     test = (line) => {
       re.lastIndex = 0;

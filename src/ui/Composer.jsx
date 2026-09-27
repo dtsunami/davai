@@ -1,5 +1,5 @@
-import React, { useState, useCallback, useRef } from 'react';
-import { Box, Text, useInput, useStdin } from 'ink';
+import React, { useState, useCallback } from 'react';
+import { Box, Text, useInput } from 'ink';
 import { colors, glyphs } from './theme.js';
 import { completeInput } from './complete.js';
 
@@ -18,8 +18,6 @@ export function Composer({ onSubmit, session, busy }) {
   const [histIndex, setHistIndex] = useState(-1);
   const [shellMode, setShellMode] = useState(false);
   const [hint, setHint] = useState('');
-  const pasteBuf = useRef({ active: false, data: '' });
-  const { stdin } = useStdin();
 
   const insert = useCallback(
     (text) => {
