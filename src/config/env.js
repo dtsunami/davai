@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import dotenv from 'dotenv';
+import { resolvePrompts } from '../agent/prompt.js';
 import { resolveModel } from './models.js';
 
 /** @returns {string} */
@@ -137,6 +138,10 @@ export function loadConfig(opts = {}) {
 
   const contextLimit = num(merged.DAVAI_CONTEXT_LIMIT, model.context);
 
+  // Resolved here rather than in the agent so that an unreadable prompt file or a
+  // template missing its placeholder fails at startup, next to every other bad setting.
+  const { values: prompts, sources: promptSources } = resolvePrompts(merged);
+
   return {
     home,
     cwd,
@@ -153,6 +158,8 @@ export function loadConfig(opts = {}) {
     contextLimit,
     compactAt,
     thinkingVisible: bool(merged.DAVAI_THINKING, false),
+    prompts,
+    promptSources,
     // Auto-approve shell ops. Deliberately not a persisted setting (see settings.js):
     // it lives for one run, or for one `/yolo` toggle, and never outlives the session.
     yolo: bool(merged.DAVAI_YOLO, false),

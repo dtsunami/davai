@@ -37,6 +37,15 @@ Input
   @path/to/file       tab-completes against the working directory
   multi-line paste    stored as [[paste#N]], expanded on submit`;
 
+/** Only the overridden prompts are worth naming; the defaults are the norm. */
+function describePrompts(cfg) {
+  const overridden = Object.entries(cfg.promptSources || {}).filter(
+    ([, source]) => source !== 'default',
+  );
+  if (!overridden.length) return 'all default';
+  return overridden.map(([key, source]) => `${key} ${glyphs.arrow} ${source}`).join(', ');
+}
+
 /**
  * @returns {Promise<{handled: boolean, input?: string}>}
  */
@@ -209,6 +218,7 @@ export async function handleCommand(text, deps) {
         `  compact at     ${Math.round(cfg.compactAt * 100)}%`,
         `  shell timeout  ${cfg.shellTimeout / 1000}s`,
         `  yolo           ${cfg.yolo ? 'on — shell auto-approved' : 'off'}`,
+        `  prompts        ${describePrompts(cfg)}`,
         `  DAVAI_HOME     ${cfg.home}`,
         `  working dir    ${cfg.cwd}`,
         `  read-only dirs ${cfg.roDirs.length ? cfg.roDirs.join(', ') : '(none)'}`,

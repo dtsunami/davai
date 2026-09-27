@@ -10,7 +10,7 @@ import { EventEmitter } from 'node:events';
 import { extract } from './parser.js';
 import { normalizeBatch } from './ops/schema.js';
 import { executeBatch, formatResults } from './ops/executor.js';
-import { NUDGE, repairPrompt } from './prompt.js';
+import { DEFAULT_PROMPTS, opsResultPrompt, repairPrompt } from './prompt.js';
 import { compact } from '../context/compact.js';
 import { costOf } from '../config/models.js';
 
@@ -39,6 +39,9 @@ export class Agent extends EventEmitter {
   constructor(deps) {
     super();
     Object.assign(this, deps);
+    // Resolved once by loadConfig; DEFAULT_PROMPTS keeps the agent constructible from
+    // a bare cfg, as the tests do.
+    this.prompts = deps.cfg?.prompts || DEFAULT_PROMPTS;
     this.busy = false;
     this.controller = null;
     this.stats = { turns: 0, ops: 0, cost: 0, malformed: 0 };
@@ -112,7 +115,7 @@ export class Agent extends EventEmitter {
             type: 'op-result',
             label: 'parse error',
             role: 'user',
-            text: repairPrompt(parseError),
+            text: repairPrompt(parseError, this.prompts),
           });
           continue;
         }
@@ -130,7 +133,12 @@ export class Agent extends EventEmitter {
           }
           if (nudges++ < MAX_NUDGES) {
             this.emit('nudge', { attempt: nudges, prose });
-            this.ledger.add({ type: 'op-result', label: 'nudge', role: 'user', text: NUDGE });
+            this.ledger.add({
+              type: 'op-result',
+              label: 'nudge',
+              role: 'user',
+              text: this.prompts.nudge,
+            });
             continue;
           }
           // Reminding it is not working. Stop rather than spend the rest of MAX_STEPS
@@ -237,7 +245,7 @@ export class Agent extends EventEmitter {
         type: 'op-result',
         label: `batch rejected (${errors.length} error${errors.length > 1 ? 's' : ''})`,
         role: 'user',
-        text: formatResults(outcome, []),
+        text: opsResultPrompt(formatResults(outcome, []), this.prompts),
       });
       return outcome.status;
     }
@@ -261,7 +269,7 @@ export class Agent extends EventEmitter {
       outcome.status === 'ok'
         ? `${ops.length} op${ops.length > 1 ? 's' : ''} ok`
         : `batch ${outcome.status}`;
-    const text = formatResults(outcome, ops);
+    const text = opsResultPrompt(formatResults(outcome, ops), this.prompts);
 
     // label and text are logged verbatim so --resume can rebuild this segment
     // exactly, rather than re-deriving it from per-op status.

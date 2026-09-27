@@ -9,6 +9,7 @@ import { Sandbox } from '../src/agent/sandbox.js';
 import { DaIgnore } from '../src/agent/daignore.js';
 import { Journal } from '../src/agent/journal.js';
 import { resolveModel } from '../src/config/models.js';
+import { DEFAULT_PROMPTS } from '../src/agent/prompt.js';
 
 let base;
 let root;
@@ -30,7 +31,7 @@ function stubProvider(turns) {
   };
 }
 
-function makeAgent(provider) {
+function makeAgent(provider, prompts) {
   const model = resolveModel('anthropic', 'claude-opus-5');
   const ledger = new Ledger({ limit: model.context, compactAt: 0.75 });
   ledger.setSystem('system prompt');
@@ -39,9 +40,17 @@ function makeAgent(provider) {
     provider,
     makeProvider: () => provider,
     ledger,
-    cfg: { ...deps.cfg, model },
+    cfg: { ...deps.cfg, model, ...(prompts ? { prompts } : {}) },
   });
   return { agent, ledger };
+}
+
+/** Everything the model was told on its Nth request. */
+function requestText(provider, n) {
+  return provider.sent[n].messages
+    .flatMap((m) => m.content)
+    .map((c) => c.text)
+    .join('\n');
 }
 
 /** Run to completion, collecting the events we care about. */
@@ -128,8 +137,56 @@ describe('stalled turns', () => {
 
     expect(ledger.segments.some((s) => s.label === 'nudge')).toBe(true);
     // The nudge reaches the model on the following request, not just the ledger.
-    const second = provider.sent[1].messages.flatMap((m) => m.content).map((c) => c.text);
-    expect(second.join('\n')).toMatch(/no da_ops block/);
+    expect(requestText(provider, 1)).toMatch(/no da_ops block/);
+  });
+});
+
+describe('prompt overrides', () => {
+  it('wraps op results in the ops-result prompt', async () => {
+    const provider = stubProvider([`Reading.\n${READ_OPS}`, 'Done.']);
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'read index.js');
+
+    const followup = requestText(provider, 1);
+    expect(followup).toContain('Results of your da_ops batch');
+    expect(followup).toContain('```da_results');
+    expect(followup).toContain('export const x = 1;');
+  });
+
+  it('sends a custom ops-result prompt instead of the default', async () => {
+    const prompts = { ...DEFAULT_PROMPTS, opsResult: 'OPS OUTPUT FOLLOWS\n{results}' };
+    const provider = stubProvider([`Reading.\n${READ_OPS}`, 'Done.']);
+    const { agent } = makeAgent(provider, prompts);
+    await drive(agent, 'read index.js');
+
+    const followup = requestText(provider, 1);
+    expect(followup).toContain('OPS OUTPUT FOLLOWS');
+    expect(followup).toContain('```da_results');
+    expect(followup).not.toContain('Results of your da_ops batch');
+  });
+
+  it('sends a custom nudge', async () => {
+    const prompts = { ...DEFAULT_PROMPTS, nudge: 'ACT NOW OR SAY YOU ARE FINISHED' };
+    const provider = stubProvider(["I'll take a look.", 'Nothing to change.']);
+    const { agent } = makeAgent(provider, prompts);
+    await drive(agent, 'look');
+
+    expect(requestText(provider, 1)).toContain('ACT NOW OR SAY YOU ARE FINISHED');
+  });
+
+  it('sends a custom repair prompt with the parser error', async () => {
+    const prompts = { ...DEFAULT_PROMPTS, repair: 'BROKEN: {error} — resend it' };
+    const provider = stubProvider([
+      '```da_ops\n{"ops": [not json}\n```',
+      `Fixed.\n${READ_OPS}`,
+      'Done.',
+    ]);
+    const { agent } = makeAgent(provider, prompts);
+    await drive(agent, 'read it');
+
+    const followup = requestText(provider, 1);
+    expect(followup).toMatch(/^BROKEN: /m);
+    expect(followup).toContain('— resend it');
   });
 });
 

@@ -147,8 +147,13 @@ async function main() {
     const keys = Object.fromEntries(
       Object.entries(cfg.keys).map(([k, v]) => [k, v ? 'set' : '—']),
     );
+    // `prompts` holds the whole protocol text; report where each came from instead.
     process.stdout.write(
-      JSON.stringify({ ...cfg, keys, model: cfg.model.id }, null, 2) + '\n',
+      JSON.stringify(
+        { ...cfg, keys, model: cfg.model.id, prompts: cfg.promptSources, promptSources: undefined },
+        null,
+        2,
+      ) + '\n',
     );
     return 0;
   }

@@ -193,10 +193,40 @@ Drop a `DAVAI.md` (or `AGENTS.md`, or `CLAUDE.md`) in the working directory and 
 included in the grounding, alongside the directory listing, git state and detected
 build tooling.
 
+## Prompts
+
+There are five, and every one is replaceable from the environment:
+
+| prompt | variable | what it is |
+|---|---|---|
+| preamble | `DAVAI_PROMPT_PREAMBLE` | who the assistant is and how it writes |
+| protocol | `DAVAI_PROMPT_PROTOCOL` | the whole `da_ops` specification |
+| ops result | `DAVAI_PROMPT_OPS_RESULT` | wraps each `da_results` block — needs `{results}` |
+| nudge | `DAVAI_PROMPT_NUDGE` | sent when a turn produced no ops and no conclusion |
+| repair | `DAVAI_PROMPT_REPAIR` | sent when a block did not parse — needs `{error}` |
+
+Each also takes a `_FILE` variant holding a path, which is the practical choice for
+anything multi-line. Inline wins when both are set, matching the rest of davai's
+precedence. `davai --config` reports where each prompt came from.
+
+Overrides are validated at startup, not on first use: one that is empty, points at an
+unreadable file, or drops its `{placeholder}` stops the session with an explanation.
+That last check matters — a `{results}`-less template would send the model a friendly
+sentence and none of the output it asked for.
+
+The system prompt is the cached prefix, so prompts are resolved once at startup and
+never re-read mid-session; editing a prompt file takes effect on the next run.
+
+Two cautions. Replacing `DAVAI_PROMPT_PROTOCOL` replaces the contract [the parser](src/agent/parser.js)
+implements, so the model can quite easily stop emitting anything davai can execute —
+start from the default text. And the ops-result prompt rides along with every batch
+rather than being cached, so a paragraph there is a paragraph multiplied by every batch
+in the session; set it to bare `{results}` for the block alone.
+
 ## Development
 
 ```bash
-npm test          # 121 tests: ops engine, sandbox, parser, loop, context, resume, UI
+npm test          # 140 tests: ops engine, sandbox, parser, prompts, loop, context, resume, UI
 npm run test:watch
 npm run lint      # eslint, flat config in eslint.config.js
 ```

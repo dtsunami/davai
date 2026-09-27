@@ -1,12 +1,14 @@
 /**
- * System prompt + da_ops protocol specification.
+ * Every prompt davai sends, and the environment that can replace them.
  *
  * This text is the contract with the model. It is also the cached prefix, so it must
  * be byte-stable across turns within a session — never interpolate a timestamp or
- * anything else that varies, or prompt caching silently stops working.
+ * anything else that varies, or prompt caching silently stops working. Overrides are
+ * therefore resolved once, at config load, and never re-read mid-session.
  */
+import fs from 'node:fs';
 
-export const PROTOCOL = `# The da_ops protocol
+const PROTOCOL = `# The da_ops protocol
 
 You have no tool-calling interface. Every action you take on the filesystem is
 expressed as a \`da_ops\` fenced block. Nothing else touches the machine.
@@ -94,26 +96,116 @@ file, read it — do not ask permission for read-only operations. Do ask before
 anything destructive that was not clearly requested.`;
 
 /**
- * Assemble the full system prompt. Order is deliberate: the stable parts come first
- * so the cache prefix stays intact, with per-project grounding last.
+ * What comes back after a batch runs. `{results}` is where the da_results block goes.
  *
- * @param {{grounding: string}} opts
+ * This one rides along with every batch, so it is deliberately one line: a paragraph
+ * here is a paragraph multiplied by every batch in the session, and it is never cached
+ * the way the system prompt is. Set it to bare `{results}` for the block alone.
  */
-export function buildSystemPrompt({ grounding }) {
-  return [PREAMBLE, '', PROTOCOL, '', grounding].join('\n');
-}
+const OPS_RESULT = `Results of your da_ops batch — the authoritative record of what happened on disk, not what you expected to happen. Continue the task, or state your conclusion if it is done.
 
-/** Nudge used when a turn produced neither ops nor a conclusion. */
-export const NUDGE =
+{results}`;
+
+/** Sent when a turn produced neither ops nor a conclusion. */
+const NUDGE =
   'That turn contained no da_ops block and no conclusion. Either emit a da_ops ' +
   'block to make progress, or state plainly that the work is complete.';
 
-/** Repair prompt for a malformed da_ops block. */
-export function repairPrompt(error) {
-  return (
-    `Your da_ops block could not be parsed:\n\n  ${error}\n\n` +
-    'Resend the complete block with valid JSON. Remember: the envelope is ' +
-    '{"ops": [...]}, and multi-line strings belong in --davai:NAME-- payload blocks ' +
-    'referenced as "@NAME".'
-  );
+/** Sent when a da_ops block did not parse. `{error}` is the parser's complaint. */
+const REPAIR =
+  'Your da_ops block could not be parsed:\n\n  {error}\n\n' +
+  'Resend the complete block with valid JSON. Remember: the envelope is ' +
+  '{"ops": [...]}, and multi-line strings belong in --davai:NAME-- payload blocks ' +
+  'referenced as "@NAME".';
+
+/**
+ * The full set. `placeholder`, where present, must survive an override: without it the
+ * results or the error would never reach the model, and the failure would be silent.
+ */
+export const PROMPT_SPECS = [
+  { key: 'preamble', env: 'DAVAI_PROMPT_PREAMBLE', text: PREAMBLE },
+  { key: 'protocol', env: 'DAVAI_PROMPT_PROTOCOL', text: PROTOCOL },
+  { key: 'opsResult', env: 'DAVAI_PROMPT_OPS_RESULT', text: OPS_RESULT, placeholder: '{results}' },
+  { key: 'nudge', env: 'DAVAI_PROMPT_NUDGE', text: NUDGE },
+  { key: 'repair', env: 'DAVAI_PROMPT_REPAIR', text: REPAIR, placeholder: '{error}' },
+];
+
+/** @type {Record<string, string>} */
+export const DEFAULT_PROMPTS = Object.fromEntries(PROMPT_SPECS.map((s) => [s.key, s.text]));
+
+/**
+ * Resolve every prompt against the environment.
+ *
+ * Each takes `DAVAI_PROMPT_<NAME>` inline, or `DAVAI_PROMPT_<NAME>_FILE` for a path —
+ * prompts are long and multi-line, which `.env` handles badly. Inline wins when both
+ * are set, the same way the real environment beats a file everywhere else in davai.
+ *
+ * @param {Record<string, string|undefined>} env
+ * @returns {{values: Record<string, string>, sources: Record<string, string>}}
+ */
+export function resolvePrompts(env = {}) {
+  const values = {};
+  const sources = {};
+
+  for (const spec of PROMPT_SPECS) {
+    const fileVar = `${spec.env}_FILE`;
+    const inline = env[spec.env];
+    const file = env[fileVar];
+    let text = spec.text;
+    let source = 'default';
+
+    if (inline) {
+      text = inline;
+      source = spec.env;
+    } else if (file) {
+      try {
+        text = fs.readFileSync(file, 'utf8');
+      } catch (err) {
+        throw new Error(`${fileVar}="${file}" could not be read: ${err.message}`, { cause: err });
+      }
+      source = `${fileVar}=${file}`;
+    }
+
+    if (source !== 'default') {
+      if (!text.trim()) {
+        throw new Error(`${source} is empty. Unset it to use the default ${spec.key} prompt.`);
+      }
+      if (spec.placeholder && !text.includes(spec.placeholder)) {
+        throw new Error(
+          `${source} must contain ${spec.placeholder}, or nothing davai substitutes ` +
+            `there would ever reach the model.`,
+        );
+      }
+    }
+
+    values[spec.key] = text;
+    sources[spec.key] = source;
+  }
+
+  return { values, sources };
+}
+
+/** Substitute without treating `$&` and friends in the value as replacement patterns. */
+function fill(template, placeholder, value) {
+  return template.replaceAll(placeholder, () => value);
+}
+
+/**
+ * Assemble the full system prompt. Order is deliberate: the stable parts come first
+ * so the cache prefix stays intact, with per-project grounding last.
+ *
+ * @param {{grounding: string, prompts?: Record<string, string>}} opts
+ */
+export function buildSystemPrompt({ grounding, prompts = DEFAULT_PROMPTS }) {
+  return [prompts.preamble, '', prompts.protocol, '', grounding].join('\n');
+}
+
+/** Wrap a rendered da_results block in the ops-result prompt. */
+export function opsResultPrompt(results, prompts = DEFAULT_PROMPTS) {
+  return fill(prompts.opsResult, '{results}', results);
+}
+
+/** @param {string} error the parser's complaint */
+export function repairPrompt(error, prompts = DEFAULT_PROMPTS) {
+  return fill(prompts.repair, '{error}', error);
 }

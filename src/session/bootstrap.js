@@ -52,7 +52,7 @@ export async function createSession(opts = {}) {
 
   const ledger = new Ledger({ limit: cfg.contextLimit, compactAt: cfg.compactAt });
   const grounding = buildGrounding({ sandbox, cfg });
-  ledger.setSystem(buildSystemPrompt({ grounding }));
+  ledger.setSystem(buildSystemPrompt({ grounding, prompts: cfg.prompts }));
 
   // After setSystem, so the replay budget accounts for the cached prefix.
   const resumed = prior ? restoreLedger(ledger, prior) : null;
