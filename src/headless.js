@@ -66,6 +66,11 @@ export async function runHeadless(input, opts = {}) {
 
   agent.on('artifact', (a) => emit({ type: 'artifact', n: a.n, lang: a.lang, lines: a.lines }));
 
+  agent.on('nudge', ({ attempt }) => {
+    emit({ type: 'nudge', attempt });
+    if (!opts.json) process.stderr.write(`  · no ops in that turn — asking it to continue\n`);
+  });
+
   agent.on('usage', (u) => emit({ type: 'usage', ...u }));
 
   agent.on('compact-done', (r) => {
@@ -84,10 +89,11 @@ export async function runHeadless(input, opts = {}) {
     if (!opts.json) process.stderr.write(`\nerror: ${e.message}\n`);
   });
 
-  // Shell approval in headless mode is policy, not a prompt: --yes allows,
+  // Shell approval in headless mode is policy, not a prompt: --yes/--yolo allows,
   // otherwise deny, because there is no human to ask.
+  const autoApprove = opts.yes || session.cfg.yolo;
   agent.on('approval-request', ({ op, respond }) => {
-    if (opts.yes) {
+    if (autoApprove) {
       emit({ type: 'shell-approved', cmd: op.cmd });
       if (!opts.json) process.stderr.write(`  $ ${op.cmd}\n`);
       respond({ allow: true });

@@ -209,6 +209,108 @@ describe('App rendering', () => {
   });
 });
 
+describe('yolo mode', () => {
+  const renderApp = () => {
+    const stdout = fakeStdout();
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin: fakeStdin(),
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    return { stdout, app };
+  };
+
+  it('auto-approves shell without showing the prompt', async () => {
+    session.cfg.yolo = true;
+    const { stdout, app } = renderApp();
+    await flush();
+
+    let decision = null;
+    session.agent.emit('approval-request', {
+      op: { op: 'shell', cmd: 'npm test' },
+      index: 0,
+      respond: (d) => {
+        decision = d;
+      },
+    });
+    await flush();
+
+    expect(decision).toEqual({ allow: true });
+    const out = stdout.frames.join('');
+    expect(out).toContain('auto-approved (yolo)');
+    expect(out).toContain('npm test');
+    expect(out).not.toContain('needs approval');
+    app.unmount();
+  });
+
+  it('flags yolo in the status bar', async () => {
+    session.cfg.yolo = true;
+    const { stdout, app } = renderApp();
+    await flush();
+    expect(stdout.frames.join('')).toContain('yolo');
+    app.unmount();
+  });
+
+  it('leaves the status bar alone when off', async () => {
+    const { stdout, app } = renderApp();
+    await flush();
+    expect(stdout.frames.join('')).not.toContain('yolo');
+    app.unmount();
+  });
+
+  it('still prompts when off', async () => {
+    const { stdout, app } = renderApp();
+    await flush();
+    let responded = false;
+    session.agent.emit('approval-request', {
+      op: { op: 'shell', cmd: 'rm -rf /' },
+      index: 0,
+      respond: () => {
+        responded = true;
+      },
+    });
+    await flush();
+    expect(responded).toBe(false);
+    expect(stdout.frames.join('')).toContain('needs approval');
+    app.unmount();
+  });
+
+  it('/yolo toggles the running session and is never persisted', async () => {
+    const { handleCommand } = await import('../src/ui/commands.js');
+    const { loadSettings, saveSettings } = await import('../src/config/settings.js');
+    const pushed = [];
+    const deps = {
+      session,
+      push: (e) => pushed.push(e),
+      setPane: () => {},
+      exit: () => {},
+      refresh: () => {},
+    };
+
+    await handleCommand('/yolo', deps);
+    expect(session.cfg.yolo).toBe(true);
+    expect(pushed.at(-1).message).toMatch(/yolo on/);
+
+    await handleCommand('/yolo', deps);
+    expect(session.cfg.yolo).toBe(false);
+
+    await handleCommand('/yolo on', deps);
+    expect(session.cfg.yolo).toBe(true);
+    await handleCommand('/yolo off', deps);
+    expect(session.cfg.yolo).toBe(false);
+
+    await handleCommand('/yolo maybe', deps);
+    expect(session.cfg.yolo).toBe(false);
+    expect(pushed.at(-1).message).toMatch(/takes on or off/);
+
+    // Persisted settings must never carry it forward into the next session.
+    session.cfg.yolo = true;
+    saveSettings(session.cfg.home, { ...session.cfg, yolo: true });
+    expect(loadSettings(session.cfg.home).yolo).toBeUndefined();
+  });
+});
+
 describe('context pane', () => {
   it('lists segments Pareto-ordered with a total', async () => {
     session.ledger.add({

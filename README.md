@@ -48,6 +48,7 @@ davai --print "add a test"         # plain text out, no TUI
 davai --json "add a test"          # newline-delimited JSON events
 davai --models                     # what the provider actually serves
 davai --sessions                   # recent sessions
+davai --yolo "run the test suite"  # shell commands without the approval prompt
 davai --resume                     # reopen the most recent session
 davai --resume 9ffcf35f            # reopen one by id, or any unique prefix
 davai --config                     # resolved configuration
@@ -64,6 +65,7 @@ davai --config                     # resolved configuration
 | `/image [path]` | attach an image (no path = clipboard, Windows) |
 | `/compact` | compact context now |
 | `/clear` | drop the conversation, keep the grounding |
+| `/yolo` | auto-approve shell commands for this session |
 | `esc` | cancel the running turn |
 | `ctrl+s` | shell mode |
 | `tab` | complete `@paths` and `/commands` |
@@ -112,6 +114,24 @@ file plus rename. A failure mid-apply replays the journal backwards.
 `shell` is the exception. It cannot be undone, so it is segregated: file ops commit
 first, then each shell command stops for human approval, one at a time. A denied or
 failed command kills the rest of the batch.
+
+#### yolo mode
+
+Approval is a hook, not a hard-coded prompt, so the front end decides the policy:
+
+```bash
+davai --yolo                  # this run, REPL or headless
+DAVAI_YOLO=true               # every run, in $DAVAI_HOME/.env
+/yolo                         # toggle inside a running session
+```
+
+Only the prompt goes away. The write jail, the read allowlist, `.daignore` and the
+shell timeout all still apply, and every auto-approved command is printed to the
+transcript and logged. The status bar shows a red `yolo` the whole time it is on.
+
+It is deliberately never written to `settings.json` and never restored by `--resume`:
+it lasts for one run or one toggle, so it cannot silently outlive the task it was
+turned on for. In headless mode `--yes` and `--yolo` mean the same thing.
 
 ### Boundaries
 
@@ -176,7 +196,7 @@ build tooling.
 ## Development
 
 ```bash
-npm test          # 109 tests: ops engine, sandbox, parser, context, resume, UI
+npm test          # 121 tests: ops engine, sandbox, parser, loop, context, resume, UI
 npm run test:watch
 npm run lint      # eslint, flat config in eslint.config.js
 ```

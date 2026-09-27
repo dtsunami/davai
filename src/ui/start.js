@@ -64,6 +64,9 @@ function banner(session) {
   );
   w(dim(`  write ${glyphs.arrow} ${sandbox.writeRoot}`));
   if (cfg.roDirs.length) w(dim(`  read  ${glyphs.arrow} + ${cfg.roDirs.join(', ')}`));
+  if (cfg.yolo) {
+    w(`\u001b[31m  ${glyphs.warn} yolo: shell commands run without approval\u001b[0m`);
+  }
   if (session.resumed) {
     const r = session.resumed;
     w(

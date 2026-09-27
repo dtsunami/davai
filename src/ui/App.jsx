@@ -102,9 +102,20 @@ export function App({ session, initialInput }) {
       push({ type: 'compact', ...r });
       setStatus(null);
     };
-    const onApproval = (req) => setApproval(req);
+    const onApproval = (req) => {
+      // session.cfg is read at call time, not captured: /yolo toggles mid-session and
+      // the next command must see the new value.
+      if (session.cfg.yolo) {
+        req.respond({ allow: true });
+        push({ type: 'approval', cmd: req.op.cmd, allowed: true, auto: true });
+        return;
+      }
+      setApproval(req);
+    };
     const onRepair = ({ error, attempt }) =>
       push({ type: 'warning', message: `malformed da_ops (repair ${attempt}): ${error}` });
+    const onNudge = ({ attempt }) =>
+      push({ type: 'notice', message: `no ops in that turn — asking it to continue (${attempt})` });
 
     agent.on('text', onText);
     agent.on('turn-start', onTurnStart);
@@ -121,12 +132,13 @@ export function App({ session, initialInput }) {
     agent.on('compact-done', onCompactDone);
     agent.on('approval-request', onApproval);
     agent.on('repair', onRepair);
+    agent.on('nudge', onNudge);
 
     return () => {
       agent.removeAllListeners();
       clearTimeout(frameRef.current);
     };
-  }, [agent, flushLive, push]);
+  }, [agent, flushLive, push, session]);
 
   const submit = useCallback(
     async (raw) => {
@@ -373,7 +385,8 @@ function HistoryItem({ item, width }) {
         <Box paddingX={1}>
           <Text color={item.allowed ? colors.ok : colors.warn}>
             {'  '}
-            {item.allowed ? glyphs.check : glyphs.cross} shell {item.allowed ? 'approved' : 'denied'}:{' '}
+            {item.allowed ? glyphs.check : glyphs.cross} shell{' '}
+            {item.allowed ? (item.auto ? 'auto-approved (yolo)' : 'approved') : 'denied'}:{' '}
             {item.edited || item.cmd}
           </Text>
         </Box>

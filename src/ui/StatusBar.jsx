@@ -13,6 +13,12 @@ export function StatusBar({ cfg, ledger, stats, width, exitArmed }) {
     <Box paddingX={1} marginTop={1} flexDirection="column">
       <Box>
         <Text color={colors.dim}>{dir}</Text>
+        {cfg.yolo ? (
+          <>
+            <Text color={colors.dim}> {glyphs.bullet} </Text>
+            <Text color={colors.err}>yolo</Text>
+          </>
+        ) : null}
         <Text color={colors.dim}> {glyphs.bullet} </Text>
         <Text color={colors.accent}>{cfg.model.id}</Text>
         {cfg.model.effort ? <Text color={colors.dim}>/{cfg.effort}</Text> : null}

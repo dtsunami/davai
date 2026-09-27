@@ -19,6 +19,7 @@ const HELP = `Commands
   /sessions           recent sessions
   /config             resolved configuration
   /clear              drop conversation context, keep grounding
+  /yolo [on|off]      auto-approve shell commands for this session
   /help               this text
   /exit               quit
 
@@ -115,6 +116,28 @@ export async function handleCommand(text, deps) {
       return { handled: true };
     }
 
+    case 'yolo': {
+      const want = arg ? /^(on|1|true|yes)$/i.test(arg) : !cfg.yolo;
+      if (arg && !/^(on|off|1|0|true|false|yes|no)$/i.test(arg)) {
+        push({ type: 'warning', message: `/yolo takes on or off (got "${arg}")` });
+        return { handled: true };
+      }
+      cfg.yolo = want;
+      log.event('yolo', { enabled: want });
+      push(
+        want
+          ? {
+              type: 'warning',
+              message:
+                'yolo on — shell commands run without asking. The write jail and ' +
+                'read allowlist still apply; only the prompt is gone.',
+            }
+          : { type: 'notice', message: 'yolo off — shell commands need approval again' },
+      );
+      refresh();
+      return { handled: true };
+    }
+
     case 'clear': {
       const before = ledger.tokens;
       ledger.segments = ledger.segments.filter((s) => s.type === 'grounding');
@@ -185,6 +208,7 @@ export async function handleCommand(text, deps) {
         `  effort         ${cfg.effort}`,
         `  compact at     ${Math.round(cfg.compactAt * 100)}%`,
         `  shell timeout  ${cfg.shellTimeout / 1000}s`,
+        `  yolo           ${cfg.yolo ? 'on — shell auto-approved' : 'off'}`,
         `  DAVAI_HOME     ${cfg.home}`,
         `  working dir    ${cfg.cwd}`,
         `  read-only dirs ${cfg.roDirs.length ? cfg.roDirs.join(', ') : '(none)'}`,

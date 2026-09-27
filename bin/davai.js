@@ -22,6 +22,7 @@ OPTIONS
   -p, --print            one-shot, stream plain text to stdout (no TUI)
       --json             one-shot, emit newline-delimited JSON events
   -y, --yes              auto-approve shell commands (headless only)
+      --yolo             auto-approve shell commands in the REPL too (/yolo toggles)
   -m, --model <id>       override the model for this run
       --provider <name>  anthropic | openai | gemini | grok
       --effort <level>   low | medium | high | xhigh | max
@@ -62,6 +63,12 @@ function parseArgs(argv) {
         break;
       case '-y':
       case '--yes':
+        out.yes = true;
+        break;
+      case '--yolo':
+        // Same intent in both modes, so it implies --yes rather than being a second
+        // thing to remember when the request is piped in.
+        out.overrides.DAVAI_YOLO = 'true';
         out.yes = true;
         break;
       case '-m':

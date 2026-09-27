@@ -1,6 +1,8 @@
 /**
- * The shell op. Not reversible, so it never joins the rollback set and always
- * pauses for human approval (req 8).
+ * The shell op. Not reversible, so it never joins the rollback set and always goes
+ * through the approval hook (req 8). Whether that hook asks a human or answers on
+ * policy is the front end's business: the REPL prompts unless yolo is on, headless
+ * allows with --yes/--yolo and otherwise denies.
  */
 import { spawn } from 'node:child_process';
 

@@ -153,6 +153,9 @@ export function loadConfig(opts = {}) {
     contextLimit,
     compactAt,
     thinkingVisible: bool(merged.DAVAI_THINKING, false),
+    // Auto-approve shell ops. Deliberately not a persisted setting (see settings.js):
+    // it lives for one run, or for one `/yolo` toggle, and never outlives the session.
+    yolo: bool(merged.DAVAI_YOLO, false),
     keys,
     envFiles,
   };

@@ -5,6 +5,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+// `yolo` is absent on purpose. Auto-approving shell commands is a per-run decision;
+// a persisted one would silently outlive the task it was turned on for.
 const FIELDS = [
   'provider',
   'model',

@@ -16,6 +16,14 @@ import { costOf } from '../config/models.js';
 
 const MAX_REPAIRS = 2;
 const MAX_STEPS = 60;
+const MAX_NUDGES = 2;
+
+/**
+ * First-person intent phrasing. A turn that ends on one of these and carries no ops is
+ * an announcement, not an answer.
+ */
+const INTENT =
+  /\b(?:i'?ll|i will|i'?m going to|i am going to|let me|let'?s|first,? i|next,? i|now i'?ll)\b/i;
 
 /**
  * Events emitted:
@@ -56,6 +64,7 @@ export class Agent extends EventEmitter {
       }
 
       let repairs = 0;
+      let nudges = 0;
 
       for (let step = 0; step < MAX_STEPS; step++) {
         if (this.controller.signal.aborted) {
@@ -111,16 +120,24 @@ export class Agent extends EventEmitter {
         repairs = 0;
 
         if (!ops) {
-          // No ops. Either the work is done, or the model drifted into chatting.
-          if (looksConclusive(prose)) {
+          // No ops: either the work is done, or the model announced an intention and
+          // ended the turn without acting on it. The second case is a stall — some
+          // models expect a tool-call round trip and stop after saying what they mean
+          // to do — and treating it as a conclusion silently drops the request.
+          if (!stalled(prose)) {
             this.emit('done', { prose });
             return;
           }
-          if (step > 0 && !prose.trim()) {
-            this.emit('nudge');
+          if (nudges++ < MAX_NUDGES) {
+            this.emit('nudge', { attempt: nudges, prose });
             this.ledger.add({ type: 'op-result', label: 'nudge', role: 'user', text: NUDGE });
             continue;
           }
+          // Reminding it is not working. Stop rather than spend the rest of MAX_STEPS
+          // watching it promise.
+          this.emit('warning', {
+            message: `The model said it would act but emitted no ops after ${MAX_NUDGES} reminders. Stopping.`,
+          });
           this.emit('done', { prose });
           return;
         }
@@ -130,6 +147,7 @@ export class Agent extends EventEmitter {
           this.emit('cancelled');
           return;
         }
+        nudges = 0; // real progress: the next stall gets a fresh budget
       }
 
       this.emit('error', {
@@ -299,6 +317,21 @@ function firstLine(text) {
  * A turn with prose and no ops is usually a conclusion. The exception is a turn that
  * trails off mid-thought, which the nudge catches.
  */
-function looksConclusive(prose) {
-  return Boolean(prose && prose.trim().length > 0);
+/**
+ * Did a turn with no ops stall rather than conclude?
+ *
+ * The last sentence decides. A stall ends on the promise ("I'll read the config and
+ * fix the timeout"), while a report of finished work ends on a fact, even when it
+ * opened with "I'll explain what changed". Splitting on sentence enders is crude, but
+ * the alternative — asking a second model whether the turn concluded — costs a call
+ * per turn to catch a case a reminder already fixes.
+ *
+ * Erring either way is cheap: a false positive spends one extra turn, and a miss
+ * leaves today's behaviour, where the request is silently dropped.
+ */
+function stalled(prose) {
+  const text = (prose || '').trim();
+  if (!text) return true;
+  const sentences = text.split(/(?<=[.!?])\s+/).filter((s) => s.trim());
+  return INTENT.test(sentences.at(-1) || text);
 }

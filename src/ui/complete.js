@@ -14,6 +14,7 @@ const COMMANDS = [
   '/config',
   '/compact',
   '/clear',
+  '/yolo',
   '/exit',
 ];
 
