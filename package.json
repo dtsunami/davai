@@ -1,0 +1,38 @@
+{
+  "name": "davai",
+  "version": "0.1.0",
+  "description": "Agentic CLI REPL for engineering work. Multi-provider, da_ops protocol, no tool-calling.",
+  "type": "module",
+  "bin": {
+    "davai": "./bin/davai.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src test",
+    "start": "node ./bin/davai.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.0",
+    "@google/genai": "^1.30.0",
+    "cli-highlight": "^2.1.11",
+    "dotenv": "^17.2.3",
+    "esbuild": "^0.28.2",
+    "ink": "^6.4.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "openai": "^6.10.0",
+    "picomatch": "^4.0.3",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "protobufjs@7.6.6": true
+  }
+}

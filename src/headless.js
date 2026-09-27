@@ -1,0 +1,196 @@
+/**
+ * Headless mode: --print and --json. Same loop, no Ink.
+ *
+ * This is what makes the harness CI-testable and pipeable:
+ *   echo "fix the types" | davai --print
+ */
+import { createSession } from './session/bootstrap.js';
+
+/**
+ * @param {string} input
+ * @param {{json?: boolean, yes?: boolean, cwd?: string, overrides?: object}} opts
+ * @returns {Promise<number>} exit code
+ */
+export async function runHeadless(input, opts = {}) {
+  const session = await createSession({ cwd: opts.cwd, overrides: opts.overrides });
+  const { agent, log } = session;
+
+  const emit = (obj) => {
+    if (opts.json) process.stdout.write(JSON.stringify(obj) + '\n');
+  };
+
+  let failed = false;
+
+  if (!opts.json) {
+    // Stream prose, but swallow da_ops blocks — piping the protocol into stdout is
+    // noise. The ops themselves are reported separately, on stderr.
+    const filter = createOpsFilter((s) => process.stdout.write(s));
+    agent.on('text', filter.write);
+    agent.on('turn-end', () => {
+      filter.reset();
+      process.stdout.write('\n');
+    });
+  }
+
+  agent.on('ops-parsed', (ops) => {
+    emit({ type: 'ops', ops });
+    if (!opts.json) {
+      for (const op of ops) process.stderr.write(`  · ${describeOp(op)}\n`);
+    }
+  });
+
+  agent.on('ops-result', ({ outcome }) => {
+    emit({ type: 'ops-result', status: outcome.status, errors: outcome.errors });
+    if (!opts.json && outcome.status !== 'ok') {
+      for (const e of outcome.errors) {
+        process.stderr.write(`  ! [${e.index}] ${e.op}: ${e.message}\n`);
+      }
+    }
+  });
+
+  agent.on('artifact', (a) => emit({ type: 'artifact', n: a.n, lang: a.lang, lines: a.lines }));
+
+  agent.on('usage', (u) => emit({ type: 'usage', ...u }));
+
+  agent.on('compact-done', (r) => {
+    emit({ type: 'compact', ...r });
+    if (!opts.json) process.stderr.write(`  · auto-compacted, freed ~${r.freed} tokens\n`);
+  });
+
+  agent.on('warning', (w) => {
+    emit({ type: 'warning', ...w });
+    if (!opts.json) process.stderr.write(`  ! ${w.message}\n`);
+  });
+
+  agent.on('error', (e) => {
+    failed = true;
+    emit({ type: 'error', ...e });
+    if (!opts.json) process.stderr.write(`\nerror: ${e.message}\n`);
+  });
+
+  // Shell approval in headless mode is policy, not a prompt: --yes allows,
+  // otherwise deny, because there is no human to ask.
+  agent.on('approval-request', ({ op, respond }) => {
+    if (opts.yes) {
+      emit({ type: 'shell-approved', cmd: op.cmd });
+      if (!opts.json) process.stderr.write(`  $ ${op.cmd}\n`);
+      respond({ allow: true });
+    } else {
+      emit({ type: 'shell-denied', cmd: op.cmd });
+      if (!opts.json) {
+        process.stderr.write(
+          `  ! shell denied (no TTY to approve): ${op.cmd}\n` +
+            `    re-run with --yes to allow shell commands\n`,
+        );
+      }
+      respond({ allow: false, reason: 'headless mode without --yes' });
+    }
+  });
+
+  try {
+    await agent.run(input);
+  } finally {
+    log.close(failed ? 'error' : 'done');
+  }
+
+  emit({ type: 'done', stats: agent.stats, session: log.id });
+  if (!opts.json) {
+    const cost = agent.stats.costUnknown
+      ? 'cost n/a'
+      : `$${agent.stats.cost.toFixed(4)}`;
+    process.stderr.write(
+      `\n[${agent.stats.turns} turns · ${agent.stats.ops} ops · ${cost} · session ${log.id}]\n`,
+    );
+  }
+  return failed ? 1 : 0;
+}
+
+/**
+ * Line-buffered filter that drops ```da_ops fences from a token stream while
+ * letting everything else through as it arrives.
+ */
+export function createOpsFilter(out) {
+  let pending = '';
+  let inOps = false;
+
+  const handleLine = (line) => {
+    if (!inOps) {
+      if (/^\s*```\s*da_ops\s*$/i.test(line)) {
+        inOps = true;
+        return;
+      }
+      out(line + '\n');
+    } else if (/^\s*```\s*$/.test(line)) {
+      inOps = false;
+    }
+  };
+
+  return {
+    write(delta) {
+      pending += delta;
+      let nl;
+      while ((nl = pending.indexOf('\n')) !== -1) {
+        handleLine(pending.slice(0, nl));
+        pending = pending.slice(nl + 1);
+      }
+    },
+    reset() {
+      if (pending && !inOps) out(pending);
+      pending = '';
+      inOps = false;
+    },
+  };
+}
+
+function describeOp(op) {
+  switch (op.op) {
+    case 'shell':
+      return `shell: ${op.cmd}`;
+    case 'move':
+      return `move: ${op.from} -> ${op.to}`;
+    case 'grep':
+    case 'glob':
+      return `${op.op}: ${op.pattern} in ${op.path}`;
+    default:
+      return `${op.op}: ${op.path}`;
+  }
+}
+
+/**
+ * Read piped stdin, if any.
+ *
+ * Two traps here. A TTY never ends, so we skip it outright. And a pipe held open by
+ * a parent that never writes (how most non-interactive shells invoke a child) also
+ * never ends — so if nothing arrives promptly we give up rather than hang forever.
+ * Once bytes start flowing we wait for real EOF, so slow producers still work.
+ */
+export function readStdin({ idleMs = 250 } = {}) {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    if (stdin.isTTY) return resolve('');
+
+    let data = '';
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stdin.removeAllListeners('data');
+      stdin.removeAllListeners('end');
+      stdin.removeAllListeners('error');
+      stdin.pause();
+      resolve(data.trim());
+    };
+
+    // Armed only until the first byte; after that we wait for a genuine end.
+    const timer = setTimeout(done, idleMs);
+
+    stdin.setEncoding('utf8');
+    stdin.on('data', (c) => {
+      clearTimeout(timer);
+      data += c;
+    });
+    stdin.on('end', done);
+    stdin.on('error', done);
+  });
+}

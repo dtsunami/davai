@@ -1,0 +1,6 @@
+# Files davai should not read, list, grep, glob or write.
+# Defaults (node_modules, .git, .env, dist, build, caches) are always applied;
+# this file adds to them.
+
+.davai
+*.log

@@ -1,0 +1,62 @@
+/**
+ * Runtime-mutable settings, persisted to $DAVAI_HOME/settings.json.
+ * These are the knobs the /model pane edits; they overlay the .env config.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+
+const FIELDS = [
+  'provider',
+  'model',
+  'effort',
+  'maxTokens',
+  'temperature',
+  'thinkingVisible',
+  'compactAt',
+];
+
+export function settingsPath(home) {
+  return path.join(home, 'settings.json');
+}
+
+/** @returns {Record<string, any>} */
+export function loadSettings(home) {
+  try {
+    const raw = fs.readFileSync(settingsPath(home), 'utf8');
+    const parsed = JSON.parse(raw);
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([k]) => FIELDS.includes(k)),
+    );
+  } catch {
+    return {};
+  }
+}
+
+export function saveSettings(home, settings) {
+  const clean = Object.fromEntries(
+    Object.entries(settings).filter(
+      ([k, v]) => FIELDS.includes(k) && v !== undefined,
+    ),
+  );
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(settingsPath(home), JSON.stringify(clean, null, 2) + '\n');
+  return clean;
+}
+
+/**
+ * Translate persisted settings into the env-shaped overrides loadConfig expects,
+ * so there is exactly one code path that validates configuration.
+ */
+export function settingsToOverrides(settings) {
+  const o = {};
+  if (settings.provider) o.DAVAI_PROVIDER = settings.provider;
+  if (settings.model) o.DAVAI_MODEL = settings.model;
+  if (settings.effort) o.DAVAI_EFFORT = settings.effort;
+  if (settings.maxTokens != null) o.DAVAI_MAX_TOKENS = String(settings.maxTokens);
+  if (settings.temperature != null)
+    o.DAVAI_TEMPERATURE = String(settings.temperature);
+  if (settings.compactAt != null) o.DAVAI_COMPACT_AT = String(settings.compactAt);
+  if (settings.thinkingVisible != null)
+    o.DAVAI_THINKING = settings.thinkingVisible ? 'true' : 'false';
+  return o;
+}
