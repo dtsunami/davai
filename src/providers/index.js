@@ -3,6 +3,7 @@
  */
 import { createAnthropic } from './anthropic.js';
 import { createOpenAI } from './openai.js';
+import { createOpenAIResponses } from './openai-responses.js';
 import { createGemini } from './gemini.js';
 
 const GROK_BASE_URL = 'https://api.x.ai/v1';
@@ -26,7 +27,9 @@ export function createProvider(cfg, override = {}) {
     case 'anthropic':
       return createAnthropic(common);
     case 'openai':
-      return createOpenAI(common);
+      // Responses is the only OpenAI surface that streams reasoning summaries, so it is
+      // the default; DAVAI_OPENAI_API=chat is the way back to Chat Completions.
+      return cfg.openaiApi === 'chat' ? createOpenAI(common) : createOpenAIResponses(common);
     case 'grok':
       return createOpenAI({ ...common, baseURL: GROK_BASE_URL, name: 'grok' });
     case 'gemini':

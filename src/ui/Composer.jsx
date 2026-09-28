@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { colors, glyphs } from './theme.js';
 import { completeInput } from './complete.js';
+import { looksLikePaste } from '../context/pastes.js';
 
 /**
  * Input composer: multiline, history, @path completion, bracketed paste (req 14),
@@ -14,7 +15,8 @@ export function Composer({ onSubmit, session, busy }) {
   const { pastes } = session;
   const [value, setValue] = useState('');
   const [cursor, setCursor] = useState(0);
-  const [history, setHistory] = useState([]);
+  // Seeded from $DAVAI_HOME/history.jsonl, so the up arrow reaches past this session.
+  const [history, setHistory] = useState(() => session.history?.all() ?? []);
   const [histIndex, setHistIndex] = useState(-1);
   const [shellMode, setShellMode] = useState(false);
   const [hint, setHint] = useState('');
@@ -41,15 +43,17 @@ export function Composer({ onSubmit, session, busy }) {
   useInput(
     (input, key) => {
       // --- bracketed paste ---
-      // A burst arriving as one chunk with newlines is a paste, not typing.
-      if (input && input.length > 1 && input.includes('\n')) {
+      // A burst arriving as one chunk with line breaks is a paste, not typing.
+      if (looksLikePaste(input)) {
         const captured = pastes.capture(input);
         if (captured) {
           insert(captured.placeholder);
           setHint(`paste#${captured.n} stored — it expands when you submit`);
           return;
         }
-        insert(input.replace(/\n/g, ' '));
+        // One line with a trailing break: paste the text, drop the break, and do not
+        // submit — the operator pasted, they did not press Enter.
+        insert(input.replace(/[\r\n]+/g, ' ').trimEnd());
         return;
       }
 
@@ -124,11 +128,13 @@ export function Composer({ onSubmit, session, busy }) {
 
       if (input) insert(input);
     },
-    { isActive: !busy },
+    // Active while busy too: that is what makes steering possible. esc and ctrl+c are
+    // handled by App's own handler, which runs regardless.
+    { isActive: true },
   );
 
   const prompt = shellMode ? '$' : glyphs.prompt;
-  const promptColor = shellMode ? colors.warn : colors.accent;
+  const promptColor = shellMode ? colors.warn : busy ? colors.warn : colors.accent;
   const display = value.length ? value : '';
 
   return (
@@ -137,9 +143,14 @@ export function Composer({ onSubmit, session, busy }) {
         <Text color={promptColor} bold>
           {prompt}{' '}
         </Text>
-        <Text>{renderWithCursor(display, cursor, busy)}</Text>
+        {/* The cursor stays hidden during a run until the operator starts typing a
+            steer, so a stray block does not sit under the streaming answer. */}
+        <Text>{renderWithCursor(display, cursor, busy && !value)}</Text>
       </Box>
       {hint ? <Text color={colors.dim}>  {hint}</Text> : null}
+      {busy && value.trim() && !shellMode ? (
+        <Text color={colors.dim}>  enter steers the run in progress</Text>
+      ) : null}
       {shellMode ? (
         <Text color={colors.dim}>  shell mode — output is added to context (ctrl+s to exit)</Text>
       ) : null}
@@ -147,8 +158,8 @@ export function Composer({ onSubmit, session, busy }) {
   );
 }
 
-function renderWithCursor(value, cursor, busy) {
-  if (busy) return value;
+function renderWithCursor(value, cursor, hidden) {
+  if (hidden) return value;
   const before = value.slice(0, cursor);
   const at = value[cursor] ?? ' ';
   const after = value.slice(cursor + 1);

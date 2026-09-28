@@ -47,20 +47,31 @@ export function scanBlocks(text) {
     }
     const [, indent, fence, lang] = m;
     const closer = new RegExp(`^[ \\t]*${fence[0]}{${fence.length},}[ \\t]*$`);
+    const isOps = lang.toLowerCase() === 'da_ops';
     const start = i;
     const body = [];
     i++;
     let closed = false;
+    // Payload blocks are verbatim by definition, so a ``` inside one is content, not
+    // the end of the da_ops block. Without this, writing any file that itself contains
+    // a fenced code block (a README, this very protocol doc) truncates the envelope
+    // mid-JSON and the batch dies with a parse error the model cannot diagnose.
+    let inPayload = false;
     while (i < lines.length) {
-      if (closer.test(lines[i])) {
+      const line = lines[i].startsWith(indent) ? lines[i].slice(indent.length) : lines[i];
+      if (isOps) {
+        if (!inPayload && PAYLOAD_OPEN.test(line)) inPayload = true;
+        else if (inPayload && PAYLOAD_CLOSE.test(line)) inPayload = false;
+      }
+      if (!inPayload && closer.test(lines[i])) {
         closed = true;
         i++;
         break;
       }
-      body.push(lines[i].startsWith(indent) ? lines[i].slice(indent.length) : lines[i]);
+      body.push(line);
       i++;
     }
-    const kind = lang.toLowerCase() === 'da_ops' ? 'da_ops' : 'artifact';
+    const kind = isOps ? 'da_ops' : 'artifact';
     blocks.push({
       kind,
       lang: lang || 'text',

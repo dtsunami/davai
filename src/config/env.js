@@ -112,6 +112,11 @@ export function loadConfig(opts = {}) {
     );
   }
 
+  const openaiApi = (merged.DAVAI_OPENAI_API || 'responses').trim().toLowerCase();
+  if (!['responses', 'chat'].includes(openaiApi)) {
+    throw new Error(`DAVAI_OPENAI_API="${openaiApi}" is not valid. Expected responses or chat.`);
+  }
+
   const compactAt = num(merged.DAVAI_COMPACT_AT, 0.75);
   if (compactAt <= 0 || compactAt >= 1) {
     throw new Error(
@@ -158,6 +163,9 @@ export function loadConfig(opts = {}) {
     contextLimit,
     compactAt,
     thinkingVisible: bool(merged.DAVAI_THINKING, false),
+    // Turn a half-wired event into a loud failure instead of a counter nobody reads.
+    strictEvents: bool(merged.DAVAI_STRICT_EVENTS, false),
+    openaiApi,
     prompts,
     promptSources,
     // Auto-approve shell ops. Deliberately not a persisted setting (see settings.js):

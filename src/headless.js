@@ -35,6 +35,9 @@ export async function runHeadless(input, opts = {}) {
     }
   }
 
+  // A one-shot request is still a prompt worth replaying later.
+  session.history?.add(input);
+
   let failed = false;
 
   if (!opts.json) {
@@ -65,6 +68,19 @@ export async function runHeadless(input, opts = {}) {
   });
 
   agent.on('artifact', (a) => emit({ type: 'artifact', n: a.n, lang: a.lang, lines: a.lines }));
+
+  // Structured consumers can follow the reasoning; plain --print keeps stdout to the
+  // answer, which is what a pipe is for.
+  agent.on('thinking', (delta) => emit({ type: 'thinking', delta }));
+
+  agent.on('retry', ({ attempt, of, waitMs, message }) => {
+    emit({ type: 'retry', attempt, of, waitMs, message });
+    if (!opts.json) {
+      process.stderr.write(
+        `  ! ${message} — retrying in ${Math.round(waitMs / 1000)}s (${attempt}/${of})\n`,
+      );
+    }
+  });
 
   agent.on('nudge', ({ attempt }) => {
     emit({ type: 'nudge', attempt });
@@ -112,7 +128,16 @@ export async function runHeadless(input, opts = {}) {
   try {
     await agent.run(input);
   } finally {
-    log.close(failed ? 'error' : 'done');
+    const pending = agent.pendingEvents();
+  if (pending.length) {
+    emit({ type: 'pending-events', events: pending });
+    if (!opts.json) {
+      const list = pending.map((p) => `${p.name} ×${p.count}`).join(', ');
+      process.stderr.write(`  ! emitted with no listener: ${list}\n`);
+    }
+  }
+
+  log.close(failed ? 'error' : 'done');
   }
 
   emit({ type: 'done', stats: agent.stats, session: log.id });
@@ -181,12 +206,24 @@ function describeOp(op) {
 /**
  * Read piped stdin, if any.
  *
- * Two traps here. A TTY never ends, so we skip it outright. And a pipe held open by
- * a parent that never writes (how most non-interactive shells invoke a child) also
- * never ends — so if nothing arrives promptly we give up rather than hang forever.
- * Once bytes start flowing we wait for real EOF, so slow producers still work.
+ * Two traps. A TTY never ends, so we skip it outright. And a pipe held open by a parent
+ * that never writes (how most non-interactive shells invoke a child) also never ends, so
+ * something has to stop us waiting forever.
+ *
+ * The grace period only covers the wait for the *first* byte, and that is the trap in the
+ * trap: `slow-command | davai` emits nothing for longer than the window, so davai read
+ * empty and exited with "nothing to do" while the producer was still starting up. So the
+ * grace period applies only when a prompt was already supplied on the command line and
+ * stdin is optional extra. When stdin is the only possible source of input, we wait for
+ * the producer — bounded, so a dead pipe cannot hang a machine, but long enough that a
+ * slow one is never cut off. A hang you can ctrl+C beats input silently dropped.
+ *
+ * One narrow case is left: `slow-command | davai "a prompt"`, where both sources are used
+ * and the pipe is slower than the grace period, still loses the piped half. It cannot be
+ * fixed by waiting, because a prompt in argv is also what makes a never-writing inherited
+ * pipe survivable — and that is the far more common shape.
  */
-export function readStdin({ idleMs = 250 } = {}) {
+export function readStdin({ idleMs = 250, required = false, maxWaitMs = 5 * 60_000 } = {}) {
   return new Promise((resolve) => {
     const stdin = process.stdin;
     if (stdin.isTTY) return resolve('');
@@ -205,7 +242,7 @@ export function readStdin({ idleMs = 250 } = {}) {
     };
 
     // Armed only until the first byte; after that we wait for a genuine end.
-    const timer = setTimeout(done, idleMs);
+    const timer = setTimeout(done, required ? maxWaitMs : idleMs);
 
     stdin.setEncoding('utf8');
     stdin.on('data', (c) => {

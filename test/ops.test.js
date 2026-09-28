@@ -143,6 +143,83 @@ describe('write', () => {
   });
 });
 
+describe('replace across line endings', () => {
+  const CRLF = '| Thu 1 | Oat jar | Butter paneer | Microwave. Fridge rice is done after\r\n this. |\r\n| Fri 2 | Oat jar | Thawed paneer | Pull the box to the\r\n fridge tonight |\r\n';
+
+  beforeEach(() => {
+    fs.writeFileSync(path.join(root, 'crlf.md'), CRLF);
+  });
+
+  it('matches a multi-line old that quotes CRLF text with plain newlines', async () => {
+    // The real failure: a model reads a Windows file and sends back \n, because the CRs
+    // were never visible to it.
+    const out = await run([
+      {
+        op: 'replace',
+        path: 'crlf.md',
+        old: 'Microwave. Fridge rice is done after\n this. |',
+        new: 'Microwave. Rice finished.\n Buy more. |',
+      },
+    ]);
+    expect(out.status).toBe('ok');
+    expect(read('crlf.md')).toContain('Rice finished.');
+  });
+
+  it('keeps the file CRLF rather than leaving an LF island', async () => {
+    await run([
+      {
+        op: 'replace',
+        path: 'crlf.md',
+        old: 'Microwave. Fridge rice is done after\n this. |',
+        new: 'Line one.\n Line two. |',
+      },
+    ]);
+    const after = read('crlf.md');
+    expect(after).toContain('Line one.\r\n Line two. |');
+    expect(after).not.toMatch(/[^\r]\n Line two/);
+  });
+
+  it('still replaces both rows in one batch', async () => {
+    const out = await run([
+      { op: 'replace', path: 'crlf.md', old: 'Butter paneer', new: 'Dal' },
+      {
+        op: 'replace',
+        path: 'crlf.md',
+        old: 'Pull the box to the\n fridge tonight',
+        new: 'Thaw overnight',
+      },
+    ]);
+    expect(out.status).toBe('ok');
+    expect(read('crlf.md')).toContain('Dal');
+    expect(read('crlf.md')).toContain('Thaw overnight');
+  });
+
+  it('matches an LF file when the model sends CRLF', async () => {
+    fs.writeFileSync(path.join(root, 'lf.md'), 'alpha\nbeta\ngamma\n');
+    const out = await run([
+      { op: 'replace', path: 'lf.md', old: 'alpha\r\nbeta', new: 'one\ntwo' },
+    ]);
+    expect(out.status).toBe('ok');
+    expect(read('lf.md')).toBe('one\ntwo\ngamma\n');
+  });
+
+  it('still reports genuinely absent text', async () => {
+    const out = await run([
+      { op: 'replace', path: 'crlf.md', old: 'nowhere\n to be found', new: 'x' },
+    ]);
+    expect(out.status).toBe('plan-failed');
+    expect(out.errors[0].message).toMatch(/not found/);
+  });
+
+  it('does not treat $& in the replacement as a pattern', async () => {
+    const out = await run([
+      { op: 'replace', path: 'crlf.md', old: 'Oat jar', new: 'cost: $& and $1', all: true },
+    ]);
+    expect(out.status).toBe('ok');
+    expect(read('crlf.md')).toContain('cost: $& and $1');
+  });
+});
+
 describe('replace', () => {
   it('replaces a unique occurrence', async () => {
     const out = await run([{ op: 'replace', path: 'a.js', old: 'const b = 2;', new: 'const b = 3;' }]);

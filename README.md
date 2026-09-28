@@ -66,6 +66,10 @@ davai --config                     # resolved configuration
 | `/compact` | compact context now |
 | `/clear` | drop the conversation, keep the grounding |
 | `/yolo` | auto-approve shell commands for this session |
+| `/events` | harness events emitted vs retired this session |
+| `/history [n]` | recent prompts, across sessions |
+| `/replay <n>` | run a prompt from `/history` again |
+| type while it works | steer the run — applied at the next turn, not a new request |
 | `esc` | cancel the running turn |
 | `ctrl+s` | shell mode |
 | `tab` | complete `@paths` and `/commands` |
@@ -110,6 +114,29 @@ whether `old` matches exactly once, whether two ops conflict — and touches not
 If anything fails, nothing is applied and the model is told which op and why.
 **Apply** then snapshots each file, journals the intent, and writes through a temp
 file plus rename. A failure mid-apply replays the journal backwards.
+
+### Steering
+
+The composer stays live while a run is in flight. Anything you type is queued as a
+*steer* and folded into context at the next step boundary, labelled so the model treats
+it as superseding the earlier instruction rather than as a follow-up request. A steer
+that lands while the model is wrapping up keeps the loop going instead of being answered
+on your next prompt.
+
+It deliberately does not interrupt the request in flight: aborting mid-stream throws away
+tokens already paid for, and the model cannot act on a correction until it is between
+turns anyway. Use `esc` when you want it to stop now. Slash commands still run
+immediately while busy — `/context` mid-run is the point of them.
+
+The spinner carries a meter while it works:
+
+```
+⠋ thinking… 12.4s · 1.8k chars · 640 thought · 2 ops (esc to cancel, type to steer)
+```
+
+Elapsed API time, characters streamed, reasoning characters counted separately (they are
+billed and streamed but never appear in the answer), and ops run — all for the request in
+flight, not the session.
 
 `shell` is the exception. It cannot be undone, so it is segregated: file ops commit
 first, then each shell command stops for human approval, one at a time. A denied or
@@ -161,6 +188,12 @@ snaps/            pre-change file snapshots
 
 API keys are redacted on the way in. Sessions are pruned by age and count at startup.
 
+Prompts themselves are kept separately, in `$DAVAI_HOME/history.jsonl`: the up arrow
+reaches across sessions, `/history` lists them with a number, and `/replay <n>` runs
+one again (`-1` being the most recent). Only prompts are recorded — slash commands and
+`sh` lines operate the tool rather than asking it anything. The file is capped at 500
+entries and safe to delete.
+
 `davai --resume [id]` rebuilds the ledger from a transcript — the events already on disk
 *are* the resume format, so there is no second thing to keep in sync. With no id it takes
 the most recent session; an id may be any unique prefix. Resume defaults to the working
@@ -178,14 +211,34 @@ normal policy.
 | Provider | Key | Notes |
 |---|---|---|
 | anthropic | `ANTHROPIC_API_KEY` | adaptive thinking, effort, prefix caching, exact token counts |
-| openai | `OPENAI_API_KEY` | |
-| gemini | `GEMINI_API_KEY` | |
-| grok | `XAI_API_KEY` | OpenAI-compatible |
+| openai | `OPENAI_API_KEY` | Responses API, reasoning summaries, effort, cached input |
+| gemini | `GEMINI_API_KEY` | thought summaries, cached input |
+| grok | `XAI_API_KEY` | Chat Completions; no reasoning summaries on grok-4 |
 
 davai ships a small table of model metadata for pricing and defaults, but it is a
 seed, not an authority — a hardcoded model list is wrong the moment a provider ships
 something new. An unrecognized model id is assumed real and its limits are fetched
 from the provider. `davai --models` lists what is actually available.
+
+### Reasoning
+
+`DAVAI_THINKING=true` shows the model's reasoning in a panel above the answer while it
+streams. The models reason either way; the flag only decides whether you get to watch.
+What each provider can actually send back differs:
+
+- **Anthropic** streams summarized thinking, requested via `thinking.display`.
+- **OpenAI** streams reasoning summaries, which only the Responses API can return —
+  so that is the default adapter. `DAVAI_OPENAI_API=chat` falls back to Chat
+  Completions and loses them. Your organisation may need to be verified with OpenAI
+  before summaries arrive at all; nothing breaks if they don't.
+- **Gemini** returns thought parts only when asked (`thinkingConfig.includeThoughts`),
+  though it bills `thoughtsTokenCount` regardless.
+- **Grok** exposes nothing on grok-4. `reasoning_content` is handled for xAI's smaller
+  reasoning models, but there is no equivalent of a summary stream. If you want visible
+  rationale there, ask for it in the preamble — see [Prompts](#prompts).
+
+Thoughts are shown, never stored: they are not written to the session transcript and
+not restored by `--resume`.
 
 ## Project instructions
 
@@ -203,6 +256,7 @@ There are five, and every one is replaceable from the environment:
 | protocol | `DAVAI_PROMPT_PROTOCOL` | the whole `da_ops` specification |
 | ops result | `DAVAI_PROMPT_OPS_RESULT` | wraps each `da_results` block — needs `{results}` |
 | nudge | `DAVAI_PROMPT_NUDGE` | sent when a turn produced no ops and no conclusion |
+| steer | `DAVAI_PROMPT_STEER` | wraps a mid-run correction — needs `{text}` |
 | repair | `DAVAI_PROMPT_REPAIR` | sent when a block did not parse — needs `{error}` |
 
 Each also takes a `_FILE` variant holding a path, which is the practical choice for
@@ -226,7 +280,7 @@ in the session; set it to bare `{results}` for the block alone.
 ## Development
 
 ```bash
-npm test          # 140 tests: ops engine, sandbox, parser, prompts, loop, context, resume, UI
+npm test          # 248 tests: ops engine, sandbox, parser, prompts, providers, errors, events, loop, stdin, context, resume, history, UI
 npm run test:watch
 npm run lint      # eslint, flat config in eslint.config.js
 ```
@@ -234,3 +288,25 @@ npm run lint      # eslint, flat config in eslint.config.js
 The agent, context and provider layers are Ink-free and testable without a terminal;
 the UI is a view over state the harness owns. `--print` and `--json` run the same
 loop with no React loaded at all.
+
+### Pending emits
+
+An `EventEmitter` never complains about an emit with no listener, and that is how `nudge`,
+`thinking` and `retry` all shipped wired at one end only: emitted, documented, consumed by
+nobody, silent. Three things now stand in the way.
+
+`EVENTS` in [loop.js](src/agent/loop.js) is the declared list, in code rather than a
+comment. [test/events.test.js](test/events.test.js) holds it against both front ends: every
+emitted event must be declared, must have a TUI listener, and must be handled in headless
+mode or carry a written reason for being ignored. It also fails on a listener for an event
+nothing emits, so a rename cannot leave a dead handler behind. That check is static, so it
+catches a cold path — a reasoning summary or a 503 retry — without needing one to happen.
+
+At runtime the agent counts every emission and whether anything was listening. `/events`
+shows the table, the session exit line names anything that went nowhere, and the first
+occurrence of each is written to the transcript as `unretired-emit`. `DAVAI_STRICT_EVENTS=true`
+turns it into a thrown error instead, for when you are working on the harness itself.
+
+Neither catches the related shape — a computed field nothing reads, as `ProviderError.retryable`
+was for a while. `no-unused-vars` runs with `args: 'after-used'`, which covers the parameter
+version of that mistake, but a dead property still needs a reader.

@@ -7,13 +7,16 @@ import { ContextPane } from './ContextPane.jsx';
 import { ModelPane } from './ModelPane.jsx';
 import { ArtifactPane } from './ArtifactPane.jsx';
 import { ApprovalPane } from './ApprovalPane.jsx';
+import { ThinkingBox } from './ThinkingBox.jsx';
 import { renderMarkdown } from './markdown.js';
-import { colors, glyphs } from './theme.js';
+import { colors, glyphs, formatMeter } from './theme.js';
 import { handleCommand } from './commands.js';
 import { extractImageRefs, loadImage } from '../context/images.js';
 
 /** Throttle for streaming deltas: repaint at ~30fps, never per token. */
 const FRAME_MS = 33;
+/** The spinner's meter ticks once a second: it is a progress signal, not a stopwatch. */
+const METER_MS = 1000;
 
 let nextKey = 1;
 
@@ -25,6 +28,7 @@ export function App({ session, initialInput }) {
   // Committed transcript lives in <Static>, so Ink never re-renders scrollback.
   const [history, setHistory] = useState([]);
   const [live, setLive] = useState('');
+  const [thinking, setThinking] = useState('');
   const [status, setStatus] = useState(null);
   const [pane, setPane] = useState(null); // 'context' | 'model' | 'artifacts'
   const [approval, setApproval] = useState(null);
@@ -32,9 +36,20 @@ export function App({ session, initialInput }) {
   const [stats, setStats] = useState({ turns: 0, ops: 0, cost: 0 });
   const [tick, setTick] = useState(0);
   const [exitArmed, setExitArmed] = useState(false);
+  // The clock's start, or null when nothing is running. Counters are read from refs at
+  // render time rather than copied into state, so they keep step with the streaming
+  // repaint instead of lagging a second behind it.
+  const [runStartedAt, setRunStartedAt] = useState(null);
+  const [, tickMeter] = useState(0);
 
   const liveRef = useRef('');
   const frameRef = useRef(null);
+  const thinkRef = useRef('');
+  const thinkFrameRef = useRef(null);
+  // Counters for the spinner line. Refs, not state: they change per delta and the meter
+  // samples them once a second rather than re-rendering on every token.
+  const runRef = useRef({ startedAt: 0, chars: 0, thought: 0, ops0: 0 });
+  const meterTimerRef = useRef(null);
 
   const push = useCallback((entry) => {
     setHistory((h) => [...h, { key: nextKey++, ...entry }]);
@@ -48,21 +63,61 @@ export function App({ session, initialInput }) {
     }, FRAME_MS);
   }, []);
 
+  const flushThinking = useCallback(() => {
+    if (thinkFrameRef.current) return;
+    thinkFrameRef.current = setTimeout(() => {
+      thinkFrameRef.current = null;
+      setThinking(thinkRef.current);
+    }, FRAME_MS);
+  }, []);
+
+  const startMeter = useCallback(() => {
+    runRef.current = { startedAt: Date.now(), chars: 0, thought: 0, ops0: agent.stats.ops };
+    setRunStartedAt(runRef.current.startedAt);
+    clearInterval(meterTimerRef.current);
+    // Only advances the clock. Streaming drives its own repaints; this is what keeps the
+    // timer moving while ops run and nothing else changes.
+    meterTimerRef.current = setInterval(() => tickMeter((t) => t + 1), METER_MS);
+  }, [agent]);
+
+  const stopMeter = useCallback(() => {
+    clearInterval(meterTimerRef.current);
+    meterTimerRef.current = null;
+    setRunStartedAt(null);
+  }, []);
+
+  const clearThinking = useCallback(() => {
+    clearTimeout(thinkFrameRef.current);
+    thinkFrameRef.current = null;
+    thinkRef.current = '';
+    setThinking('');
+  }, []);
+
   // --- wire the agent's events into the view ---
   useEffect(() => {
+    const onThinking = (delta) => {
+      thinkRef.current += delta;
+      runRef.current.thought += delta.length;
+      flushThinking();
+    };
     const onText = (delta) => {
+      // The answer has started, so the working notes have served their purpose.
+      if (thinkRef.current) clearThinking();
       liveRef.current += delta;
+      runRef.current.chars += delta.length;
       flushLive();
     };
     const onTurnStart = () => {
       setBusy(true);
       setStatus('thinking');
+      clearThinking();
     };
     const onTurnEnd = ({ text }) => {
       clearTimeout(frameRef.current);
       frameRef.current = null;
       liveRef.current = '';
       setLive('');
+      clearThinking();
       if (text.trim()) push({ type: 'assistant', text });
       setStatus(null);
     };
@@ -73,19 +128,41 @@ export function App({ session, initialInput }) {
     const onOpsResult = ({ outcome, ops }) => {
       setStatus(null);
       push({ type: 'ops-result', outcome, ops });
+      // Ops land between usage events, so without this the counter lags a whole turn.
+      setStats({ ...agent.stats });
     };
+    const onSteerQueued = ({ queued }) =>
+      push({
+        type: 'notice',
+        message:
+          queued > 1
+            ? `steer queued (${queued} waiting) — applied after this turn`
+            : 'steer queued — applied after this turn',
+      });
+    const onSteered = ({ applied }) =>
+      push({
+        type: 'notice',
+        message: `steering applied (${applied})`,
+      });
+    const onRetry = ({ attempt, of, waitMs, message }) =>
+      push({
+        type: 'warning',
+        message: `${message} — retrying in ${Math.round(waitMs / 1000)}s (${attempt}/${of})`,
+      });
     const onArtifact = (item) => push({ type: 'artifact', item });
     const onUsage = () => setStats({ ...agent.stats });
     const onError = (e) => {
       push({ type: 'error', message: e.message, detail: e.detail });
       setBusy(false);
       setStatus(null);
+      stopMeter();
     };
     const onWarning = (w) => push({ type: 'warning', message: w.message });
     const onDone = () => {
       setBusy(false);
       setStatus(null);
       setStats({ ...agent.stats });
+      stopMeter();
     };
     const onCancelled = () => {
       clearTimeout(frameRef.current);
@@ -93,9 +170,11 @@ export function App({ session, initialInput }) {
       if (liveRef.current.trim()) push({ type: 'assistant', text: liveRef.current, cancelled: true });
       liveRef.current = '';
       setLive('');
+      clearThinking();
       push({ type: 'notice', message: 'cancelled' });
       setBusy(false);
       setStatus(null);
+      stopMeter();
     };
     const onCompactStart = () => setStatus('compacting context');
     const onCompactDone = (r) => {
@@ -117,6 +196,7 @@ export function App({ session, initialInput }) {
     const onNudge = ({ attempt }) =>
       push({ type: 'notice', message: `no ops in that turn — asking it to continue (${attempt})` });
 
+    agent.on('thinking', onThinking);
     agent.on('text', onText);
     agent.on('turn-start', onTurnStart);
     agent.on('turn-end', onTurnEnd);
@@ -133,17 +213,30 @@ export function App({ session, initialInput }) {
     agent.on('approval-request', onApproval);
     agent.on('repair', onRepair);
     agent.on('nudge', onNudge);
+    agent.on('retry', onRetry);
+    agent.on('steer-queued', onSteerQueued);
+    agent.on('steered', onSteered);
 
     return () => {
       agent.removeAllListeners();
       clearTimeout(frameRef.current);
+      clearTimeout(thinkFrameRef.current);
+      clearInterval(meterTimerRef.current);
     };
-  }, [agent, flushLive, push, session]);
+  }, [agent, flushLive, flushThinking, clearThinking, stopMeter, push, session]);
 
   const submit = useCallback(
     async (raw) => {
       const text = raw.trim();
       if (!text) return;
+
+      // Typed while a run is in flight: steer it rather than queueing a second request.
+      // Commands still run immediately — /context while it works is the point of them.
+      if (busy && !text.startsWith('/') && agent.steer(text)) {
+        session.history?.add(text);
+        push({ type: 'user', text });
+        return;
+      }
 
       const cmd = await handleCommand(text, {
         session,
@@ -157,7 +250,11 @@ export function App({ session, initialInput }) {
       });
       if (cmd.handled) return;
 
-      const { text: expanded, referenced } = pastes.expand(cmd.input ?? text);
+      // Recorded after the command check, so /history holds prompts and not commands.
+      const prompt = cmd.input ?? text;
+      session.history?.add(prompt);
+
+      const { text: expanded, referenced } = pastes.expand(prompt);
       for (const p of referenced) {
         ledger.add({
           type: 'paste',
@@ -192,9 +289,15 @@ export function App({ session, initialInput }) {
       }
 
       push({ type: 'user', text: withoutImages });
+      startMeter();
       await agent.run(withoutImages);
     },
-    [agent, ledger, pastes, push, session, exit, log],
+    // exhaustive-deps wants cfg.model.id and cfg.model.vision here and they are
+    // deliberately absent. /model mutates the same cfg object in place, and this callback
+    // dereferences cfg.model when it runs rather than copying the flags when it is
+    // created, so it already reads the live model. Listing them would only rebuild the
+    // callback; nothing here can go stale.
+    [agent, busy, ledger, pastes, push, session, exit, log, startMeter],
   );
 
   // Run an initial request passed on the command line.
@@ -239,7 +342,9 @@ export function App({ session, initialInput }) {
 
   return (
     <Box flexDirection="column" width={width}>
-      <Static items={history}>{(item) => <HistoryItem key={item.key} item={item} width={width} />}</Static>
+      <Static items={history}>{(item) => <HistoryItem key={item.key} item={item} />}</Static>
+
+      {thinking ? <ThinkingBox text={thinking} width={width} /> : null}
 
       {live ? (
         <Box flexDirection="column" paddingX={1}>
@@ -253,7 +358,17 @@ export function App({ session, initialInput }) {
             <Spinner type="dots" />
           </Text>
           <Text color={colors.dim}> {status}… </Text>
-          <Text color={colors.dim}>(esc to cancel)</Text>
+          {runStartedAt ? (
+            <Text color={colors.dim}>
+              {formatMeter({
+                ms: Date.now() - runStartedAt,
+                chars: runRef.current.chars,
+                thought: runRef.current.thought,
+                ops: Math.max(0, stats.ops - runRef.current.ops0),
+              })}{' '}
+            </Text>
+          ) : null}
+          <Text color={colors.dim}>(esc to cancel{busy ? ', type to steer' : ''})</Text>
         </Box>
       ) : null}
 
@@ -277,7 +392,7 @@ export function App({ session, initialInput }) {
         <ContextPane ledger={ledger} width={width} onClose={() => setPane(null)} />
       ) : null}
       {pane === 'model' ? (
-        <ModelPane session={session} width={width} onClose={() => setPane(null)} push={push} />
+        <ModelPane session={session} onClose={() => setPane(null)} push={push} />
       ) : null}
       {pane === 'artifacts' ? (
         <ArtifactPane
@@ -303,7 +418,7 @@ export function App({ session, initialInput }) {
   );
 }
 
-function HistoryItem({ item, width }) {
+function HistoryItem({ item }) {
   switch (item.type) {
     case 'user':
       return (

@@ -5,7 +5,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { wrapError } from './base.js';
 
-export function createGemini({ apiKey, model, maxTokens, temperature }) {
+export function createGemini({ apiKey, model, maxTokens, temperature, thinkingVisible }) {
   const client = new GoogleGenAI({ apiKey });
 
   return {
@@ -16,6 +16,10 @@ export function createGemini({ apiKey, model, maxTokens, temperature }) {
       const config = {
         systemInstruction: system,
         maxOutputTokens: maxTokens,
+        // Gemini thinks either way and bills thoughtsTokenCount for it, but only
+        // returns thought parts when asked — without this the `part.thought` branch
+        // below can never fire.
+        ...(thinkingVisible ? { thinkingConfig: { includeThoughts: true } } : {}),
         ...(temperature != null ? { temperature } : {}),
         ...(signal ? { abortSignal: signal } : {}),
       };

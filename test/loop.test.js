@@ -53,9 +53,35 @@ function requestText(provider, n) {
     .join('\n');
 }
 
+/** A provider that throws on its first N calls, then replays canned turns. */
+function flakyProvider(failures, turns) {
+  let thrown = 0;
+  const base = stubProvider(turns);
+  return {
+    get calls() {
+      return base.calls;
+    },
+    sent: base.sent,
+    async *send(req) {
+      if (thrown < failures.length) {
+        const err = failures[thrown++];
+        throw err;
+      }
+      yield* base.send(req);
+    },
+  };
+}
+
+/** A retryable provider failure, shaped the way wrapError leaves one. */
+function transient(message = 'gemini: service unavailable (503)', retryAfterMs = 60) {
+  return Object.assign(new Error(message), { retryable: true, status: 503, retryAfterMs });
+}
+
 /** Run to completion, collecting the events we care about. */
 async function drive(agent, input) {
-  const events = { nudge: [], done: [], warning: [], error: [], opsResult: [] };
+  const events = { nudge: [], done: [], warning: [], error: [], opsResult: [], retry: [], steered: [] };
+  agent.on('steered', (e) => events.steered.push(e));
+  agent.on('retry', (e) => events.retry.push(e));
   agent.on('nudge', (e) => events.nudge.push(e));
   agent.on('done', (e) => events.done.push(e));
   agent.on('warning', (e) => events.warning.push(e));
@@ -138,6 +164,232 @@ describe('stalled turns', () => {
     expect(ledger.segments.some((s) => s.label === 'nudge')).toBe(true);
     // The nudge reaches the model on the following request, not just the ledger.
     expect(requestText(provider, 1)).toMatch(/no da_ops block/);
+  });
+});
+
+describe('nudge accuracy metric', () => {
+  it('counts a nudge that led to real work as earned', async () => {
+    const provider = stubProvider([
+      "I'll take a look.",
+      `Reading.\n${READ_OPS}`,
+      'index.js exports one constant.',
+    ]);
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'look');
+
+    expect(agent.stats.nudges).toBe(1);
+    expect(agent.stats.nudgesWasted).toBe(0);
+  });
+
+  it('counts a nudge answered by another bare conclusion as wasted', async () => {
+    // "I'll leave the tests to you" is a conclusion that trips the intent regex — the
+    // documented false positive. It should be visible, not invisible.
+    const provider = stubProvider([
+      'Fixed it. I will leave the tests to you.',
+      'Nothing further — it is done.',
+    ]);
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'fix it');
+
+    expect(agent.stats.nudges).toBe(1);
+    expect(agent.stats.nudgesWasted).toBe(1);
+  });
+
+  it('counts nothing when no nudge was needed', async () => {
+    const provider = stubProvider(['Fixed the timeout in config.js.']);
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'fix it');
+
+    expect(agent.stats.nudges).toBe(0);
+    expect(agent.stats.nudgesWasted).toBe(0);
+  });
+
+  it('does not blame a later conclusion on an earlier nudge', async () => {
+    // Nudge, then ops, then a conclusion: the nudge worked, the conclusion is genuine.
+    const provider = stubProvider([
+      "I'll check.",
+      `Reading.\n${READ_OPS}`,
+      'Done — all good.',
+    ]);
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'check');
+
+    expect(agent.stats.nudges).toBe(1);
+    expect(agent.stats.nudgesWasted).toBe(0);
+  });
+});
+
+describe('steering', () => {
+  /** A provider that calls back after each turn, so a test can steer mid-run. */
+  function steerableProvider(turns, onTurn) {
+    let i = 0;
+    const sent = [];
+    return {
+      sent,
+      get calls() {
+        return i;
+      },
+      async *send({ system, messages }) {
+        sent.push({ system, messages });
+        const text = turns[i++] ?? 'Done.';
+        yield { t: 'text', delta: text };
+        yield { t: 'usage', in: 10, out: 5, cacheRead: 0, cacheWrite: 0 };
+        yield { t: 'stop', reason: 'end_turn' };
+        await onTurn?.(i);
+      },
+    };
+  }
+
+  it('refuses a steer when nothing is running', () => {
+    const { agent } = makeAgent(stubProvider(['Done.']));
+    expect(agent.steer('change course')).toBe(false);
+  });
+
+  it('applies a steer on the next turn and keeps the loop alive', async () => {
+    // Turn 1 would normally conclude; the steer must stop that being the end of the run.
+    const held = {};
+    const provider = steerableProvider([`Reading.\n${READ_OPS}`, 'All done.', 'Also renamed it.'], (n) => {
+      if (n === 2) held.agent.steer('actually rename the function too');
+    });
+    const { agent, ledger } = makeAgent(provider);
+    held.agent = agent;
+    const events = await drive(agent, 'read index.js');
+
+    expect(events.steered).toHaveLength(1);
+    expect(events.steered[0].applied).toBe(1);
+    expect(provider.calls).toBe(3); // it did not stop at 'All done.'
+    expect(events.done[0].prose).toContain('Also renamed it.');
+
+    const steerSeg = ledger.segments.find((s) => s.label.startsWith('steer:'));
+    expect(steerSeg.role).toBe('user');
+    expect(steerSeg.part.text).toContain('actually rename the function too');
+    expect(steerSeg.part.text).toContain('takes precedence');
+  });
+
+  it('puts the steer in front of the model on the following request', async () => {
+    const held = {};
+    const provider = steerableProvider(['Working.' + `\n${READ_OPS}`, 'Done.'], (n) => {
+      if (n === 1) held.agent.steer('use tabs, not spaces');
+    });
+    const { agent } = makeAgent(provider);
+    held.agent = agent;
+    await drive(agent, 'go');
+
+    expect(requestText(provider, 1)).toContain('use tabs, not spaces');
+  });
+
+  it('applies several queued steers at once, in order', async () => {
+    const held = {};
+    const provider = steerableProvider(['First pass.', 'Second pass.'], (n) => {
+      if (n === 1) {
+        held.agent.steer('one');
+        held.agent.steer('two');
+      }
+    });
+    const { agent, ledger } = makeAgent(provider);
+    held.agent = agent;
+    const events = await drive(agent, 'go');
+
+    expect(events.steered[0].applied).toBe(2);
+    const steers = ledger.segments.filter((s) => s.label.startsWith('steer:'));
+    expect(steers).toHaveLength(2);
+    expect(steers[0].part.text).toContain('one');
+    expect(steers[1].part.text).toContain('two');
+    expect(agent.steers).toEqual([]);
+  });
+
+  it('honours a custom steer prompt', async () => {
+    const held = {};
+    const prompts = { ...DEFAULT_PROMPTS, steer: 'COURSE CHANGE: {text}' };
+    const provider = steerableProvider(['Working.', 'Done.'], (n) => {
+      if (n === 1) held.agent.steer('stop and explain');
+    });
+    const { agent } = makeAgent(provider, prompts);
+    held.agent = agent;
+    await drive(agent, 'go');
+
+    expect(requestText(provider, 1)).toContain('COURSE CHANGE: stop and explain');
+  });
+
+  it('ignores blank steers', async () => {
+    const held = {};
+    const provider = steerableProvider(['Working.', 'Done.'], (n) => {
+      if (n === 1) {
+        expect(held.agent.steer('   ')).toBe(false);
+        expect(held.agent.steer('')).toBe(false);
+      }
+    });
+    const { agent } = makeAgent(provider);
+    held.agent = agent;
+    const events = await drive(agent, 'go');
+    expect(events.steered).toHaveLength(0);
+    expect(provider.calls).toBe(1);
+  });
+});
+
+describe('provider retries', () => {
+  it('retries a transient failure and completes the turn', async () => {
+    const provider = flakyProvider([transient()], ['Nothing to change.']);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'look around');
+
+    expect(events.retry).toHaveLength(1);
+    expect(events.retry[0]).toMatchObject({ attempt: 1, of: 2, waitMs: 60 });
+    expect(events.error).toHaveLength(0);
+    expect(events.done[0].prose).toContain('Nothing to change.');
+  });
+
+  it('honours the provider retry hint, capped', async () => {
+    const provider = flakyProvider([transient('busy', 250)], ['Done.']);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'go');
+    expect(events.retry[0].waitMs).toBe(250);
+  });
+
+  it('gives up after MAX_PROVIDER_RETRIES and reports the error', async () => {
+    const provider = flakyProvider([transient(), transient(), transient()], ['unreached']);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'go');
+
+    expect(events.retry).toHaveLength(2);
+    expect(events.error).toHaveLength(1);
+    expect(events.error[0].message).toContain('service unavailable');
+    expect(events.done).toHaveLength(0);
+  });
+
+  it('does not retry an error marked unretryable', async () => {
+    // A 429 with "limit: 0" — waiting cannot help, so it must surface at once.
+    const quota = Object.assign(new Error('gemini: no quota for gemini-3.1-pro'), {
+      retryable: false,
+      status: 429,
+      retryAfterMs: 12000,
+    });
+    const provider = flakyProvider([quota], ['unreached']);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'go');
+
+    expect(events.retry).toHaveLength(0);
+    expect(events.error[0].message).toContain('no quota');
+  });
+
+  it('does not retry once text has already streamed', async () => {
+    // Re-sending mid-answer would duplicate what the operator already saw.
+    let call = 0;
+    const provider = {
+      calls: 0,
+      sent: [],
+      async *send() {
+        call++;
+        yield { t: 'text', delta: 'half an answer' };
+        throw transient();
+      },
+    };
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'go');
+
+    expect(events.retry).toHaveLength(0);
+    expect(events.error).toHaveLength(1);
+    expect(call).toBe(1);
   });
 });
 

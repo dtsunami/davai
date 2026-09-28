@@ -7,7 +7,7 @@
  */
 import fs from 'node:fs';
 import { OPS } from './schema.js';
-import { countOccurrences } from './writers.js';
+import { alignNewlines, countOccurrences } from './writers.js';
 
 /**
  * @param {object[]} ops  normalized ops
@@ -92,7 +92,7 @@ export function planBatch(ops, ctx) {
           // cannot pre-verify uniqueness, and the executor's re-check is the guard.
           if (pending.get(abs) !== 'written') {
             const content = fs.readFileSync(abs, 'utf8');
-            const n = countOccurrences(content, op.old);
+            const n = countOccurrences(content, alignNewlines(content, op.old));
             if (n === 0) {
               return fail(
                 i,

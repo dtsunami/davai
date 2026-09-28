@@ -106,6 +106,18 @@ const OPS_RESULT = `Results of your da_ops batch — the authoritative record of
 
 {results}`;
 
+/**
+ * Wraps a mid-flight correction from the operator. `{text}` is what they typed.
+ *
+ * Labelled rather than passed through as an ordinary message because the model needs to
+ * know it arrived *during* the work: it supersedes the standing instruction rather than
+ * adding a new request after the last one finished.
+ */
+const STEER = `The operator sent this while you were working. It takes precedence over the
+earlier instruction — adjust what you are doing rather than finishing the old plan first:
+
+{text}`;
+
 /** Sent when a turn produced neither ops nor a conclusion. */
 const NUDGE =
   'That turn contained no da_ops block and no conclusion. Either emit a da_ops ' +
@@ -127,6 +139,7 @@ export const PROMPT_SPECS = [
   { key: 'protocol', env: 'DAVAI_PROMPT_PROTOCOL', text: PROTOCOL },
   { key: 'opsResult', env: 'DAVAI_PROMPT_OPS_RESULT', text: OPS_RESULT, placeholder: '{results}' },
   { key: 'nudge', env: 'DAVAI_PROMPT_NUDGE', text: NUDGE },
+  { key: 'steer', env: 'DAVAI_PROMPT_STEER', text: STEER, placeholder: '{text}' },
   { key: 'repair', env: 'DAVAI_PROMPT_REPAIR', text: REPAIR, placeholder: '{error}' },
 ];
 
@@ -208,4 +221,9 @@ export function opsResultPrompt(results, prompts = DEFAULT_PROMPTS) {
 /** @param {string} error the parser's complaint */
 export function repairPrompt(error, prompts = DEFAULT_PROMPTS) {
   return fill(prompts.repair, '{error}', error);
+}
+
+/** @param {string} text what the operator typed mid-run */
+export function steerPrompt(text, prompts = DEFAULT_PROMPTS) {
+  return fill(prompts.steer, '{text}', text);
 }

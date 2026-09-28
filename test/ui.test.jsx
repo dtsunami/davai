@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import React from 'react';
 import { render } from 'ink';
 import { EventEmitter } from 'node:events';
-import { Writable } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,16 +32,16 @@ function fakeStdout(columns = 100) {
   return stream;
 }
 
+/**
+ * A stdin Ink will actually read from. It has to be a real Readable — Ink ignores a bare
+ * EventEmitter, so `stream.write(...)` here is the only way a test can press a key.
+ */
 function fakeStdin() {
-  const stream = new EventEmitter();
+  const stream = new PassThrough();
   stream.isTTY = true;
-  stream.setRawMode = () => {};
-  stream.setEncoding = () => {};
-  stream.resume = () => {};
-  stream.pause = () => {};
-  stream.read = () => null;
-  stream.unref = () => {};
+  stream.setRawMode = () => stream;
   stream.ref = () => {};
+  stream.unref = () => {};
   return stream;
 }
 
@@ -101,6 +101,14 @@ afterEach(() => {
 
 /** Let Ink flush a frame. */
 const flush = () => new Promise((r) => setTimeout(r, 60));
+
+/**
+ * The most recent complete render. Ink writes control sequences as their own chunks, so
+ * `frames.at(-1)` is often just an escape code; the status bar's model id anchors a frame
+ * that actually holds the UI.
+ */
+const lastRender = (stdout) =>
+  [...stdout.frames].reverse().find((f) => f.includes('claude-opus-5')) || '';
 
 describe('App rendering', () => {
   it('renders the status bar with model and context usage', async () => {
@@ -206,6 +214,240 @@ describe('App rendering', () => {
     expect(out).toContain('npm test');
     expect(out).toContain('cannot be undone');
     app.unmount();
+  });
+});
+
+describe('formatMeter', () => {
+  it('shows sub-minute elapsed time to a tenth', async () => {
+    const { formatMeter } = await import('../src/ui/theme.js');
+    expect(formatMeter({ ms: 3240, chars: 0, thought: 0, ops: 0 })).toBe('3.2s');
+  });
+
+  it('switches to minutes and pads the seconds', async () => {
+    const { formatMeter } = await import('../src/ui/theme.js');
+    expect(formatMeter({ ms: 63_000, chars: 0, thought: 0, ops: 0 })).toBe('1m 03s');
+  });
+
+  it('abbreviates thousands and pluralizes ops', async () => {
+    const { formatMeter } = await import('../src/ui/theme.js');
+    const out = formatMeter({ ms: 1000, chars: 1234, thought: 900, ops: 1 });
+    expect(out).toContain('1.2k chars');
+    expect(out).toContain('900 thought');
+    expect(out).toContain('1 op');
+    expect(out).not.toContain('1 ops');
+    expect(formatMeter({ ms: 1000, chars: 0, thought: 0, ops: 2 })).toContain('2 ops');
+  });
+
+  it('omits counters that are still zero', async () => {
+    const { formatMeter } = await import('../src/ui/theme.js');
+    expect(formatMeter({ ms: 500, chars: 0, thought: 0, ops: 0 })).toBe('0.5s');
+  });
+});
+
+describe('the spinner meter', () => {
+  it('reports elapsed time and streamed characters beside the spinner', async () => {
+    const stdout = fakeStdout();
+    const app = render(<App session={session} initialInput="go" />, {
+      stdout,
+      stdin: fakeStdin(),
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+    session.agent.emit('turn-start');
+    session.agent.emit('text', 'x'.repeat(1500));
+    await flush();
+
+    const out = lastRender(stdout);
+    expect(out).toMatch(/\d+\.\d+s/); // the timer
+    expect(out).toContain('1.5k chars');
+    expect(out).toContain('to steer');
+    app.unmount();
+  });
+});
+
+describe('steering from the composer', () => {
+  it('steers the run in progress instead of starting another', async () => {
+    const stdin = fakeStdin();
+    const stdout = fakeStdout();
+    const steered = [];
+    let resolveRun;
+    session.agent.run = () => new Promise((r) => (resolveRun = r));
+    session.agent.steer = (text) => {
+      steered.push(text);
+      return true;
+    };
+
+    const app = render(<App session={session} initialInput="do the thing" />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+    session.agent.emit('turn-start'); // now busy
+    await flush();
+
+    stdin.write('use tabs instead');
+    await flush();
+    stdin.write('\r');
+    await flush();
+
+    expect(steered).toEqual(['use tabs instead']);
+    resolveRun?.();
+    app.unmount();
+  });
+
+  it('still runs a slash command while busy rather than steering with it', async () => {
+    const stdin = fakeStdin();
+    const stdout = fakeStdout();
+    const steered = [];
+    session.agent.run = () => new Promise(() => {});
+    session.agent.steer = (t) => {
+      steered.push(t);
+      return true;
+    };
+
+    const app = render(<App session={session} initialInput="work" />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+    session.agent.emit('turn-start');
+    await flush();
+
+    stdin.write('/help');
+    await flush();
+    stdin.write('\r');
+    await flush();
+
+    expect(steered).toEqual([]);
+    expect(stdout.frames.join('')).toContain('/yolo');
+    app.unmount();
+  });
+});
+
+describe('paste capture', () => {
+  it('stores a CR-separated paste and inserts the placeholder instead of submitting', async () => {
+    const stdout = fakeStdout();
+    const stdin = fakeStdin();
+    const submitted = [];
+    session.agent.run = async (text) => submitted.push(text);
+
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    // One burst, Windows line endings: the shape that used to submit line one and
+    // scatter the rest.
+    stdin.write('first line\rsecond line\rthird line');
+    await flush();
+
+    const out = stdout.frames.join('');
+    expect(out).toContain('paste#1');
+    expect(out).toContain('3 lines');
+    expect(submitted).toEqual([]);
+    expect(session.pastes.get(1).text).toBe('first line\nsecond line\nthird line');
+    app.unmount();
+  });
+});
+
+describe('thinking panel', () => {
+  const renderApp = () => {
+    const stdout = fakeStdout();
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin: fakeStdin(),
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    return { stdout, app };
+  };
+
+  it('shows reasoning deltas in a labelled box', async () => {
+    const { stdout, app } = renderApp();
+    await flush();
+    session.agent.emit('turn-start');
+    session.agent.emit('thinking', 'The slug helper lowercases but never collapses runs.');
+    await flush();
+
+    const out = stdout.frames.join('');
+    expect(out).toContain('thinking');
+    expect(out).toContain('never collapses runs');
+    expect(out).toMatch(/[╭┌]/); // the box is drawn, not plain text
+    app.unmount();
+  });
+
+  it('drops the box once the answer starts', async () => {
+    const { stdout, app } = renderApp();
+    await flush();
+    session.agent.emit('turn-start');
+    session.agent.emit('thinking', 'weighing two approaches');
+    await flush();
+    expect(stdout.frames.join('')).toContain('weighing two approaches');
+
+    session.agent.emit('text', 'Here is what I found.');
+    await flush();
+    const last = lastRender(stdout);
+    expect(last).toContain('Here is what I found.');
+    expect(last).not.toContain('weighing two approaches');
+    app.unmount();
+  });
+
+  it('keeps thoughts out of the committed transcript', async () => {
+    const { stdout, app } = renderApp();
+    await flush();
+    session.agent.emit('turn-start');
+    session.agent.emit('thinking', 'internal deliberation');
+    await flush();
+
+    // Everything written from here on is the commit of this turn.
+    const before = stdout.frames.length;
+    session.agent.emit('turn-end', { text: 'Done.' });
+    await flush();
+
+    const committed = stdout.frames.slice(before).join('');
+    expect(committed).toContain('Done.');
+    expect(committed).not.toContain('internal deliberation');
+    app.unmount();
+  });
+
+  it('shows nothing when no thoughts arrive', async () => {
+    const { stdout, app } = renderApp();
+    await flush();
+    session.agent.emit('turn-start');
+    session.agent.emit('text', 'straight to the answer');
+    await flush();
+    expect(stdout.frames.join('')).not.toContain('thinking\n');
+    app.unmount();
+  });
+});
+
+describe('wrapTail', () => {
+  it('keeps only the last lines so the box cannot grow without bound', async () => {
+    const { wrapTail } = await import('../src/ui/ThinkingBox.jsx');
+    const text = Array.from({ length: 40 }, (_, i) => `line number ${i}`).join('\n');
+    const lines = wrapTail(text, 40, 6);
+    expect(lines).toHaveLength(6);
+    expect(lines.at(-1)).toBe('line number 39');
+  });
+
+  it('wraps long prose to the given width', async () => {
+    const { wrapTail } = await import('../src/ui/ThinkingBox.jsx');
+    const lines = wrapTail('aaa bbb ccc ddd eee fff', 11, 10);
+    expect(lines).toEqual(['aaa bbb ccc', 'ddd eee fff']);
+  });
+
+  it('is empty for empty input', async () => {
+    const { wrapTail } = await import('../src/ui/ThinkingBox.jsx');
+    expect(wrapTail('', 40, 6)).toEqual([]);
+    expect(wrapTail('   \n\n  ', 40, 6)).toEqual([]);
   });
 });
 

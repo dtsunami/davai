@@ -54,11 +54,17 @@ export class Journal {
   snapshotTree(absDir, { maxBytes = 64 * 1024 * 1024 } = {}) {
     let total = 0;
     const files = [];
+    // Directories are recorded too. Reconstructing the tree from file paths alone
+    // silently loses every empty directory, so a rolled-back `delete --recursive`
+    // would restore the contents but not the shape.
+    const dirs = [];
     const walk = (dir) => {
       for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
         const p = path.join(dir, ent.name);
-        if (ent.isDirectory()) walk(p);
-        else if (ent.isFile()) {
+        if (ent.isDirectory()) {
+          dirs.push(p);
+          walk(p);
+        } else if (ent.isFile()) {
           total += fs.statSync(p).size;
           if (total > maxBytes) {
             throw new Error(
@@ -73,12 +79,15 @@ export class Journal {
     walk(absDir);
     const seq = String(++this.seq).padStart(4, '0');
     const root = path.join(this.snapDir, `${seq}-tree-${path.basename(absDir)}`);
+    fs.mkdirSync(root, { recursive: true });
+    for (const d of dirs) {
+      fs.mkdirSync(path.join(root, path.relative(absDir, d)), { recursive: true });
+    }
     for (const f of files) {
       const dest = path.join(root, path.relative(absDir, f));
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(f, dest);
     }
-    fs.mkdirSync(root, { recursive: true });
     return root;
   }
 

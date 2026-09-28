@@ -8,6 +8,19 @@
 
 const PLACEHOLDER = /\[\[paste#(\d+)(?::[^\]]*)?\]\]/g;
 
+/**
+ * Does this input chunk look pasted rather than typed?
+ *
+ * The separator test has to accept a bare CR. Windows terminals send Enter as "\r", so a
+ * multi-line paste in Windows Terminal or the legacy console arrives as one burst with no
+ * "\n" in it at all. Ink hands that burst over as a single chunk with key.return unset,
+ * so a newline-only test missed it entirely and the raw text — carriage returns and all —
+ * was inserted into the line buffer instead of being stored as a paste.
+ */
+export function looksLikePaste(input) {
+  return Boolean(input) && input.length > 1 && /[\r\n]/.test(input);
+}
+
 export class Pastes {
   constructor() {
     this.items = new Map();
@@ -19,7 +32,8 @@ export class Pastes {
    * inserted literally instead of stored.
    */
   capture(text) {
-    const trimmed = text.replace(/\r\n/g, '\n').replace(/\n+$/, '');
+    // \r\n and a lone \r both normalize to \n — see looksLikePaste.
+    const trimmed = text.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
     const lines = trimmed.split('\n');
     if (lines.length <= 1) return null;
 

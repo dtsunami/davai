@@ -15,6 +15,9 @@ const COMMANDS = [
   '/compact',
   '/clear',
   '/yolo',
+  '/events',
+  '/history',
+  '/replay',
   '/exit',
 ];
 

@@ -4,6 +4,7 @@
  * Windows Terminal and the legacy conhost differ enough on glyph support that
  * guessing wrong leaves boxes of garbage on screen, so we probe rather than assume.
  */
+import { execFileSync } from 'node:child_process';
 
 const isWin = process.platform === 'win32';
 
@@ -72,12 +73,35 @@ export function prepareTerminal() {
     // Node enables VT on modern Windows automatically; the codepage is the part
     // that still bites, and only for the legacy console host.
     if (!process.env.WT_SESSION && process.stdout.isTTY) {
-      const { execFileSync } = require('node:child_process');
       execFileSync('chcp.com', ['65001'], { stdio: 'ignore' });
     }
   } catch {
     /* cosmetic only */
   }
+}
+
+/**
+ * `12.4s · 1.2k chars · 2 ops` — elapsed API time, characters streamed and ops run for
+ * the request in flight. Thought characters are counted separately: they are streamed and
+ * billed but never appear in the answer, so folding them into `chars` would overstate it.
+ */
+export function formatMeter({ ms, chars, thought, ops }) {
+  const parts = [formatElapsed(ms)];
+  if (chars) parts.push(`${countLabel(chars)} chars`);
+  if (thought) parts.push(`${countLabel(thought)} thought`);
+  if (ops) parts.push(`${ops} op${ops === 1 ? '' : 's'}`);
+  return parts.join(` ${glyphs.bullet} `);
+}
+
+function formatElapsed(ms) {
+  const s = Math.max(0, ms) / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${String(Math.floor(s % 60)).padStart(2, '0')}s`;
+}
+
+function countLabel(n) {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
 export function formatCost(cost, unknown) {

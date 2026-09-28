@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Ledger } from '../src/context/ledger.js';
-import { Pastes } from '../src/context/pastes.js';
+import { Pastes, looksLikePaste } from '../src/context/pastes.js';
 import { compact } from '../src/context/compact.js';
 import { estimate, TokenCalibrator } from '../src/context/tokens.js';
 import { createOpsFilter } from '../src/headless.js';
@@ -146,6 +146,33 @@ describe('pastes', () => {
 
   it('passes single-line pastes through literally', () => {
     expect(new Pastes().capture('just one line')).toBeNull();
+  });
+
+  it('captures a paste whose lines are separated by bare CRs', () => {
+    // Windows terminals send Enter as \r, so this is what a real paste looks like there.
+    const p = new Pastes();
+    const c = p.capture('line one\rline two\rline three');
+    expect(c.placeholder).toBe('[[paste#1: 3 lines]]');
+    expect(p.get(1).text).toBe('line one\nline two\nline three');
+  });
+
+  it('normalizes CRLF pastes to LF', () => {
+    const p = new Pastes();
+    p.capture('alpha\r\nbeta\r\n');
+    expect(p.get(1).text).toBe('alpha\nbeta');
+    expect(p.get(1).lines).toBe(2);
+  });
+
+  it('recognizes pasted input by any line break', () => {
+    expect(looksLikePaste('a\rb')).toBe(true);
+    expect(looksLikePaste('a\nb')).toBe(true);
+    expect(looksLikePaste('a\r\nb')).toBe(true);
+    expect(looksLikePaste('trailing break\r')).toBe(true);
+    // A single keystroke is typing, whatever it is.
+    expect(looksLikePaste('a')).toBe(false);
+    expect(looksLikePaste('\r')).toBe(false);
+    expect(looksLikePaste('')).toBe(false);
+    expect(looksLikePaste('no breaks here')).toBe(false);
   });
 
   it('expands placeholders on submit', () => {

@@ -17,6 +17,7 @@ import { buildGrounding } from '../agent/grounding.js';
 import { buildSystemPrompt } from '../agent/prompt.js';
 import { SessionLog, pruneSessions } from './log.js';
 import { findSession, restoreLedger } from './resume.js';
+import { PromptHistory } from './history.js';
 import { resolveHome } from '../config/env.js';
 
 /**
@@ -81,6 +82,7 @@ export async function createSession(opts = {}) {
     log,
     settings,
     pastes: new Pastes(),
+    history: new PromptHistory({ home: cfg.home, cwd: cfg.cwd }),
     artifacts: agent.artifacts,
     grounding,
     resumed,

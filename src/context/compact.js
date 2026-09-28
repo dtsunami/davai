@@ -13,6 +13,7 @@
  * and cost more than the compaction saves.
  */
 import { SUMMARIZER_MODEL } from '../config/models.js';
+import { estimate } from './tokens.js';
 
 const KEEP_RECENT_TURNS = 3;
 
@@ -52,7 +53,11 @@ export async function compact(ledger, { cfg, makeProvider, onEvent }) {
       if (head.length < s.part.text.length) {
         const saved = s.tokens;
         s.part.text = `${head}\n… [${s.type} #${s.id} truncated by auto-compact; full text is in the session log]`;
-        s.tokens = Math.ceil(s.tokens * (head.length / s.part.text.length)) || 1;
+        // Re-estimate from the new text. Scaling the old count by a ratio taken
+        // against the *already reassigned* text made this a near no-op: a 1270-token
+        // segment truncated to 57 tokens still reported 868, so compaction thought it
+        // had freed nothing and kept escalating to summarization it did not need.
+        s.tokens = estimate(s.part.text) || 1;
         actions.push(`truncated ${s.type} #${s.id} (~${saved - s.tokens} tok)`);
       }
     }

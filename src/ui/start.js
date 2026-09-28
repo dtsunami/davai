@@ -44,6 +44,16 @@ export async function startTui({ input, cwd, overrides, resume }) {
     `\n${s.turns} turns · ${s.ops} ops · ${cost} · session ${log.id}\n` +
       `${log.dir}\n`,
   );
+
+  // Printed on the way out rather than buried in /events: an event that fired with
+  // nothing listening is a wiring bug, and the whole point is that it is otherwise silent.
+  const pending = session.agent.pendingEvents();
+  if (pending.length) {
+    const list = pending.map((p) => `${p.name}${p.declared ? '' : ' (undeclared)'} ×${p.count}`);
+    process.stdout.write(
+      `\u001b[33m${glyphs.warn} emitted with no listener: ${list.join(', ')}\u001b[0m\n`,
+    );
+  }
   return 0;
 }
 

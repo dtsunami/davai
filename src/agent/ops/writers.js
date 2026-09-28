@@ -31,7 +31,8 @@ export function opWrite(op, ctx) {
 export function opReplace(op, ctx) {
   const abs = ctx.sandbox.resolveForWrite(op.path);
   const original = fs.readFileSync(abs, 'utf8');
-  const count = countOccurrences(original, op.old);
+  const { old, new: replacement } = alignOp(original, op);
+  const count = countOccurrences(original, old);
 
   // The planner already checked this; re-check because the file may have changed
   // between plan and apply.
@@ -44,8 +45,9 @@ export function opReplace(op, ctx) {
   }
 
   const updated = op.all
-    ? original.split(op.old).join(op.new)
-    : original.replace(op.old, op.new);
+    ? original.split(old).join(replacement)
+    : // A function replacement, so `$&` and friends in the model's text are literal.
+      original.replace(old, () => replacement);
 
   const pre = ctx.journal.snapshot(abs);
   const entry = ctx.journal.record({ op: 'replace', path: abs, pre, existed: true });
@@ -107,6 +109,11 @@ export function opMove(op, ctx) {
     if (err.code !== 'EXDEV') throw err;
     // Cross-device: copy then unlink. The journal must record which path was taken
     // or rollback restores the wrong side.
+    //
+    // Not atomic, and it cannot be: no filesystem offers a cross-device rename. The
+    // order is the deliberate part — copy first, remove second — so an interruption
+    // leaves the file at both paths rather than neither. A duplicate is recoverable
+    // and the journal's `copied` flag still rolls it back; a loss would not be.
     fs.cpSync(from, to, { recursive: true });
     fs.rmSync(from, { recursive: true, force: true });
     copied = true;
@@ -121,6 +128,45 @@ export function opMove(op, ctx) {
       action: destExisted ? 'moved (overwrote destination)' : 'moved',
       ...(copied ? { note: 'cross-device: copied then removed' } : {}),
     },
+  };
+}
+
+/**
+ * Reconcile a needle's line endings with the file's.
+ *
+ * A model quoting a multi-line span back from a CRLF file sends "\n" almost every time:
+ * the carriage returns were in the read result but they are invisible, and no amount of
+ * "copy it byte for byte" in the protocol makes a model reproduce a character it cannot
+ * see. Without this, every multi-line `replace` on a Windows-authored file fails with
+ * "old text not found" and the model has no way to work out why.
+ *
+ * Exact match is still tried first, so a file with deliberately mixed endings behaves
+ * as before.
+ */
+export function alignNewlines(haystack, needle) {
+  if (!needle || !needle.includes('\n')) return needle;
+  if (haystack.includes(needle)) return needle;
+
+  const crlf = needle.replace(/\r?\n/g, '\r\n');
+  if (haystack.includes(crlf)) return crlf;
+
+  const lf = needle.replace(/\r\n/g, '\n');
+  if (haystack.includes(lf)) return lf;
+
+  return needle; // genuinely absent: let the caller report it
+}
+
+/**
+ * The op's old/new with endings that match the file. If CRs had to be added to find the
+ * text, they are added to the replacement too — otherwise the edit leaves one LF island
+ * in an otherwise CRLF file, and the next replace over that region fails again.
+ */
+function alignOp(haystack, op) {
+  const old = alignNewlines(haystack, op.old);
+  const addedCrs = old !== op.old && old.includes('\r\n');
+  return {
+    old,
+    new: addedCrs ? String(op.new ?? '').replace(/\r?\n/g, '\r\n') : op.new,
   };
 }
 

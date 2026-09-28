@@ -168,7 +168,9 @@ async function main() {
   }
 
   const { readStdin } = await import('../src/headless.js');
-  const piped = await readStdin();
+  // With no prompt in argv, stdin is the only thing that can carry the request, so wait
+  // for the producer instead of sampling it.
+  const piped = await readStdin({ required: !args.input });
   const input = [args.input, piped].filter(Boolean).join('\n');
 
   // No TTY means no interactive REPL is possible, so fall back to headless.

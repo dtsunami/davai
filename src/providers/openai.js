@@ -1,9 +1,14 @@
 /**
- * OpenAI adapter. Also serves Grok, which is OpenAI-compatible — only the baseURL
- * and key differ, so one adapter covers both.
+ * Chat Completions adapter. Grok's API is this shape, so this is its only path; for
+ * OpenAI it is the fallback behind DAVAI_OPENAI_API=chat, because Chat Completions
+ * cannot return reasoning summaries — openai-responses.js exists for that.
+ *
+ * `delta.reasoning_content` is not an OpenAI field. It is xAI's and DeepSeek's, present
+ * on smaller reasoning models like grok-3-mini and absent on grok-4, so the branch below
+ * is a cheap accommodation rather than a supported path.
  */
 import OpenAI from 'openai';
-import { wrapError } from './base.js';
+import { OPENAI_EFFORT, wrapError } from './base.js';
 
 export function createOpenAI({
   apiKey,
@@ -34,7 +39,7 @@ export function createOpenAI({
       if (temperature != null) params.temperature = temperature;
       // Reasoning-capable models take an effort hint; older ones reject it, so this
       // is best-effort and stripped on a 400 below.
-      if (effort) params.reasoning_effort = effort === 'xhigh' ? 'high' : effort;
+      if (effort) params.reasoning_effort = OPENAI_EFFORT[effort] || 'medium';
 
       let stream;
       try {

@@ -23,11 +23,14 @@ export default [
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
     rules: {
-      // Unused args are often documentation on a callback signature; unused *variables*
-      // are a real smell. `_`-prefixed names are an explicit "yes, I know".
+      // `after-used` catches a trailing parameter nothing reads — how
+      // formatResults(outcome, ops) kept a second argument that was pure decoration, and
+      // an invitation for a caller to assume it mattered. Parameters before a used one
+      // are still allowed: they document a callback's shape. `_`-prefixed names are an
+      // explicit "yes, I know".
       'no-unused-vars': [
         'error',
-        { args: 'none', varsIgnorePattern: '^_', caughtErrors: 'none' },
+        { args: 'after-used', argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' },
       ],
       eqeqeq: ['error', 'smart'],
       'no-var': 'error',
@@ -51,7 +54,12 @@ export default [
       // the React plugin — so the import looks unused. Cheaper than adding the plugin.
       'no-unused-vars': [
         'error',
-        { args: 'none', varsIgnorePattern: '^(_|React$)', caughtErrors: 'none' },
+        {
+          args: 'after-used',
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^(_|React$)',
+          caughtErrors: 'none',
+        },
       ],
     },
   },

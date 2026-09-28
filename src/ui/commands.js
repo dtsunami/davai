@@ -20,6 +20,9 @@ const HELP = `Commands
   /config             resolved configuration
   /clear              drop conversation context, keep grounding
   /yolo [on|off]      auto-approve shell commands for this session
+  /events             harness events emitted vs retired this session
+  /history [n]        recent prompts, across sessions (default 15)
+  /replay <n>         run a prompt from /history again
   /help               this text
   /exit               quit
 
@@ -37,6 +40,10 @@ Input
   @path/to/file       tab-completes against the working directory
   multi-line paste    stored as [[paste#N]], expanded on submit`;
 
+function truncate(text, max) {
+  return text.length > max ? `${text.slice(0, max - 1)}${glyphs.ellipsis}` : text;
+}
+
 /** Only the overridden prompts are worth naming; the defaults are the norm. */
 function describePrompts(cfg) {
   const overridden = Object.entries(cfg.promptSources || {}).filter(
@@ -51,7 +58,7 @@ function describePrompts(cfg) {
  */
 export async function handleCommand(text, deps) {
   const { session, push, setPane, exit, refresh } = deps;
-  const { cfg, ledger, sandbox, log, agent } = session;
+  const { cfg, ledger, sandbox, log, agent, history } = session;
 
   // --- sh <cmd> (req 13) ---
   if (text === 'sh' || text.startsWith('sh ')) {
@@ -123,6 +130,78 @@ export async function handleCommand(text, deps) {
       push({ type: 'compact', ...result });
       refresh();
       return { handled: true };
+    }
+
+    case 'events': {
+      const rows = agent.eventSummary();
+      const total = rows.reduce((n, r) => n + r.emitted, 0);
+      const unretired = rows.filter((r) => r.unretired > 0);
+      const undeclared = rows.filter((r) => !r.declared);
+      const silent = rows.filter((r) => r.declared && r.emitted === 0);
+
+      const lines = rows
+        .filter((r) => r.emitted > 0)
+        .map((r) => {
+          const flag = r.unretired
+            ? `  ${glyphs.warn} ${r.unretired} unretired`
+            : !r.declared
+              ? `  ${glyphs.warn} not in EVENTS`
+              : '';
+          return `  ${r.name.padEnd(18)}${String(r.emitted).padStart(6)}${flag}`;
+        });
+
+      if (silent.length) {
+        lines.push('', `  never fired: ${silent.map((r) => r.name).join(', ')}`);
+      }
+      if (unretired.length || undeclared.length) {
+        lines.push(
+          '',
+          `  ${glyphs.warn} ${unretired.length + undeclared.length} event type(s) went nowhere — ` +
+            `emitted with no listener, which fails silently`,
+        );
+      } else if (total) {
+        lines.push('', `  every one of ${total} events had a listener`);
+      }
+
+      push({ type: 'info', text: [`Events (emitted ${glyphs.arrow} retired)`, ...lines].join('\n') });
+      return { handled: true };
+    }
+
+    case 'history': {
+      if (!history?.length) {
+        push({ type: 'info', text: 'no prompt history yet' });
+        return { handled: true };
+      }
+      const n = Number.parseInt(arg, 10);
+      const rows = history.recent(Number.isFinite(n) && n > 0 ? n : 15);
+      const lines = rows.map((row) => {
+        const first = row.text.split('\n')[0];
+        const extra = row.text.includes('\n') ? ` ${glyphs.ellipsis}` : '';
+        // Only worth naming the directory when it is not this one.
+        const where = row.cwd && row.cwd !== cfg.cwd ? `  (${row.cwd})` : '';
+        return `  ${String(row.n).padStart(3)}  ${truncate(first, 88)}${extra}${where}`;
+      });
+      push({
+        type: 'info',
+        text: [`Prompt history (${history.length} total) — /replay <n>`, ...lines].join('\n'),
+      });
+      return { handled: true };
+    }
+
+    case 'replay': {
+      const n = Number.parseInt(arg, 10);
+      if (!Number.isFinite(n) || n === 0) {
+        push({ type: 'warning', message: '/replay takes a number from /history (or -1 for the last)' });
+        return { handled: true };
+      }
+      const prompt = history?.at(n);
+      if (prompt == null) {
+        push({ type: 'warning', message: `no prompt ${n} in history (${history?.length || 0} recorded)` });
+        return { handled: true };
+      }
+      push({ type: 'notice', message: `replaying ${n}: ${truncate(prompt.split('\n')[0], 72)}` });
+      // Not handled: the caller submits this as though it had just been typed.
+      return { handled: false, input: prompt };
     }
 
     case 'yolo': {

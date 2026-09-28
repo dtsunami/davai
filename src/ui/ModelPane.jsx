@@ -11,7 +11,7 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
  * /model (req 15): shows what's available and lets you change it live.
  * Changes are applied to the running session and persisted to settings.json.
  */
-export function ModelPane({ session, width, onClose, push }) {
+export function ModelPane({ session, onClose, push }) {
   const { cfg, ledger, agent } = session;
   const [tab, setTab] = useState('models'); // 'models' | 'settings'
   const [sel, setSel] = useState(0);

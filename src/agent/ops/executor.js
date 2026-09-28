@@ -116,7 +116,7 @@ export async function executeBatch(ops, ctx) {
  * Render a batch outcome as the da_results block fed back to the model.
  * Kept terse: this text is charged as input tokens on every subsequent turn.
  */
-export function formatResults(outcome, ops) {
+export function formatResults(outcome) {
   if (outcome.status === 'plan-failed') {
     const lines = outcome.errors.map(
       (e) => `  [${e.index}] ${e.op}: ${e.message}`,
