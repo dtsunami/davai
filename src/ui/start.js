@@ -86,6 +86,13 @@ function banner(session) {
       ),
     );
   }
+  // Printed before Ink draws, as plain lines, so a command in a warning (adopting an
+  // ignored project setting) copies cleanly. Only the headline is coloured.
+  for (const message of [...cfg.warnings, ...session.limitNotices]) {
+    const [first, ...rest] = message.split('\n');
+    w(`\u001b[33m  ${glyphs.warn} ${first}\u001b[0m`);
+    for (const line of rest) w(`  ${line}`);
+  }
   w(dim('  /help for commands · ctrl+g context · ctrl+a artifacts · esc cancel'));
   w('');
 }

@@ -62,6 +62,22 @@ export function needsSudo(cmd) {
   return false;
 }
 
+/** A first argument that turns off sudo's prompt: -n alone or bundled (-nl), or the long form. */
+const NO_PROMPT_FLAG = /^(?:-[a-zA-Z]*n[a-zA-Z]*|--non-interactive)$/;
+
+/**
+ * Does the command call sudo with -n? Lexical, like needsSudo. shell.js uses it to
+ * tell the model, when -n was refused for want of a password, that a plain sudo call
+ * would have reached the operator's password prompt instead.
+ */
+export function callsSudoNonInteractive(cmd) {
+  if (WIN || !cmd) return false;
+  for (const m of String(cmd).matchAll(SUDO_CALL)) {
+    if (NO_PROMPT_FLAG.test(m[1] || '')) return true;
+  }
+  return false;
+}
+
 /**
  * Open a one-shot password channel. Answers each sudo PID once, then refuses.
  * @param {string|null} secret

@@ -27,8 +27,9 @@ export function createOpenAIResponses({
   effort,
   temperature,
   thinkingVisible,
+  baseURL = undefined,
   name = 'openai',
-  client = new OpenAI({ apiKey, maxRetries: 3, timeout: 10 * 60 * 1000 }),
+  client = new OpenAI({ apiKey, baseURL, maxRetries: 3, timeout: 10 * 60 * 1000 }),
 }) {
   return {
     name,

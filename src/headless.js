@@ -35,6 +35,12 @@ export async function runHeadless(input, opts = {}) {
     }
   }
 
+  // Startup notices: a project setting that was ignored, a limit that was clamped.
+  for (const message of [...session.cfg.warnings, ...session.limitNotices]) {
+    emit({ type: 'warning', message });
+    if (!opts.json) process.stderr.write(`  ! ${message}\n`);
+  }
+
   // A one-shot request is still a prompt worth replaying later.
   session.history?.add(input);
 

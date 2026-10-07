@@ -53,6 +53,7 @@ export async function createSession(opts = {}) {
   const log = new SessionLog({ home: cfg.home, cfg, resumedFrom: prior?.id });
   const journal = new Journal({ dir: log.dir });
   if (limitNotices.length) log.event('limits-clamped', { notices: limitNotices });
+  if (cfg.warnings.length) log.event('config-warnings', { warnings: cfg.warnings });
 
   const ledger = new Ledger({ limit: cfg.contextLimit, compactAt: cfg.compactAt });
   const grounding = buildGrounding({ sandbox, cfg });

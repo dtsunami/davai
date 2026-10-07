@@ -5,7 +5,7 @@
  * allows with --yes/--yolo and otherwise denies.
  */
 import { spawn } from 'node:child_process';
-import { openChannel, SUDO_FN } from '../askpass.js';
+import { openChannel, SUDO_FN, callsSudoNonInteractive } from '../askpass.js';
 
 const MAX_OUTPUT = 100_000;
 
@@ -19,17 +19,33 @@ const NEEDS_TTY = new RegExp(
   'i',
 );
 
-function noteFor(killed, code, stderr, timeout, sudoReady = false) {
+/** What `sudo -n` prints when it would have needed a password. */
+const SUDO_N_REFUSED = /sudo: a password is required/i;
+
+/**
+ * @param {{cmd: string, killed: boolean, code: number|null, stdout: string, stderr: string,
+ *   timeout: number, sudoReady?: boolean}} r
+ */
+function noteFor({ cmd, killed, code, stdout, stderr, timeout, sudoReady = false }) {
   const notes = [];
   if (killed) notes.push(`killed after ${Math.round(timeout / 1000)}s (timeout or cancel)`);
-  // With a password on hand, sudo's failures are explained by sudoNote instead.
-  if (code !== 0 && NEEDS_TTY.test(stderr) && !(sudoReady && SUDO_NO_TTY.test(stderr))) {
+  // Both streams, any exit code: `sudo -n -l 2>&1 | head` exits 0 with the refusal in
+  // stdout, and that is the case that once led the model to declare sudo impossible.
+  if (callsSudoNonInteractive(cmd) && SUDO_N_REFUSED.test(`${stdout}\n${stderr}`)) {
+    notes.push(
+      'sudo -n was refused because this sudo needs a password. That is not a dead end: ' +
+        'rerun it as a plain `sudo ...` call without -n, and in the REPL davai asks the ' +
+        'operator for the password in the approval pane and supplies it. Do not tell the ' +
+        'operator sudo is unavailable or that you cannot enter a password',
+    );
+  } else if (code !== 0 && NEEDS_TTY.test(stderr) && !(sudoReady && SUDO_NO_TTY.test(stderr))) {
+    // With a password on hand, sudo's failures are explained by sudoNote instead.
     notes.push(
       'the command wanted an interactive prompt (password or credentials) and had no ' +
         'terminal, and no password was supplied for it. davai can supply a sudo password ' +
         'only to direct `sudo` calls in a command the operator approves in the REPL; ' +
-        'otherwise ask the operator to run it in their own terminal, or use a ' +
-        'non-interactive form (sudo -n, a credential helper)',
+        'otherwise ask the operator to run it in their own terminal or, for git and ssh, ' +
+        'use a credential helper or key',
     );
   }
   return notes.length ? { note: notes.join('; ') } : {};
@@ -170,7 +186,15 @@ function spawnShell(op, ctx, extra = {}) {
         durationMs: Date.now() - started,
         stdout: stdout.slice(0, MAX_OUTPUT),
         stderr: stderr.slice(0, MAX_OUTPUT),
-        ...noteFor(killed, code, stderr, ctx.shellTimeout, extra.sudoReady),
+        ...noteFor({
+          cmd: op.cmd,
+          killed,
+          code,
+          stdout,
+          stderr,
+          timeout: ctx.shellTimeout,
+          sudoReady: extra.sudoReady,
+        }),
         ...(truncated ? { outputTruncated: true } : {}),
       });
     };

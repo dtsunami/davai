@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import dotenv from 'dotenv';
-import { resolvePrompts } from '../agent/prompt.js';
+import { promptDirs, removedPromptVars, resolvePrompts } from '../agent/prompt.js';
 import { resolveModel } from './models.js';
 
 /** @returns {string} */
@@ -109,6 +109,96 @@ export function applyModelLimits(cfg) {
   return clamped;
 }
 
+/** Providers whose adapter can be pointed at another endpoint. */
+const BASE_URL_PROVIDERS = ['openai', 'grok'];
+
+/**
+ * The API endpoint, for an OpenAI-compatible server (Mistral, a local server, a proxy).
+ * Read here from the merged config, so .env works like it does for every other setting,
+ * and passed to the SDK explicitly. The SDK's own OPENAI_BASE_URL fallback reads only the
+ * real process environment: a value in .env never reached it, and the key silently went
+ * to api.openai.com. OPENAI_BASE_URL is honoured here for that reason.
+ *
+ * @returns {string|undefined}
+ */
+function resolveBaseURL(provider, merged) {
+  const fromDavai = merged.DAVAI_BASE_URL?.trim();
+  const raw = fromDavai || (provider === 'openai' ? merged.OPENAI_BASE_URL?.trim() : '');
+  if (!raw) return undefined;
+  const name = fromDavai ? 'DAVAI_BASE_URL' : 'OPENAI_BASE_URL';
+  if (!BASE_URL_PROVIDERS.includes(provider)) {
+    throw new Error(
+      `${name} is set, but provider "${provider}" does not support a custom base URL ` +
+        `(supported: ${BASE_URL_PROVIDERS.join(', ')}). For an OpenAI-compatible endpoint ` +
+        `use DAVAI_PROVIDER=openai; otherwise unset ${name}.`,
+    );
+  }
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`${name}="${raw}" is not a valid URL. Expected e.g. https://api.mistral.ai/v1`);
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error(`${name}="${raw}" must be an http or https URL.`);
+  }
+  return raw.replace(/\/+$/, '');
+}
+
+/**
+ * Settings that decide where the API key is sent. A project's ./.env may not set them:
+ * running davai inside a cloned repo would otherwise hand your key to whatever server
+ * that repo named, with nothing on screen to say so.
+ */
+const HOME_ONLY_VARS = ['DAVAI_BASE_URL', 'OPENAI_BASE_URL'];
+
+/** The variables each provider's key is read from, in priority order. */
+const KEY_VARS = {
+  anthropic: ['ANTHROPIC_API_KEY'],
+  openai: ['OPENAI_API_KEY'],
+  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+  grok: ['XAI_API_KEY', 'GROK_API_KEY'],
+};
+
+/** Single-quote a string for sh. */
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Undo, in place, what the project .env set for HOME_ONLY_VARS, falling back to the home
+ * .env value. The real environment and explicit overrides are the operator's own and are
+ * left alone. Each dropped value comes back as a warning carrying the command that adopts
+ * it, so trusting the project is a deliberate step on relaunch rather than a default.
+ *
+ * @returns {string[]} warnings
+ */
+function dropProjectOnly(merged, { homeVars, projectVars, homeEnvFile, cwdEnvFile, overrides, origins }) {
+  const warnings = [];
+  for (const name of HOME_ONLY_VARS) {
+    const value = projectVars[name]?.trim();
+    if (!value) continue;
+    if (process.env[name] || overrides[name] !== undefined) continue;
+    const fallback = homeVars[name]?.trim();
+    if (fallback) {
+      merged[name] = fallback;
+      origins[name] = homeEnvFile;
+    } else {
+      delete merged[name];
+      delete origins[name];
+    }
+    warnings.push(
+      `${cwdEnvFile} sets ${name}=${value}, which was ignored: a project .env cannot ` +
+        `choose where your API key is sent. ` +
+        (fallback ? `Using ${fallback} from ${homeEnvFile}. ` : '') +
+        `To use it, export it in this shell and relaunch` +
+        (fallback ? ' (the environment takes precedence over the home .env)' : '') +
+        `:\n  export ${name}=${shQuote(value)}`,
+    );
+  }
+  return warnings;
+}
+
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
@@ -127,8 +217,13 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
  * @property {number} compactAt
  * @property {number} maxCost      session spend cap in dollars; 0 = no cap
  * @property {boolean} thinkingVisible
+ * @property {string|undefined} baseURL  OpenAI-compatible endpoint; undefined = the provider's own
  * @property {Record<string,string|undefined>} keys
  * @property {string[]} envFiles   which .env files were actually loaded
+ * @property {string[]} warnings   startup notices for the operator, e.g. an ignored project setting
+ * @property {Record<string,{name: string, from: string|undefined}>} keyOrigins
+ *   per provider: the variable that supplied the key and where it was set (never the value)
+ * @property {{name: string, from: string|undefined}|undefined} baseURLOrigin  same, for the endpoint
  */
 
 /**
@@ -145,19 +240,43 @@ export function loadConfig(opts = {}) {
   const envFiles = [];
   let merged = {};
 
+  // Where each merged value came from, for diagnostics. Holds sources, never values.
+  /** @type {Record<string,string>} */
+  const origins = {};
+  const fileVars = {};
   for (const file of [homeEnvFile, cwdEnvFile]) {
     const parsed = readEnvFile(file);
+    fileVars[file] = parsed;
     if (Object.keys(parsed).length) {
       envFiles.push(file);
       merged = { ...merged, ...parsed };
+      for (const k of Object.keys(parsed)) origins[k] = file;
     }
   }
   // Real environment always wins over a file.
   for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && v !== '') merged[k] = v;
+    if (v !== undefined && v !== '') {
+      merged[k] = v;
+      origins[k] = 'environment';
+    }
   }
   // Explicit overrides (CLI flags, /model pane) win over everything.
   merged = { ...merged, ...(opts.overrides || {}) };
+  for (const [k, v] of Object.entries(opts.overrides || {})) {
+    if (v !== undefined) origins[k] = 'settings.json / command-line flag';
+  }
+  // Run inside $DAVAI_HOME, the project .env is the home one and is trusted.
+  const warnings =
+    cwdEnvFile === homeEnvFile
+      ? []
+      : dropProjectOnly(merged, {
+          homeVars: fileVars[homeEnvFile],
+          projectVars: fileVars[cwdEnvFile],
+          homeEnvFile,
+          cwdEnvFile,
+          overrides: opts.overrides || {},
+          origins,
+        });
 
   const provider = (merged.DAVAI_PROVIDER || 'anthropic').trim().toLowerCase();
   const model = resolveModel(provider, merged.DAVAI_MODEL?.trim());
@@ -169,7 +288,13 @@ export function loadConfig(opts = {}) {
     );
   }
 
-  const openaiApi = (merged.DAVAI_OPENAI_API || 'responses').trim().toLowerCase();
+  const baseURL = resolveBaseURL(provider, merged);
+
+  // A custom endpoint defaults to Chat Completions: that is what OpenAI-compatible
+  // servers implement, and most (Mistral included) have no /v1/responses.
+  const openaiApi = (merged.DAVAI_OPENAI_API || (baseURL ? 'chat' : 'responses'))
+    .trim()
+    .toLowerCase();
   if (!['responses', 'chat'].includes(openaiApi)) {
     throw new Error(`DAVAI_OPENAI_API="${openaiApi}" is not valid. Expected responses or chat.`);
   }
@@ -202,6 +327,15 @@ export function loadConfig(opts = {}) {
     gemini: merged.GEMINI_API_KEY || merged.GOOGLE_API_KEY,
     grok: merged.XAI_API_KEY || merged.GROK_API_KEY,
   };
+  // Where the key and endpoint came from, for the auth-failure diagnostic. Names and
+  // sources only; the values stay in `keys` and `baseURL`.
+  const keyOrigins = {};
+  for (const [p, names] of Object.entries(KEY_VARS)) {
+    const name = names.find((n) => merged[n]) || names[0];
+    keyOrigins[p] = { name, from: merged[name] ? origins[name] : undefined };
+  }
+  const baseURLVar = merged.DAVAI_BASE_URL?.trim() ? 'DAVAI_BASE_URL' : 'OPENAI_BASE_URL';
+  const baseURLOrigin = baseURL ? { name: baseURLVar, from: origins[baseURLVar] } : undefined;
 
   const limitsRequested = {
     maxTokens: positiveInt(merged.DAVAI_MAX_TOKENS, 'DAVAI_MAX_TOKENS'),
@@ -211,7 +345,13 @@ export function loadConfig(opts = {}) {
   const { maxTokens, contextLimit } = resolveLimits(model, limitsRequested);
   // Resolved here rather than in the agent so that an unreadable prompt file or a
   // template missing its placeholder fails at startup, next to every other bad setting.
-  const { values: prompts, sources: promptSources } = resolvePrompts(merged);
+  const promptLocations = promptDirs(home, cwd);
+  const {
+    values: prompts,
+    sources: promptSources,
+    layers: promptLayers,
+  } = resolvePrompts(promptLocations);
+  warnings.push(...removedPromptVars(merged));
 
   return {
     home,
@@ -237,13 +377,19 @@ export function loadConfig(opts = {}) {
     // Turn a half-wired event into a loud failure instead of a counter nobody reads.
     strictEvents: bool(merged.DAVAI_STRICT_EVENTS, false),
     openaiApi,
+    baseURL,
     prompts,
     promptSources,
+    promptLayers,
+    promptDirs: promptLocations,
     // Auto-approve shell ops. Deliberately not a persisted setting (see settings.js):
     // it lives for one run, or for one `/yolo` toggle, and never outlives the session.
     yolo: bool(merged.DAVAI_YOLO, false),
     keys,
+    keyOrigins,
+    baseURLOrigin,
     envFiles,
+    warnings,
   };
 }
 

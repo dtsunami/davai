@@ -1,5 +1,5 @@
 /**
- * Every prompt davai sends, and the environment that can replace them.
+ * Every prompt davai sends, and the files that can replace them (see resolvePrompts).
  *
  * This text is the contract with the model. It is also the cached prefix, so it must
  * be byte-stable across turns within a session — never interpolate a timestamp or
@@ -7,6 +7,7 @@
  * therefore resolved once, at config load, and never re-read mid-session.
  */
 import fs from 'node:fs';
+import path from 'node:path';
 
 const PROTOCOL = `# The da_ops protocol
 
@@ -72,6 +73,10 @@ Every payload block you open must be referenced by an op and closed with
 5. **\`shell\` is a last resort.** It stops and waits for a human, and it cannot be
    undone. File operations have dedicated ops — use them. Reach for \`shell\` for
    things like running tests or a build, not for reading or moving files.
+   For root, call \`sudo\` directly and plainly (\`sudo apt update\`): davai asks the
+   operator for the password in the approval pane and supplies it. Never add \`-n\`
+   or \`-S\`, and never reach sudo through a script, \`sh -c\`, \`xargs\` or \`env\`:
+   davai only sees direct calls, and anything else fails without a prompt.
 6. **Batch aggressively.** Independent reads belong in one block, not five turns.
 7. **When the work is done, stop emitting ops.** Say what you did in prose. If you
    are delivering content (a file, a snippet, a report), put it in a plain fenced
@@ -135,67 +140,112 @@ const REPAIR =
  * results or the error would never reach the model, and the failure would be silent.
  */
 export const PROMPT_SPECS = [
-  { key: 'preamble', env: 'DAVAI_PROMPT_PREAMBLE', text: PREAMBLE },
-  { key: 'protocol', env: 'DAVAI_PROMPT_PROTOCOL', text: PROTOCOL },
-  { key: 'opsResult', env: 'DAVAI_PROMPT_OPS_RESULT', text: OPS_RESULT, placeholder: '{results}' },
-  { key: 'nudge', env: 'DAVAI_PROMPT_NUDGE', text: NUDGE },
-  { key: 'steer', env: 'DAVAI_PROMPT_STEER', text: STEER, placeholder: '{text}' },
-  { key: 'repair', env: 'DAVAI_PROMPT_REPAIR', text: REPAIR, placeholder: '{error}' },
+  { key: 'preamble', file: 'preamble.md', text: PREAMBLE },
+  { key: 'protocol', file: 'protocol.md', text: PROTOCOL },
+  { key: 'opsResult', file: 'ops_result.md', text: OPS_RESULT, placeholder: '{results}' },
+  { key: 'nudge', file: 'nudge.md', text: NUDGE },
+  { key: 'steer', file: 'steer.md', text: STEER, placeholder: '{text}' },
+  { key: 'repair', file: 'repair.md', text: REPAIR, placeholder: '{error}' },
 ];
 
 /** @type {Record<string, string>} */
 export const DEFAULT_PROMPTS = Object.fromEntries(PROMPT_SPECS.map((s) => [s.key, s.text]));
 
+/** `$DAVAI_HOME/prompts` applies to every project; `./.prompts` to the one it sits in. */
+export const HOME_PROMPTS_DIR = 'prompts';
+export const PROJECT_PROMPTS_DIR = '.prompts';
+
 /**
- * Resolve every prompt against the environment.
- *
- * Each takes `DAVAI_PROMPT_<NAME>` inline, or `DAVAI_PROMPT_<NAME>_FILE` for a path —
- * prompts are long and multi-line, which `.env` handles badly. Inline wins when both
- * are set, the same way the real environment beats a file everywhere else in davai.
- *
- * @param {Record<string, string|undefined>} env
- * @returns {{values: Record<string, string>, sources: Record<string, string>}}
+ * The prompt directories for a run.
+ * @returns {{home: string, project: string}}
  */
-export function resolvePrompts(env = {}) {
+export function promptDirs(home, cwd) {
+  return {
+    home: path.join(home, HOME_PROMPTS_DIR),
+    project: path.join(cwd, PROJECT_PROMPTS_DIR),
+  };
+}
+
+function readPrompt(file, label) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    throw new Error(`${label} could not be read: ${err.message}`, { cause: err });
+  }
+}
+
+/** An override that is blank or drops its placeholder fails loudly, never silently. */
+function checkOverride(spec, text, source) {
+  if (!text.trim()) {
+    throw new Error(`${source} is empty. Remove it to use the default ${spec.key} prompt.`);
+  }
+  if (spec.placeholder && !text.includes(spec.placeholder)) {
+    throw new Error(
+      `${source} must contain ${spec.placeholder}, or nothing davai substitutes ` +
+        `there would ever reach the model.`,
+    );
+  }
+}
+
+/**
+ * Resolve every prompt. Each resolves on its own, and the highest layer that has it wins:
+ *
+ *   built-in  ->  $DAVAI_HOME/prompts/<file>  ->  ./.prompts/<file>
+ *
+ * Files are read verbatim, so a prompt full of quotes, backslashes and backticks
+ * survives exactly — which `.env` could never guarantee, and why the old DAVAI_PROMPT_*
+ * variables are gone. Every layer that is read is checked, so a broken home file is
+ * reported even while a project file shadows it.
+ *
+ * @param {{home?: string, project?: string}} [dirs]
+ * @returns {{values: Record<string, string>, sources: Record<string, string>,
+ *   layers: Record<string, 'default'|'home'|'project'>}}
+ */
+export function resolvePrompts(dirs = {}) {
   const values = {};
   const sources = {};
+  const layers = {};
 
   for (const spec of PROMPT_SPECS) {
-    const fileVar = `${spec.env}_FILE`;
-    const inline = env[spec.env];
-    const file = env[fileVar];
     let text = spec.text;
     let source = 'default';
+    let layer = 'default';
 
-    if (inline) {
-      text = inline;
-      source = spec.env;
-    } else if (file) {
-      try {
-        text = fs.readFileSync(file, 'utf8');
-      } catch (err) {
-        throw new Error(`${fileVar}="${file}" could not be read: ${err.message}`, { cause: err });
-      }
-      source = `${fileVar}=${file}`;
-    }
-
-    if (source !== 'default') {
-      if (!text.trim()) {
-        throw new Error(`${source} is empty. Unset it to use the default ${spec.key} prompt.`);
-      }
-      if (spec.placeholder && !text.includes(spec.placeholder)) {
-        throw new Error(
-          `${source} must contain ${spec.placeholder}, or nothing davai substitutes ` +
-            `there would ever reach the model.`,
-        );
-      }
+    for (const name of ['home', 'project']) {
+      if (!dirs[name]) continue;
+      const file = path.join(dirs[name], spec.file);
+      if (!fs.existsSync(file)) continue;
+      text = readPrompt(file, file);
+      source = file;
+      layer = name;
+      checkOverride(spec, text, source);
     }
 
     values[spec.key] = text;
     sources[spec.key] = source;
+    layers[spec.key] = layer;
   }
 
-  return { values, sources };
+  return { values, sources, layers };
+}
+
+/**
+ * The DAVAI_PROMPT_* variables are no longer read. One that is still set is ignored but
+ * reported, so a customised prompt does not silently revert to the default.
+ *
+ * @param {Record<string, string|undefined>} env
+ * @returns {string[]} warnings
+ */
+export function removedPromptVars(env = {}) {
+  const found = Object.keys(env)
+    .filter((k) => /^DAVAI_PROMPT_[A-Z_]+$/.test(k) && env[k])
+    .sort();
+  if (!found.length) return [];
+  return [
+    `${found.join(', ')} ${found.length === 1 ? 'is' : 'are'} no longer read: prompts now ` +
+      `live in files — $DAVAI_HOME/${HOME_PROMPTS_DIR}/<name>.md for every project, ` +
+      `./${PROJECT_PROMPTS_DIR}/<name>.md for one. Move the text there and unset the variable.`,
+  ];
 }
 
 /** Substitute without treating `$&` and friends in the value as replacement patterns. */

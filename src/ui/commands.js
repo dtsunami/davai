@@ -3,7 +3,9 @@
  * several of them deliberately add their output to context.
  */
 import os from 'node:os';
-import { runShell } from '../agent/ops/shell.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { DEFAULT_PROMPTS, PROMPT_SPECS, promptDirs } from '../agent/prompt.js';import { runShell } from '../agent/ops/shell.js';
 import { gateShell } from '../agent/ops/executor.js';
 import { loadImage, clipboardImage } from '../context/images.js';
 import { listSessions } from '../session/log.js';
@@ -19,6 +21,7 @@ const HELP = `Commands
   /compact            compact the context now
   /sessions           recent sessions
   /config             resolved configuration
+  /prompts [export]   where each prompt comes from; export writes them to ./.prompts
   /clear              drop conversation context, keep grounding
   /yolo [on|off]      auto-approve shell commands for this session
   /events             harness events emitted vs retired this session
@@ -327,6 +330,78 @@ export async function handleCommand(text, deps) {
         return `  ${s.id}  ${s.startedAt.slice(0, 19)}  ${s.model}  ${t.turns || 0}t ${t.ops || 0}ops  ${cost}`;
       });
       push({ type: 'info', text: ['Recent sessions', ...lines].join('\n') });
+      return { handled: true };
+    }
+
+    case 'prompts': {
+      const dirs = cfg.promptDirs || promptDirs(cfg.home, cfg.cwd);
+      const [sub, ...flags] = rest.filter(Boolean);
+
+      if (!sub) {
+        const lines = PROMPT_SPECS.map((s) => {
+          const layer = cfg.promptLayers?.[s.key] || 'default';
+          const where = layer === 'default' ? 'built-in' : cfg.promptSources?.[s.key];
+          return `  ${s.key.padEnd(10)} ${layer.padEnd(8)} ${where}`;
+        });
+        push({
+          type: 'info',
+          text: [
+            `Prompts (highest wins: built-in ${glyphs.arrow} home ${glyphs.arrow} project)`,
+            ...lines,
+            '',
+            `  home     ${dirs.home}`,
+            `  project  ${dirs.project}`,
+            '',
+            '  /prompts export [--force] writes the resolved prompts to ./.prompts; edits apply on relaunch',
+          ].join('\n'),
+        });
+        return { handled: true };
+      }
+
+      if (sub !== 'export' || flags.some((f) => f !== '--force')) {
+        push({ type: 'warning', message: 'usage: /prompts  or  /prompts export [--force]' });
+        return { handled: true };
+      }
+      const force = flags.includes('--force');
+
+      let targets;
+      try {
+        targets = PROMPT_SPECS.map((spec) => ({
+          spec,
+          abs: sandbox.resolveForWrite(path.join(dirs.project, spec.file)),
+        }));
+      } catch (err) {
+        push({ type: 'warning', message: `not exported: ${err.message}` });
+        return { handled: true };
+      }
+
+      // Check every file before writing any, so a refusal leaves nothing half-exported.
+      const existing = targets.filter((t) => fs.existsSync(t.abs));
+      if (existing.length && !force) {
+        push({
+          type: 'warning',
+          message:
+            `not exported: ${existing.map((t) => sandbox.rel(t.abs)).join(', ')} ` +
+            `already exist${existing.length === 1 ? 's' : ''} — /prompts export --force to overwrite`,
+        });
+        return { handled: true };
+      }
+
+      const values = cfg.prompts || DEFAULT_PROMPTS;
+      try {
+        fs.mkdirSync(path.dirname(targets[0].abs), { recursive: true });
+        for (const t of targets) fs.writeFileSync(t.abs, values[t.spec.key]);
+      } catch (err) {
+        push({ type: 'warning', message: `export failed: ${err.message}` });
+        return { handled: true };
+      }
+      log.event('prompts-export', { dir: dirs.project, force, files: targets.length });
+      push({
+        type: 'notice',
+        message:
+          `exported ${targets.length} prompts to ${sandbox.rel(path.dirname(targets[0].abs))}/ — ` +
+          `edits apply on relaunch, and these now shadow $DAVAI_HOME/prompts for this project`,
+      });
       return { handled: true };
     }
 

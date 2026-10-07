@@ -5,7 +5,7 @@ import path from 'node:path';
 import { runShell } from '../src/agent/ops/shell.js';
 import { executeBatch, formatResults } from '../src/agent/ops/executor.js';
 import { Journal } from '../src/agent/journal.js';
-import { SudoAuth, needsSudo } from '../src/agent/askpass.js';
+import { SudoAuth, needsSudo, callsSudoNonInteractive } from '../src/agent/askpass.js';
 import { Sandbox } from '../src/agent/sandbox.js';
 import { DaIgnore } from '../src/agent/daignore.js';
 
@@ -124,6 +124,28 @@ describe.skipIf(process.platform === 'win32')('sudo via askpass', () => {
     expect(r.exitCode).not.toBe(0);
     expect(r.sudo.asked).toBe(0);
     expect(r.note).toMatch(/indirectly/);
+  });
+
+  it('spots sudo -n in its bundled and long forms', () => {
+    expect(callsSudoNonInteractive('sudo -n true')).toBe(true);
+    expect(callsSudoNonInteractive('sudo -nl')).toBe(true);
+    expect(callsSudoNonInteractive('x && sudo --non-interactive id')).toBe(true);
+    expect(callsSudoNonInteractive('sudo true')).toBe(false);
+    expect(callsSudoNonInteractive('sudo -u root id')).toBe(false);
+    expect(callsSudoNonInteractive('ls -n')).toBe(false);
+  });
+
+  it('nudges the model off sudo -n when a password is needed', async () => {
+    const r = await runShell({ cmd: 'sudo -n true' }, ctx);
+    expect(r.exitCode).not.toBe(0);
+    expect(r.note).toMatch(/without -n/);
+    expect(r.note).not.toMatch(/interactive prompt/);
+  });
+
+  it('nudges even when a pipe hides the sudo -n exit code', async () => {
+    const r = await runShell({ cmd: 'sudo -n -l 2>&1 | head -n 5' }, ctx);
+    expect(r.exitCode).toBe(0);
+    expect(r.note).toMatch(/without -n/);
   });
 
   it('keeps the password out of the environment and the output', async () => {

@@ -248,30 +248,44 @@ build tooling.
 
 ## Prompts
 
-There are five, and every one is replaceable from the environment:
+There are six, and each is a markdown file you can replace:
 
-| prompt | variable | what it is |
+| prompt | file | what it is |
 |---|---|---|
-| preamble | `DAVAI_PROMPT_PREAMBLE` | who the assistant is and how it writes |
-| protocol | `DAVAI_PROMPT_PROTOCOL` | the whole `da_ops` specification |
-| ops result | `DAVAI_PROMPT_OPS_RESULT` | wraps each `da_results` block — needs `{results}` |
-| nudge | `DAVAI_PROMPT_NUDGE` | sent when a turn produced no ops and no conclusion |
-| steer | `DAVAI_PROMPT_STEER` | wraps a mid-run correction — needs `{text}` |
-| repair | `DAVAI_PROMPT_REPAIR` | sent when a block did not parse — needs `{error}` |
+| preamble | `preamble.md` | who the assistant is and how it writes |
+| protocol | `protocol.md` | the whole `da_ops` specification |
+| ops result | `ops_result.md` | wraps each `da_results` block — needs `{results}` |
+| nudge | `nudge.md` | sent when a turn produced no ops and no conclusion |
+| steer | `steer.md` | wraps a mid-run correction — needs `{text}` |
+| repair | `repair.md` | sent when a block did not parse — needs `{error}` |
 
-Each also takes a `_FILE` variant holding a path, which is the practical choice for
-anything multi-line. Inline wins when both are set, matching the rest of davai's
-precedence. `davai --config` reports where each prompt came from.
+Each prompt resolves on its own, and the highest layer that has the file wins:
 
-Overrides are validated at startup, not on first use: one that is empty, points at an
-unreadable file, or drops its `{placeholder}` stops the session with an explanation.
+1. built-in, in [src/agent/prompt.js](src/agent/prompt.js)
+2. `$DAVAI_HOME/prompts/<file>`: your defaults, for every project
+3. `./.prompts/<file>`: this project only
+
+Files are read verbatim, so quotes, backslashes and backticks need no escaping. `/prompts`
+shows which layer each prompt comes from. `/prompts export` writes the resolved prompts to
+`./.prompts/` as a starting point, and refuses to overwrite existing files without
+`--force`. The grounding (directory listing, git state, `DAVAI.md`) is generated each
+launch and is not a prompt file.
+
+The old `DAVAI_PROMPT_*` variables are no longer read; davai warns at startup if one is
+still set.
+
+A project's `./.prompts` is loaded without asking, and a cloned repo can ship one. Read it
+before running davai in an unfamiliar repo, especially with `--yolo`.
+
+Overrides are validated at startup, not on first use: one that is empty, unreadable, or
+drops its `{placeholder}` stops the session with an explanation.
 That last check matters — a `{results}`-less template would send the model a friendly
 sentence and none of the output it asked for.
 
 The system prompt is the cached prefix, so prompts are resolved once at startup and
 never re-read mid-session; editing a prompt file takes effect on the next run.
 
-Two cautions. Replacing `DAVAI_PROMPT_PROTOCOL` replaces the contract [the parser](src/agent/parser.js)
+Two cautions. Replacing `protocol.md` replaces the contract [the parser](src/agent/parser.js)
 implements, so the model can quite easily stop emitting anything davai can execute —
 start from the default text. And the ops-result prompt rides along with every batch
 rather than being cached, so a paragraph there is a paragraph multiplied by every batch
