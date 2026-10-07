@@ -17,6 +17,8 @@ import { costOf, isPriceEstimated } from '../config/models.js';
 const MAX_REPAIRS = 2;
 const MAX_STEPS = 60;
 const MAX_NUDGES = 2;
+/** Empty turns tolerated in a row before the run is stopped. */
+const MAX_EMPTY = 2;
 const MAX_PROVIDER_RETRIES = 2;
 const RETRY_BASE_MS = 1000;
 const RETRY_CAP_MS = 30_000;
@@ -195,6 +197,7 @@ export class Agent extends EventEmitter {
       let repairs = 0;
       let nudges = 0;
       let nudgedAt = -1;
+      let empties = 0;
 
       for (let step = 0; step < MAX_STEPS; step++) {
         if (this.controller.signal.aborted) {
@@ -214,6 +217,37 @@ export class Agent extends EventEmitter {
           this.emit('cancelled');
           return;
         }
+
+        // An empty assistant turn (typically max_tokens spent entirely on thinking) must
+        // never reach the ledger. Anthropic rejects an empty text block with a 400, and
+        // that one bad segment then failed every later request in the session. Store a
+        // placeholder instead, and tell the model what happened so it can change course.
+        if (!(turn.text || '').trim()) {
+          const reason = turn.stop?.reason || 'unknown';
+          this.log.event('empty-turn', { reason, inARow: empties + 1 });
+          if (empties++ >= MAX_EMPTY) {
+            this.emit('error', {
+              message:
+                `The model returned ${empties} empty turns in a row (stop: ${reason}). Stopping. ` +
+                (reason === 'max_tokens'
+                  ? 'Raise DAVAI_MAX_TOKENS or ask for a smaller step.'
+                  : 'Try a narrower request.'),
+            });
+            return;
+          }
+          this.emit('warning', {
+            message: `empty turn from the model (stop: ${reason}) — told it why and asked for a smaller step`,
+          });
+          this.ledger.add({ type: 'assistant', label: 'empty turn', role: 'assistant', text: '(no output)' });
+          this.ledger.add({
+            type: 'op-result',
+            label: 'empty turn',
+            role: 'user',
+            text: emptyTurnPrompt(reason, this.cfg.maxTokens),
+          });
+          continue;
+        }
+        empties = 0;
 
         const { ops, parseError, artifacts, prose } = extract(turn.text);
 
@@ -455,7 +489,8 @@ export class Agent extends EventEmitter {
       journal: this.journal,
       shellTimeout: this.cfg.shellTimeout,
       signal: this.controller.signal,
-      approve: (op, index) => this.#requestApproval(op, index),
+      approve: (op, index, extra) => this.#requestApproval(op, index, extra),
+      sudo: this.sudo,
     });
 
     this.stats.ops += ops.length;
@@ -507,9 +542,9 @@ export class Agent extends EventEmitter {
   }
 
   /** The UI answers this; headless mode supplies its own policy. */
-  #requestApproval(op, index) {
+  #requestApproval(op, index, extra) {
     return new Promise((resolve) => {
-      this.emit('approval-request', { op, index, respond: resolve });
+      this.emit('approval-request', { op, index, ...extra, respond: resolve });
     });
   }
 
@@ -527,6 +562,20 @@ export class Agent extends EventEmitter {
       this.emit('warning', { message: `auto-compact failed: ${err.message}` });
     }
   }
+}
+
+/** What the model is told after a turn that produced no visible text. */
+function emptyTurnPrompt(reason, maxTokens) {
+  const why =
+    reason === 'max_tokens'
+      ? `it hit the output limit (max_tokens ${maxTokens ?? 'unknown'}) before writing any ` +
+        'text; the budget most likely went to thinking'
+      : `stop reason: ${reason}`;
+  return (
+    `Your previous turn produced no visible output (${why}). Nothing was executed.\n` +
+    'Continue from where you were, but keep this turn small: one modest da_ops batch or a ' +
+    'short answer. Split large edits across several turns rather than planning them all at once.'
+  );
 }
 
 function firstLine(text) {

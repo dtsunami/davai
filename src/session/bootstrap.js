@@ -2,7 +2,7 @@
  * Wire up one davai session. Shared by the TUI and headless mode so both run
  * identical machinery.
  */
-import { loadConfig, requireKey, ensureHome } from '../config/env.js';
+import { loadConfig, requireKey, ensureHome, applyModelLimits } from '../config/env.js';
 import { loadSettings, settingsToOverrides } from '../config/settings.js';
 import { createProvider } from '../providers/index.js';
 import { refineModel } from '../config/models.js';
@@ -13,6 +13,7 @@ import { Ledger } from '../context/ledger.js';
 import { Artifacts } from '../context/artifacts.js';
 import { Pastes } from '../context/pastes.js';
 import { Agent } from '../agent/loop.js';
+import { SudoAuth, SUDO_TTL_MS } from '../agent/askpass.js';
 import { buildGrounding } from '../agent/grounding.js';
 import { buildSystemPrompt } from '../agent/prompt.js';
 import { SessionLog, pruneSessions } from './log.js';
@@ -43,13 +44,15 @@ export async function createSession(opts = {}) {
   // The registry is a seed; ask the provider for this model's real limits before we
   // size the context window around them.
   await refineModel(cfg.model, { apiKey });
-  if (cfg.model.refined) cfg.contextLimit = cfg.model.context;
-
+  // Re-derive from what was requested, now that the real limits are known. Overwriting
+  // contextLimit with the model window here used to discard DAVAI_CONTEXT_LIMIT.
+  const limitNotices = applyModelLimits(cfg);
   const ignore = DaIgnore.fromDir(cfg.cwd);
   const sandbox = new Sandbox({ cwd: cfg.cwd, roDirs: cfg.roDirs, ignore });
 
   const log = new SessionLog({ home: cfg.home, cfg, resumedFrom: prior?.id });
   const journal = new Journal({ dir: log.dir });
+  if (limitNotices.length) log.event('limits-clamped', { notices: limitNotices });
 
   const ledger = new Ledger({ limit: cfg.contextLimit, compactAt: cfg.compactAt });
   const grounding = buildGrounding({ sandbox, cfg });
@@ -71,6 +74,9 @@ export async function createSession(opts = {}) {
     journal,
     artifacts: new Artifacts(),
     log,
+    // In memory only, for this process. Headless gets one too: its approvals never carry
+    // a password, so sudo commands fail fast exactly as before, with a note saying why.
+    sudo: new SudoAuth({ ttlMs: cfg.sudoTtlMs ?? SUDO_TTL_MS }),
   });
 
   return {
@@ -86,6 +92,7 @@ export async function createSession(opts = {}) {
     artifacts: agent.artifacts,
     grounding,
     resumed,
+    limitNotices,
   };
 }
 

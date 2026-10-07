@@ -34,15 +34,21 @@ export function loadSettings(home) {
   }
 }
 
+/**
+ * Merge `settings` into what is already persisted. `undefined` leaves a field as it
+ * is; `null` removes it. A caller writing only the fields it knows about must not
+ * wipe the rest — the /model pane used to erase maxTokens and compactAt that way.
+ */
 export function saveSettings(home, settings) {
-  const clean = Object.fromEntries(
-    Object.entries(settings).filter(
-      ([k, v]) => FIELDS.includes(k) && v !== undefined,
-    ),
-  );
+  const merged = { ...loadSettings(home) };
+  for (const [k, v] of Object.entries(settings)) {
+    if (!FIELDS.includes(k) || v === undefined) continue;
+    if (v === null) delete merged[k];
+    else merged[k] = v;
+  }
   fs.mkdirSync(home, { recursive: true });
-  fs.writeFileSync(settingsPath(home), JSON.stringify(clean, null, 2) + '\n');
-  return clean;
+  fs.writeFileSync(settingsPath(home), JSON.stringify(merged, null, 2) + '\n');
+  return merged;
 }
 
 /**

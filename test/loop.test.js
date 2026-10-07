@@ -147,13 +147,19 @@ describe('stalled turns', () => {
     expect(events.error).toHaveLength(0);
   });
 
-  it('nudges an empty turn', async () => {
+  it('handles an empty turn without a nudge, and never resends empty text', async () => {
+    // Empty turns used to be nudged, which left an empty assistant segment in context;
+    // Anthropic then rejected every later request with a 400. They now get a
+    // placeholder and an explanation instead (see test/empty-turn.test.js).
     const provider = stubProvider(['', 'Nothing needed changing.']);
     const { agent } = makeAgent(provider);
     const events = await drive(agent, 'anything to do?');
 
-    expect(events.nudge).toHaveLength(1);
+    expect(events.nudge).toHaveLength(0);
+    expect(events.warning.some((w) => /empty turn/.test(w.message))).toBe(true);
     expect(events.done[0].prose).toContain('Nothing needed');
+    const texts = provider.sent[1].messages.flatMap((m) => m.content).map((c) => c.text);
+    expect(texts.every((t) => typeof t !== 'string' || t.trim().length > 0)).toBe(true);
   });
 
   it('puts the nudge in context so the model can see it', async () => {

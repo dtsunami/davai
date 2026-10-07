@@ -3,6 +3,8 @@
  *
  * Precedence, lowest to highest:
  *   $DAVAI_HOME/.env  ->  ./.env (cwd)  ->  real process environment
+ *     ->  $DAVAI_HOME/settings.json  ->  CLI flags
+ * (settings.json and flags arrive as `overrides`, assembled in session/bootstrap.js)
  *
  * The cwd overlay exists because a per-project .env is a natural thing to reach for
  * even though DAVAI_HOME is the documented location.
@@ -54,6 +56,59 @@ function num(v, dflt) {
   return Number.isFinite(n) ? n : dflt;
 }
 
+/** Undefined when unset; throws on anything but a positive integer. Accepts `64_000`. */
+function positiveInt(v, name) {
+  if (v === undefined || String(v).trim() === '') return undefined;
+  const n = Number(String(v).trim().replace(/_/g, ''));
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${name} must be a positive integer token count (got "${v}").`);
+  }
+  return n;
+}
+
+export const DEFAULT_MAX_TOKENS = 32_000;
+
+/**
+ * Turn requested limits into effective ones for a model. Requests above what the
+ * model supports are clamped: an oversized max_tokens is a 400 from the API, and a
+ * context limit past the real window means compacting too late. A synthesized
+ * (`unverified`) spec holds only guesses, so explicit requests are trusted there.
+ *
+ * @param {import('./models.js').ModelSpec} model
+ * @param {{maxTokens?: number, contextLimit?: number}} [requested]
+ * @returns {{maxTokens: number, contextLimit: number, clamped: string[]}}
+ */
+export function resolveLimits(model, requested = {}) {
+  const clamped = [];
+  const cap = (want, max, name) => {
+    if (model.unverified || want <= max) return want;
+    clamped.push(`${name}=${want} exceeds ${model.id}'s limit of ${max}; using ${max}`);
+    return max;
+  };
+  const maxTokens =
+    requested.maxTokens != null
+      ? cap(requested.maxTokens, model.maxOutput, 'DAVAI_MAX_TOKENS')
+      : Math.min(model.maxOutput, DEFAULT_MAX_TOKENS);
+  const contextLimit =
+    requested.contextLimit != null
+      ? cap(requested.contextLimit, model.context, 'DAVAI_CONTEXT_LIMIT')
+      : model.context;
+  return { maxTokens, contextLimit, clamped };
+}
+
+/**
+ * Recompute cfg.maxTokens / cfg.contextLimit after cfg.model changed (refinement, a
+ * model switch). Works from what was requested, not the previous effective values,
+ * so moving to a smaller model and back doesn't ratchet the limits down.
+ * @returns {string[]} clamp notices, empty when nothing was clamped
+ */
+export function applyModelLimits(cfg) {
+  const { maxTokens, contextLimit, clamped } = resolveLimits(cfg.model, cfg.limitsRequested);
+  cfg.maxTokens = maxTokens;
+  cfg.contextLimit = contextLimit;
+  return clamped;
+}
+
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
@@ -68,6 +123,7 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
  * @property {number|undefined} temperature
  * @property {number} shellTimeout
  * @property {number} contextLimit
+ * @property {{maxTokens?: number, contextLimit?: number}} limitsRequested  as configured, before clamping
  * @property {number} compactAt
  * @property {number} maxCost      session spend cap in dollars; 0 = no cap
  * @property {boolean} thinkingVisible
@@ -147,8 +203,12 @@ export function loadConfig(opts = {}) {
     grok: merged.XAI_API_KEY || merged.GROK_API_KEY,
   };
 
-  const contextLimit = num(merged.DAVAI_CONTEXT_LIMIT, model.context);
-
+  const limitsRequested = {
+    maxTokens: positiveInt(merged.DAVAI_MAX_TOKENS, 'DAVAI_MAX_TOKENS'),
+    contextLimit: positiveInt(merged.DAVAI_CONTEXT_LIMIT, 'DAVAI_CONTEXT_LIMIT'),
+  };
+  // Against the seed spec for now; bootstrap re-derives once refineModel() has run.
+  const { maxTokens, contextLimit } = resolveLimits(model, limitsRequested);
   // Resolved here rather than in the agent so that an unreadable prompt file or a
   // template missing its placeholder fails at startup, next to every other bad setting.
   const { values: prompts, sources: promptSources } = resolvePrompts(merged);
@@ -160,13 +220,17 @@ export function loadConfig(opts = {}) {
     model,
     roDirs,
     effort,
-    maxTokens: num(merged.DAVAI_MAX_TOKENS, Math.min(model.maxOutput, 32_000)),
+    maxTokens,
     temperature:
       merged.DAVAI_TEMPERATURE === undefined || merged.DAVAI_TEMPERATURE === ''
         ? undefined
         : num(merged.DAVAI_TEMPERATURE, undefined),
     shellTimeout: num(merged.DAVAI_SHELL_TIMEOUT, 120) * 1000,
+    // How long a verified sudo password stays in memory, in seconds; each use slides
+    // it, as sudo's own timestamp does. 0 asks every time. Never persisted.
+    sudoTtlMs: Math.max(0, num(merged.DAVAI_SUDO_TTL, 900)) * 1000,
     contextLimit,
+    limitsRequested,
     compactAt,
     maxCost,
     thinkingVisible: bool(merged.DAVAI_THINKING, false),

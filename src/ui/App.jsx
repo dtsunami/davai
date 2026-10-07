@@ -184,7 +184,8 @@ export function App({ session, initialInput }) {
     const onApproval = (req) => {
       // session.cfg is read at call time, not captured: /yolo toggles mid-session and
       // the next command must see the new value.
-      if (session.cfg.yolo) {
+      // yolo skips the question, not the password: a sudo command still needs one typed.
+      if (session.cfg.yolo && !req.sudo) {
         req.respond({ allow: true });
         push({ type: 'approval', cmd: req.op.cmd, allowed: true, auto: true });
         return;
@@ -247,6 +248,11 @@ export function App({ session, initialInput }) {
           exit();
         },
         refresh: () => setTick((t) => t + 1),
+        // `sh` asks for a sudo password through the approval pane, with no approval question.
+        requestSecret: (op, extra) =>
+          new Promise((resolve) =>
+            setApproval({ op, ...extra, operator: true, respond: resolve }),
+          ),
       });
       if (cmd.handled) return;
 
@@ -377,12 +383,15 @@ export function App({ session, initialInput }) {
           request={approval}
           onRespond={(decision) => {
             approval.respond(decision);
-            push({
-              type: 'approval',
-              cmd: approval.op.cmd,
-              allowed: decision.allow,
-              edited: decision.cmd,
-            });
+            // An operator `sh` only asked for the sudo password; there was no approval to record.
+            if (!approval.operator) {
+              push({
+                type: 'approval',
+                cmd: approval.op.cmd,
+                allowed: decision.allow,
+                edited: decision.cmd,
+              });
+            }
             setApproval(null);
           }}
         />
@@ -478,7 +487,9 @@ function HistoryItem({ item }) {
             {'  '}
             {outcome.status === 'plan-failed'
               ? 'nothing was applied; asking the model to resubmit'
-              : 'changes rolled back'}
+              : outcome.errors.some((e) => e.op === 'shell')
+                ? 'stopped at the shell op; earlier file changes kept'
+                : 'changes rolled back'}
           </Text>
         </Box>
       );

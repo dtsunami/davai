@@ -32,7 +32,7 @@ export function ModelPane({ session, onClose, push }) {
 
   const applyModel = async (id) => {
     try {
-      const { loadConfig } = await import('../config/env.js');
+      const { loadConfig, applyModelLimits } = await import('../config/env.js');
       const next = loadConfig({
         cwd: cfg.cwd,
         overrides: { DAVAI_PROVIDER: cfg.provider, DAVAI_MODEL: id, DAVAI_EFFORT: cfg.effort },
@@ -40,13 +40,16 @@ export function ModelPane({ session, onClose, push }) {
       await refineModel(next.model, { apiKey: cfg.keys[cfg.provider] });
 
       cfg.model = next.model;
-      cfg.maxTokens = Math.min(next.model.maxOutput, cfg.maxTokens);
-      cfg.contextLimit = next.model.context;
-      ledger.limit = next.model.context;
+      // From the session's requested limits, not the current effective ones: clamping
+      // against the old model and keeping the result ratcheted limits down, and taking
+      // the new model's full window discarded DAVAI_CONTEXT_LIMIT.
+      const notices = applyModelLimits(cfg);
+      ledger.limit = cfg.contextLimit;
       agent.provider = createProvider(cfg);
 
       saveSettings(cfg.home, { provider: cfg.provider, model: id, effort: cfg.effort });
-      push({ type: 'notice', message: `model ${glyphs.arrow} ${id} (${formatTokens(next.model.context)} context)` });
+      for (const message of notices) push({ type: 'warning', message });
+      push({ type: 'notice', message: `model ${glyphs.arrow} ${id} (${formatTokens(cfg.contextLimit)} context)` });
       onClose();
     } catch (err) {
       push({ type: 'error', message: `could not switch model: ${err.message}` });

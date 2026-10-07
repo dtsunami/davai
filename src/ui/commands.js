@@ -4,13 +4,14 @@
  */
 import os from 'node:os';
 import { runShell } from '../agent/ops/shell.js';
+import { gateShell } from '../agent/ops/executor.js';
 import { loadImage, clipboardImage } from '../context/images.js';
 import { listSessions } from '../session/log.js';
 import { compact } from '../context/compact.js';
 import { formatTokens, glyphs } from './theme.js';
 
 const HELP = `Commands
-  sh <cmd>            run a shell command; output is added to context
+  sh <cmd>            run a shell command; output is added to context (sudo asks for a password)
   /model              model and settings pane
   /context            context breakdown (also ctrl+g)
   /artifacts          artifacts from this session (also ctrl+a)
@@ -68,13 +69,49 @@ export async function handleCommand(text, deps) {
       return { handled: true };
     }
     push({ type: 'user', text });
-    const out = await runShell({ cmd }, { sandbox, shellTimeout: cfg.shellTimeout });
+
+    // Operator-initiated, so there is no approval question. sudo may still need a
+    // password: gateShell asks for it through the approval pane (requestSecret) and
+    // checks it before anything runs, sharing the agent's in-memory cache.
+    const gate = await gateShell({ op: 'shell', cmd }, 0, {
+      sudo: agent?.sudo,
+      approve: (op, index, extra) =>
+        extra?.sudo && deps.requestSecret
+          ? deps.requestSecret(op, extra)
+          : Promise.resolve({ allow: true }),
+    });
+
+    if (!gate.allow) {
+      const why = gate.message || gate.reason || 'not run';
+      push({ type: 'warning', message: `not run: ${why}` });
+      // In context too, so the model never assumes the command ran if asked about it.
+      ledger.add({
+        type: 'shell',
+        label: `sh ${cmd} (not run)`,
+        role: 'user',
+        text: `The operator tried to run a shell command, but it was not run:\n$ ${cmd}\n${why}`,
+      });
+      log.event('operator-shell', { cmd, notRun: why });
+      refresh();
+      return { handled: true };
+    }
+
+    const out = await runShell(
+      gate.op,
+      { sandbox, shellTimeout: cfg.shellTimeout },
+      { secret: gate.secret },
+    );
+    // sudo asked twice in one process: the cached password is stale.
+    if (out.sudo?.refused) agent?.sudo?.forget();
+
     const body = [out.stdout, out.stderr && `stderr:\n${out.stderr}`].filter(Boolean).join('\n');
+    const notes = [gate.auth, out.note].filter(Boolean);
     push({
       type: 'info',
       text: body || '(no output)',
       color: out.exitCode === 0 ? undefined : 'red',
     });
+    for (const n of notes) push({ type: out.exitCode === 0 ? 'notice' : 'warning', message: n });
     push({
       type: 'notice',
       message: `exit ${out.exitCode} · ${out.durationMs}ms · added to context`,
@@ -84,9 +121,16 @@ export async function handleCommand(text, deps) {
       type: 'shell',
       label: `sh ${cmd}`,
       role: 'user',
-      text: `The operator ran a shell command:\n$ ${cmd}\nexit ${out.exitCode}\n${body || '(no output)'}`,
+      text:
+        `The operator ran a shell command:\n$ ${cmd}\nexit ${out.exitCode}\n` +
+        notes.map((n) => `[${n}]\n`).join('') +
+        (body || '(no output)'),
     });
-    log.event('operator-shell', { cmd, exitCode: out.exitCode });
+    log.event('operator-shell', {
+      cmd,
+      exitCode: out.exitCode,
+      ...(gate.auth ? { auth: gate.auth } : {}),
+    });
     refresh();
     return { handled: true };
   }

@@ -5,33 +5,101 @@
  * allows with --yes/--yolo and otherwise denies.
  */
 import { spawn } from 'node:child_process';
+import { openChannel, SUDO_FN } from '../askpass.js';
 
 const MAX_OUTPUT = 100_000;
 
 const WIN = process.platform === 'win32';
 
 /** What an interactive prompt prints when it finds no terminal to ask on. */
-const NEEDS_TTY =
-  /sudo: (?:a terminal is required|a password is required|no tty present)|terminal prompts disabled|could not read (?:Username|Password)/i;
+const SUDO_NO_TTY =
+  /sudo: (?:a terminal is required|a password is required|no tty present|no password was provided|\d+ incorrect password attempts?)/i;
+const NEEDS_TTY = new RegExp(
+  `${SUDO_NO_TTY.source}|terminal prompts disabled|could not read (?:Username|Password)`,
+  'i',
+);
 
-function noteFor(killed, code, stderr, timeout) {
+function noteFor(killed, code, stderr, timeout, sudoReady = false) {
   const notes = [];
   if (killed) notes.push(`killed after ${Math.round(timeout / 1000)}s (timeout or cancel)`);
-  if (code !== 0 && NEEDS_TTY.test(stderr)) {
+  // With a password on hand, sudo's failures are explained by sudoNote instead.
+  if (code !== 0 && NEEDS_TTY.test(stderr) && !(sudoReady && SUDO_NO_TTY.test(stderr))) {
     notes.push(
-      'the command wanted an interactive prompt (password or credentials), which davai ' +
-        'cannot answer. Ask the operator to run it in their own terminal, or use a ' +
+      'the command wanted an interactive prompt (password or credentials) and had no ' +
+        'terminal, and no password was supplied for it. davai can supply a sudo password ' +
+        'only to direct `sudo` calls in a command the operator approves in the REPL; ' +
+        'otherwise ask the operator to run it in their own terminal, or use a ' +
         'non-interactive form (sudo -n, a credential helper)',
     );
   }
   return notes.length ? { note: notes.join('; ') } : {};
 }
 
+function appendNote(out, note) {
+  if (!note) return out;
+  return { ...out, note: out.note ? `${out.note}; ${note}` : note };
+}
+
+/** Telemetry for a command that ran with a sudo password available. */
+function sudoNote(trace, out) {
+  if (trace.refused) {
+    return (
+      'sudo rejected the password davai supplied (it asked again in the same process); ' +
+      'the cached password was dropped and the operator will be prompted on the next sudo command'
+    );
+  }
+  if (out.exitCode !== 0 && !trace.asked && SUDO_NO_TTY.test(out.stderr)) {
+    return (
+      'sudo wanted a password but never asked davai for it: it was run indirectly (a ' +
+      'script, /usr/bin/sudo, xargs, env, sh -c), which bypasses the askpass hook. Call ' +
+      'sudo directly in the command, or ask the operator to run it in their own terminal'
+    );
+  }
+  return '';
+}
+
+/**
+ * Run a shell op. With `secret`, direct `sudo` calls in the command get the password
+ * through the askpass channel (see ../askpass.js) instead of failing for want of a
+ * tty. The result carries a `sudo` trace and a note when anything went wrong, so the
+ * model can tell a wrong password from an indirect sudo call from no sudo at all.
+ *
+ * @param {{cmd: string, cwd?: string}} op
+ * @param {{sandbox: any, shellTimeout: number, signal?: AbortSignal}} ctx
+ * @param {{secret?: string|null}} [opts]
+ */
+export async function runShell(op, ctx, { secret } = {}) {
+  if (secret == null || WIN) return spawnShell(op, ctx);
+
+  let channel;
+  try {
+    channel = await openChannel(secret);
+  } catch (err) {
+    const out = await spawnShell(op, ctx);
+    return appendNote(
+      out,
+      `davai could not set up sudo password delivery (${err.message}), so the command ran without it`,
+    );
+  }
+  try {
+    const out = await spawnShell(op, ctx, {
+      prefix: SUDO_FN,
+      env: channel.env,
+      sudoReady: true,
+    });
+    const sudo = { ...channel.trace };
+    return appendNote({ ...out, sudo }, sudoNote(sudo, out));
+  } finally {
+    channel.close();
+  }
+}
+
 /**
  * @param {{cmd: string, cwd?: string}} op
  * @param {{sandbox: any, shellTimeout: number, signal?: AbortSignal}} ctx
+ * @param {{prefix?: string, env?: Record<string, string>, sudoReady?: boolean}} [extra]
  */
-export function runShell(op, ctx) {
+function spawnShell(op, ctx, extra = {}) {
   const cwd = op.cwd ? ctx.sandbox.resolveForWrite(op.cwd) : ctx.sandbox.writeRoot;
 
   return new Promise((resolve) => {
@@ -48,11 +116,11 @@ export function runShell(op, ctx) {
         // new session (detached = setsid) there is no tty to find, so they fail at once
         // with a message the model can act on. A piped stdin that is never closed also
         // hung anything that reads it, like a bare `cat`.
-        spawn('/bin/sh', ['-c', op.cmd], {
+        spawn('/bin/sh', ['-c', (extra.prefix || '') + op.cmd], {
           cwd,
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: true,
-          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+          env: { ...process.env, ...extra.env, GIT_TERMINAL_PROMPT: '0' },
         });
 
     let stdout = '';
@@ -102,7 +170,7 @@ export function runShell(op, ctx) {
         durationMs: Date.now() - started,
         stdout: stdout.slice(0, MAX_OUTPUT),
         stderr: stderr.slice(0, MAX_OUTPUT),
-        ...noteFor(killed, code, stderr, ctx.shellTimeout),
+        ...noteFor(killed, code, stderr, ctx.shellTimeout, extra.sudoReady),
         ...(truncated ? { outputTruncated: true } : {}),
       });
     };
