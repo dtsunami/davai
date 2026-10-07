@@ -10,6 +10,23 @@ const MAX_OUTPUT = 100_000;
 
 const WIN = process.platform === 'win32';
 
+/** What an interactive prompt prints when it finds no terminal to ask on. */
+const NEEDS_TTY =
+  /sudo: (?:a terminal is required|a password is required|no tty present)|terminal prompts disabled|could not read (?:Username|Password)/i;
+
+function noteFor(killed, code, stderr, timeout) {
+  const notes = [];
+  if (killed) notes.push(`killed after ${Math.round(timeout / 1000)}s (timeout or cancel)`);
+  if (code !== 0 && NEEDS_TTY.test(stderr)) {
+    notes.push(
+      'the command wanted an interactive prompt (password or credentials), which davai ' +
+        'cannot answer. Ask the operator to run it in their own terminal, or use a ' +
+        'non-interactive form (sudo -n, a credential helper)',
+    );
+  }
+  return notes.length ? { note: notes.join('; ') } : {};
+}
+
 /**
  * @param {{cmd: string, cwd?: string}} op
  * @param {{sandbox: any, shellTimeout: number, signal?: AbortSignal}} ctx
@@ -23,8 +40,20 @@ export function runShell(op, ctx) {
       ? spawn(process.env.COMSPEC || 'cmd.exe', ['/d', '/s', '/c', op.cmd], {
           cwd,
           windowsVerbatimArguments: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
         })
-      : spawn('/bin/sh', ['-c', op.cmd], { cwd });
+      : // No stdin and no controlling terminal. sudo, ssh and git open /dev/tty directly
+        // to ask for a password: the prompt was drawn underneath Ink, raced Ink's
+        // raw-mode reader for keystrokes, and the run sat there until the timeout. In a
+        // new session (detached = setsid) there is no tty to find, so they fail at once
+        // with a message the model can act on. A piped stdin that is never closed also
+        // hung anything that reads it, like a bare `cat`.
+        spawn('/bin/sh', ['-c', op.cmd], {
+          cwd,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: true,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        });
 
     let stdout = '';
     let stderr = '';
@@ -46,15 +75,21 @@ export function runShell(op, ctx) {
       stderr = cap(stderr, d.toString());
     });
 
-    const timer = setTimeout(() => {
+    const kill = () => {
       killed = true;
-      child.kill('SIGKILL');
-    }, ctx.shellTimeout);
-
-    const onAbort = () => {
-      killed = true;
-      child.kill('SIGKILL');
+      try {
+        // detached made the shell a process-group leader, so take its children with it:
+        // killing only sh left e.g. a test runner holding the pipes open, and `close`
+        // did not fire until it exited on its own.
+        if (WIN) child.kill('SIGKILL');
+        else process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
     };
+
+    const timer = setTimeout(kill, ctx.shellTimeout);
+    const onAbort = kill;
     ctx.signal?.addEventListener('abort', onAbort, { once: true });
 
     const finish = (code) => {
@@ -67,9 +102,7 @@ export function runShell(op, ctx) {
         durationMs: Date.now() - started,
         stdout: stdout.slice(0, MAX_OUTPUT),
         stderr: stderr.slice(0, MAX_OUTPUT),
-        ...(killed
-          ? { note: `killed after ${Math.round(ctx.shellTimeout / 1000)}s (timeout or cancel)` }
-          : {}),
+        ...noteFor(killed, code, stderr, ctx.shellTimeout),
         ...(truncated ? { outputTruncated: true } : {}),
       });
     };

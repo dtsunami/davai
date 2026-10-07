@@ -69,6 +69,7 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
  * @property {number} shellTimeout
  * @property {number} contextLimit
  * @property {number} compactAt
+ * @property {number} maxCost      session spend cap in dollars; 0 = no cap
  * @property {boolean} thinkingVisible
  * @property {Record<string,string|undefined>} keys
  * @property {string[]} envFiles   which .env files were actually loaded
@@ -124,6 +125,11 @@ export function loadConfig(opts = {}) {
     );
   }
 
+  const maxCost = num(merged.DAVAI_MAX_COST, 0);
+  if (maxCost < 0) {
+    throw new Error(`DAVAI_MAX_COST must be a dollar amount >= 0, or 0 for no cap (got ${maxCost}).`);
+  }
+
   const roDirs = splitPathList(merged.DAVAI_RO_DIRS)
     .map((p) => {
       try {
@@ -162,6 +168,7 @@ export function loadConfig(opts = {}) {
     shellTimeout: num(merged.DAVAI_SHELL_TIMEOUT, 120) * 1000,
     contextLimit,
     compactAt,
+    maxCost,
     thinkingVisible: bool(merged.DAVAI_THINKING, false),
     // Turn a half-wired event into a loud failure instead of a counter nobody reads.
     strictEvents: bool(merged.DAVAI_STRICT_EVENTS, false),

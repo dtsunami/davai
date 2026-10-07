@@ -104,10 +104,12 @@ function countLabel(n) {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
-export function formatCost(cost, unknown) {
+/** "~" marks a figure computed from FALLBACK_PRICE rather than real pricing. */
+export function formatCost(cost, unknown, estimated = false) {
   if (unknown || cost == null) return 'cost n/a';
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(2)}`;
+  const sign = estimated ? '~$' : '$';
+  if (cost < 0.01) return `${sign}${cost.toFixed(4)}`;
+  return `${sign}${cost.toFixed(2)}`;
 }
 
 export function formatTokens(n) {

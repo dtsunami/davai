@@ -12,7 +12,7 @@ import { normalizeBatch } from './ops/schema.js';
 import { executeBatch, formatResults } from './ops/executor.js';
 import { DEFAULT_PROMPTS, opsResultPrompt, repairPrompt, steerPrompt } from './prompt.js';
 import { compact } from '../context/compact.js';
-import { costOf } from '../config/models.js';
+import { costOf, isPriceEstimated } from '../config/models.js';
 
 const MAX_REPAIRS = 2;
 const MAX_STEPS = 60;
@@ -205,6 +205,8 @@ export class Agent extends EventEmitter {
         // Before the request, so a correction typed during the last turn shapes this one.
         this.#applySteers();
 
+        if (this.#overBudget()) return;
+
         if (this.ledger.shouldCompact) await this.#compact();
 
         const turn = await this.#streamTurn();
@@ -314,6 +316,41 @@ export class Agent extends EventEmitter {
     }
   }
 
+  /**
+   * Enforce DAVAI_MAX_COST at each step boundary: the request in flight is already paid
+   * for, so stopping before the next one is the earliest useful point. Warns once at
+   * 80%. On a model with no seed pricing the cap runs against FALLBACK_PRICE, and the
+   * messages say the figure is an estimate.
+   * @returns {boolean} true when the cap is reached and the run should stop
+   */
+  #overBudget() {
+    const cap = this.cfg?.maxCost;
+    if (!cap) return false;
+    const est = this.stats.costEstimated
+      ? ' — estimated, this model has no pricing data'
+      : '';
+    if (this.stats.cost >= cap) {
+      this.emit('error', {
+        message:
+          `Spend cap reached: $${this.stats.cost.toFixed(2)} of $${cap.toFixed(2)} this session${est} ` +
+          `(DAVAI_MAX_COST). Raise it and resume the session to continue.`,
+      });
+      this.log.event('spend-cap', {
+        cost: this.stats.cost,
+        cap,
+        estimated: Boolean(this.stats.costEstimated),
+      });
+      return true;
+    }
+    if (!this.budgetWarned && this.stats.cost >= cap * 0.8) {
+      this.budgetWarned = true;
+      this.emit('warning', {
+        message: `Spent $${this.stats.cost.toFixed(2)} of the $${cap.toFixed(2)} session cap${est}.`,
+      });
+    }
+    return false;
+  }
+
   async #streamTurn() {
     this.emit('turn-start');
     this.stats.turns++;
@@ -368,13 +405,14 @@ export class Agent extends EventEmitter {
 
     if (usage) {
       const cost = costOf(this.cfg.model, usage);
-      // Pricing is unknown for models not in the seed table; track that rather than
-      // reporting a confidently wrong dollar figure.
-      if (cost == null) this.stats.costUnknown = true;
-      else this.stats.cost += cost;
+      // Models with no seed pricing are costed at FALLBACK_PRICE. Flag it so every
+      // display can mark the figure as an estimate.
+      const estimated = isPriceEstimated(this.cfg.model);
+      if (estimated) this.stats.costEstimated = true;
+      this.stats.cost += cost;
       this.ledger.reconcile(usage.in + (usage.cacheRead || 0) + (usage.cacheWrite || 0));
-      this.log.addUsage(usage, cost);
-      this.emit('usage', { ...usage, cost, total: this.stats.cost });
+      this.log.addUsage(usage, cost, estimated);
+      this.emit('usage', { ...usage, cost, estimated, total: this.stats.cost });
     }
 
     if (stop?.reason === 'refusal') {

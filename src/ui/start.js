@@ -39,7 +39,7 @@ export async function startTui({ input, cwd, overrides, resume }) {
   }
 
   const s = session.agent.stats;
-  const cost = s.costUnknown ? 'cost n/a' : `$${s.cost.toFixed(4)}`;
+  const cost = s.costUnknown ? 'cost n/a' : `${s.costEstimated ? '~' : ''}$${s.cost.toFixed(4)}`;
   process.stdout.write(
     `\n${s.turns} turns · ${s.ops} ops · ${cost} · session ${log.id}\n` +
       `${log.dir}\n`,

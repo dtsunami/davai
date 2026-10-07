@@ -37,7 +37,7 @@ export function StatusBar({ cfg, ledger, stats, width, exitArmed }) {
               {stats.turns || 0}t {stats.ops || 0}ops
             </Text>
             <Text color={colors.dim}> {glyphs.bullet} </Text>
-            <Text color={colors.dim}>{formatCost(stats.cost, stats.costUnknown)}</Text>
+            <Text color={colors.dim}>{formatCost(stats.cost, stats.costUnknown, stats.costEstimated)}</Text>
           </>
         ) : null}
       </Box>

@@ -68,13 +68,15 @@ export class SessionLog {
     }
   }
 
-  addUsage(usage, cost) {
+  addUsage(usage, cost, estimated = false) {
     this.totals.in += usage.in || 0;
     this.totals.out += usage.out || 0;
     this.totals.cacheRead += usage.cacheRead || 0;
     this.totals.cacheWrite += usage.cacheWrite || 0;
+    // costUnknown stays for sessions logged before FALLBACK_PRICE existed.
     if (cost == null) this.totals.costUnknown = true;
     else this.totals.cost += cost;
+    if (estimated) this.totals.costEstimated = true;
     this.totals.turns++;
   }
 

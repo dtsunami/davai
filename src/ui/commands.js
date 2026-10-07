@@ -279,7 +279,7 @@ export async function handleCommand(text, deps) {
       }
       const lines = rows.map((s) => {
         const t = s.totals || {};
-        const cost = t.costUnknown ? 'n/a' : `$${(t.cost || 0).toFixed(4)}`;
+        const cost = t.costUnknown ? 'n/a' : `${t.costEstimated ? '~' : ''}$${(t.cost || 0).toFixed(4)}`;
         return `  ${s.id}  ${s.startedAt.slice(0, 19)}  ${s.model}  ${t.turns || 0}t ${t.ops || 0}ops  ${cost}`;
       });
       push({ type: 'info', text: ['Recent sessions', ...lines].join('\n') });

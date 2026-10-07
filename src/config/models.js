@@ -253,20 +253,35 @@ export async function refineModel(spec, { apiKey }) {
 }
 
 /**
- * Cost in dollars, or null when we have no pricing for this model — better to show
- * "—" than a confidently wrong number.
- * @returns {number|null}
+ * Pricing for a model the seed table has no price for: roughly the mean of the priced
+ * frontier models above ($2.50 / $14 per Mtok when this was set), rounded up so the
+ * estimate errs toward overstating spend. "cost n/a" made DAVAI_MAX_COST useless on
+ * exactly the models nobody had priced, the default one included. Every display marks
+ * an estimated figure with "~" so it is never passed off as exact.
+ */
+export const FALLBACK_PRICE = { input: 3.0, output: 15.0 };
+
+/** True when costOf will fall back to FALLBACK_PRICE for this model. */
+export function isPriceEstimated(spec) {
+  return !spec || spec.inputPrice == null || spec.outputPrice == null;
+}
+
+/**
+ * Cost in dollars. Uses FALLBACK_PRICE for whatever the spec does not price; check
+ * isPriceEstimated() before presenting the figure as exact.
+ * @returns {number}
  */
 export function costOf(spec, usage) {
   if (!spec || !usage) return 0;
-  if (spec.inputPrice == null || spec.outputPrice == null) return null;
+  const inputPrice = spec.inputPrice ?? FALLBACK_PRICE.input;
+  const outputPrice = spec.outputPrice ?? FALLBACK_PRICE.output;
   const fresh = usage.in || 0;
   const write = usage.cacheWrite || 0;
   const cached = usage.cacheRead || 0;
   return (
-    (fresh * spec.inputPrice) / 1e6 +
-    (write * spec.inputPrice * 1.25) / 1e6 +
-    (cached * spec.inputPrice * 0.1) / 1e6 +
-    ((usage.out || 0) * spec.outputPrice) / 1e6
+    (fresh * inputPrice) / 1e6 +
+    (write * inputPrice * 1.25) / 1e6 +
+    (cached * inputPrice * 0.1) / 1e6 +
+    ((usage.out || 0) * outputPrice) / 1e6
   );
 }

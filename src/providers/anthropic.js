@@ -23,9 +23,10 @@ export function createAnthropic({ apiKey, model, maxTokens, effort, temperature,
       const params = {
         model,
         max_tokens: maxTokens,
-        // Cache the stable prefix (system prompt + protocol + grounding).
+        // Cache the stable prefix (system prompt + protocol + grounding), and the
+        // conversation so far: see withCacheBreakpoints.
         system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-        messages: messages.map(toAnthropicMessage),
+        messages: withCacheBreakpoints(messages.map(toAnthropicMessage)),
       };
 
       if (model.startsWith('claude-haiku')) {
@@ -109,4 +110,28 @@ function toAnthropicMessage(m) {
         : { type: 'text', text: p.text },
     ),
   };
+}
+
+/**
+ * Put cache breakpoints on the last block of the two most recent user messages.
+ *
+ * Marking only the system prompt cached the one part of the request that never grows;
+ * the history, which is most of the tokens in a long session, was billed at full price
+ * on every step. Between compactions the ledger only appends, so the previous step's
+ * request is a prefix of this one and the newest breakpoint reads it back. The earlier
+ * breakpoint keeps a hit when one step appends more blocks than the API's lookback
+ * window. Compaction rewrites history and costs one cache write — expected.
+ *
+ * System + 2 stays under the limit of 4 breakpoints per request. Mutates in place: the
+ * blocks are fresh objects built by toAnthropicMessage.
+ */
+export function withCacheBreakpoints(messages) {
+  let marked = 0;
+  for (let i = messages.length - 1; i >= 0 && marked < 2; i--) {
+    const m = messages[i];
+    if (m.role !== 'user' || !m.content.length) continue;
+    m.content[m.content.length - 1].cache_control = { type: 'ephemeral' };
+    marked++;
+  }
+  return messages;
 }

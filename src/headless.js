@@ -144,7 +144,7 @@ export async function runHeadless(input, opts = {}) {
   if (!opts.json) {
     const cost = agent.stats.costUnknown
       ? 'cost n/a'
-      : `$${agent.stats.cost.toFixed(4)}`;
+      : `${agent.stats.costEstimated ? '~' : ''}$${agent.stats.cost.toFixed(4)}`;
     process.stderr.write(
       `\n[${agent.stats.turns} turns · ${agent.stats.ops} ops · ${cost} · session ${log.id}]\n`,
     );
