@@ -6,6 +6,10 @@
  * `delta.reasoning_content` is not an OpenAI field. It is xAI's and DeepSeek's, present
  * on smaller reasoning models like grok-3-mini and absent on grok-4, so the branch below
  * is a cheap accommodation rather than a supported path.
+ *
+ * `delta.content` is a string on OpenAI and xAI, but Mistral's newer models stream it
+ * as an array of chunks: `{type:'text', text}` and, at higher effort,
+ * `{type:'thinking', thinking:[{type:'text', text}]}`. contentDeltas() flattens both.
  */
 import OpenAI from 'openai';
 import { OPENAI_EFFORT, wrapError } from './base.js';
@@ -65,7 +69,7 @@ export function createOpenAI({
           const choice = chunk.choices?.[0];
           if (!choice) continue;
           const d = choice.delta;
-          if (d?.content) yield { t: 'text', delta: d.content };
+          if (d?.content) yield* contentDeltas(d.content);
           if (d?.reasoning_content) yield { t: 'thinking', delta: d.reasoning_content };
           if (choice.finish_reason) finish = choice.finish_reason;
         }
@@ -92,6 +96,35 @@ export function createOpenAI({
       return null; // no pre-flight endpoint; the heuristic covers it
     },
   };
+}
+
+/**
+ * Normalise a Chat Completions `delta.content` into harness events. Accepts a plain
+ * string or an array of typed chunks; unknown chunk types are dropped, never stringified.
+ * @param {unknown} content
+ */
+export function* contentDeltas(content) {
+  if (typeof content === 'string') {
+    if (content) yield { t: 'text', delta: content };
+    return;
+  }
+  if (!Array.isArray(content)) return;
+  for (const c of content) {
+    if (typeof c === 'string') {
+      if (c) yield { t: 'text', delta: c };
+    } else if (c?.type === 'text') {
+      if (c.text) yield { t: 'text', delta: c.text };
+    } else if (c?.type === 'thinking') {
+      const th = c.thinking;
+      const text =
+        typeof th === 'string'
+          ? th
+          : Array.isArray(th)
+            ? th.map((x) => (typeof x === 'string' ? x : x?.text || '')).join('')
+            : '';
+      if (text) yield { t: 'thinking', delta: text };
+    }
+  }
 }
 
 function toOpenAIMessage(m) {
