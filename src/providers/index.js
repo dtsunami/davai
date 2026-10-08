@@ -115,7 +115,8 @@ export function createProvider(cfg, override = {}) {
     apiKey,
     model: override.model || cfg.model.id,
     maxTokens: cfg.maxTokens,
-    effort: cfg.effort,
+    // Overridable so the harness can re-ask a reasoning-blown turn at lower effort.
+    effort: override.effort || cfg.effort,
     temperature: cfg.temperature,
     thinkingVisible: cfg.thinkingVisible,
     baseURL: cfg.baseURL,

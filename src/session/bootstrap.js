@@ -64,7 +64,7 @@ export async function createSession(opts = {}) {
   if (resumed) log.event('resume', resumed);
 
   const provider = createProvider(cfg);
-  const makeProvider = (model) => createProvider(cfg, { model });
+  const makeProvider = (model, extra = {}) => createProvider(cfg, { model, ...extra });
 
   const agent = new Agent({
     cfg,

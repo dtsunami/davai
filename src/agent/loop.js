@@ -11,6 +11,7 @@ import { extract } from './parser.js';
 import { normalizeBatch } from './ops/schema.js';
 import { executeBatch, formatResults } from './ops/executor.js';
 import { DEFAULT_PROMPTS, opsResultPrompt, repairPrompt, steerPrompt } from './prompt.js';
+import { describeNative, nativeCallPrompt, resolveNativeCalls, salvageNote } from './native.js';
 import { compact } from '../context/compact.js';
 import { costOf, isPriceEstimated } from '../config/models.js';
 
@@ -22,6 +23,15 @@ const MAX_EMPTY = 2;
 const MAX_PROVIDER_RETRIES = 2;
 const RETRY_BASE_MS = 1000;
 const RETRY_CAP_MS = 30_000;
+/**
+ * One step down the effort ladder, for a turn that reasoned its whole budget away.
+ * Caveat: the OpenAI-shaped adapters collapse both xhigh and max onto "high"
+ * (providers/base.js), so from max the first step is invisible there and only the second
+ * one bites. Worth knowing, not worth special-casing — the default effort is "high",
+ * where the first step is real on every provider.
+ */
+const LOWER_EFFORT = { max: 'high', xhigh: 'high', high: 'medium', medium: 'low', low: null };
+const MAX_EFFORT_DEMOTIONS = 2;
 
 /**
  * First-person intent phrasing. A turn that ends on one of these and carries no ops is
@@ -78,7 +88,19 @@ export class Agent extends EventEmitter {
     // a real stall caught, one that produced another bare conclusion was a false
     // positive and cost a turn. The rule is English-only regex matching, so the only
     // honest way to know whether it earns its keep is to count.
-    this.stats = { turns: 0, ops: 0, cost: 0, malformed: 0, nudges: 0, nudgesWasted: 0 };
+    // nativeCalls counts every native tool call a model made; nativeSalvaged, the turns
+    // whose calls ran as a da_ops batch. Together they say how much a model leans on it.
+    this.stats = {
+      turns: 0,
+      ops: 0,
+      cost: 0,
+      malformed: 0,
+      nudges: 0,
+      nudgesWasted: 0,
+      nativeCalls: 0,
+      nativeSalvaged: 0,
+      effortDemotions: 0,
+    };
     /** Operator text typed mid-run, applied at the next step boundary. */
     this.steers = [];
     /** How many of each event was emitted, and how many went nowhere. */
@@ -222,34 +244,55 @@ export class Agent extends EventEmitter {
         // never reach the ledger. Anthropic rejects an empty text block with a 400, and
         // that one bad segment then failed every later request in the session. Store a
         // placeholder instead, and tell the model what happened so it can change course.
-        if (!(turn.text || '').trim()) {
+        // A turn whose only output is a native tool call is not empty: the call may be
+        // the whole batch, with no text around it.
+        if (!(turn.text || '').trim() && !turn.toolCalls?.length) {
           const reason = turn.stop?.reason || 'unknown';
-          this.log.event('empty-turn', { reason, inARow: empties + 1 });
+          // The turn produced nothing usable, but it was not necessarily idle: a model
+          // that spends its whole budget reasoning (Mistral, routinely) streams tens of
+          // thousands of characters and then stops. That output is the only evidence of
+          // what it was trying to do, so say how much there was and where to read it.
+          const thought = (turn.thinking || '').length;
+          this.log.event('empty-turn', {
+            reason,
+            inARow: empties + 1,
+            turn: this.stats.turns,
+            thinkingChars: thought,
+          });
           if (empties++ >= MAX_EMPTY) {
             this.emit('error', {
               message:
                 `The model returned ${empties} empty turns in a row (stop: ${reason}). Stopping. ` +
                 (reason === 'max_tokens'
                   ? 'Raise DAVAI_MAX_TOKENS or ask for a smaller step.'
-                  : 'Try a narrower request.'),
+                  : 'Try a narrower request.') +
+                thinkingNote(thought, this.stats.turns),
             });
             return;
           }
           this.emit('warning', {
-            message: `empty turn from the model (stop: ${reason}) — told it why and asked for a smaller step`,
+            message:
+              `empty turn from the model (stop: ${reason}) — told it why and asked for a smaller step` +
+              thinkingNote(thought, this.stats.turns),
           });
           this.ledger.add({ type: 'assistant', label: 'empty turn', role: 'assistant', text: '(no output)' });
           this.ledger.add({
             type: 'op-result',
             label: 'empty turn',
             role: 'user',
-            text: emptyTurnPrompt(reason, this.cfg.maxTokens),
+            text: emptyTurnPrompt(reason, this.cfg.maxTokens, thought),
           });
           continue;
         }
         empties = 0;
 
-        const { ops, parseError, artifacts, prose } = extract(turn.text);
+        const fenced = extract(turn.text);
+        const { artifacts, prose } = fenced;
+        // Native tool calls are read as da_ops only when the reply has no fenced block
+        // of its own: the fenced block is the protocol, and wins.
+        const native = this.#resolveNative(turn, fenced);
+        const ops = fenced.ops || native.ops;
+        const parseError = fenced.parseError || native.parseError;
 
         for (const block of artifacts) {
           const item = this.artifacts.add(block);
@@ -258,12 +301,15 @@ export class Agent extends EventEmitter {
         }
 
         // The assistant turn goes into context verbatim: the model needs to see its
-        // own ops to reason about the results that follow.
+        // own ops to reason about the results that follow. A batch that arrived as a
+        // native call is not in the text, so its fenced equivalent is appended: the
+        // model then sees both the request its results answer and the form to use.
         this.ledger.add({
           type: 'assistant',
-          label: firstLine(prose || turn.text) || 'assistant turn',
+          label:
+            firstLine(prose || turn.text) || (native.block ? 'native da_ops call' : 'assistant turn'),
           role: 'assistant',
-          text: turn.text,
+          text: assistantText(turn.text, native),
         });
 
         if (parseError) {
@@ -295,7 +341,12 @@ export class Agent extends EventEmitter {
           // to do — and treating it as a conclusion silently drops the request.
           // A steer that lands as the model is wrapping up should keep the loop alive;
           // otherwise the correction would be answered only on the next request.
-          if (!stalled(prose)) {
+          // A native call davai could not map is the model trying to act through an
+          // interface it does not have. Taking the prose as a conclusion would drop the
+          // request, as it did on Mistral's first orata turns, so it is answered like a
+          // stall, with a reminder that names the call.
+          const strayCalls = native.unusable;
+          if (!strayCalls.length && !stalled(prose)) {
             // Reached a conclusion immediately after a nudge: the previous turn was a
             // conclusion too, and stalled() misread it.
             // The >= 0 guard matters: on step 0 the -1 sentinel would equal step - 1.
@@ -310,12 +361,12 @@ export class Agent extends EventEmitter {
           if (nudges++ < MAX_NUDGES) {
             this.stats.nudges++;
             nudgedAt = step;
-            this.emit('nudge', { attempt: nudges, prose });
+            this.emit('nudge', { attempt: nudges, prose, nativeCalls: strayCalls });
             this.ledger.add({
               type: 'op-result',
-              label: 'nudge',
+              label: strayCalls.length ? 'native call ignored' : 'nudge',
               role: 'user',
-              text: this.prompts.nudge,
+              text: strayCalls.length ? nativeCallPrompt(strayCalls) : this.prompts.nudge,
             });
             continue;
           }
@@ -328,7 +379,10 @@ export class Agent extends EventEmitter {
           return;
         }
 
-        const outcome = await this.#executeOps(ops);
+        const outcome = await this.#executeOps(
+          ops,
+          native.ops ? salvageNote(native.unusable) : '',
+        );
         if (outcome === 'cancelled') {
           this.emit('cancelled');
           return;
@@ -390,13 +444,117 @@ export class Agent extends EventEmitter {
     this.stats.turns++;
 
     const messages = this.ledger.toMessages();
+    let provider = this.provider;
+    let effort = this.cfg.effort;
+    let attemptBase = 0;
+
+    for (let demotion = 0; ; demotion++) {
+      const turn = await this.#streamOnce(provider, messages, attemptBase);
+      attemptBase += turn.attempts || 1;
+      if (turn.cancelled) return turn;
+
+      const { text, thinking, usage, stop, toolCalls } = turn;
+      // Billed whatever happens next: a demoted retry pays for both attempts.
+      if (usage) this.#accountUsage(usage);
+
+      if (stop?.reason === 'refusal') {
+        this.emit('error', { message: `The model declined: ${stop.detail || 'no reason given'}` });
+        return { cancelled: true, text };
+      }
+
+      // A turn that spent its whole output budget reasoning cannot hold an answer — the
+      // model never began writing one. Session ed7f36618e did this twice in a row at effort
+      // "high", 16,000 output tokens each, and the thinking says why: it was re-deciding a
+      // fact it could not recall ("chan_pipewire was added in Asterisk 22? Let me think.")
+      // rather than reading the machine it was running on. Letting the empty turn through
+      // costs another full request to say "that produced nothing, try again", which tends
+      // to blow up the same way. Re-asking at lower effort is the cheaper correction, and
+      // it keeps the reasoning out of context, where it would only re-prime the loop.
+      const nextEffort = LOWER_EFFORT[effort];
+      if (
+        stop?.reason === 'max_tokens' &&
+        !text.trim() &&
+        !toolCalls.length &&
+        nextEffort &&
+        demotion < MAX_EFFORT_DEMOTIONS
+      ) {
+        this.stats.effortDemotions++;
+        this.log.event('effort-demoted', {
+          turn: this.stats.turns,
+          from: effort,
+          to: nextEffort,
+          thinkingChars: thinking.length,
+          out: usage?.out ?? null,
+        });
+        this.emit('warning', {
+          message:
+            'the whole output budget went to reasoning and no answer was written' +
+            (thinking.length ? ` (${thinking.length.toLocaleString()} chars)` : '') +
+            ` — retrying this turn at effort ${nextEffort}`,
+        });
+        effort = nextEffort;
+        provider = this.makeProvider(this.cfg.model.id, { effort });
+        continue;
+      }
+
+      // Only the truncated-text case is warned about here. A max_tokens turn with no text
+      // at all is handled in run(), which knows how many empties came before it and says
+      // more; warning twice about one turn would just be noise.
+      if (stop?.reason === 'max_tokens' && text.trim()) {
+        this.emit('warning', {
+          message:
+            'Response hit max_tokens and was truncated. Raise DAVAI_MAX_TOKENS if this recurs.',
+        });
+      }
+
+      this.emit('turn-end', { text });
+      // Thinking is logged but never replayed: resume reads only `text` (session/resume.js).
+      this.log.event('assistant', {
+        text,
+        ...(thinking ? { thinking } : {}),
+        usage,
+        stop: stop?.reason,
+        ...(toolCalls.length ? { toolCalls } : {}),
+        ...(demotion ? { effort, demotions: demotion } : {}),
+      });
+      return { text, thinking, usage, stop, toolCalls };
+    }
+  }
+
+  /** Feed one request's usage to stats, the ledger calibrator and the log. */
+  #accountUsage(usage) {
+    const cost = costOf(this.cfg.model, usage);
+    // Models with no seed pricing are costed at FALLBACK_PRICE. Flag it so every
+    // display can mark the figure as an estimate.
+    const estimated = isPriceEstimated(this.cfg.model);
+    if (estimated) this.stats.costEstimated = true;
+    this.stats.cost += cost;
+    this.ledger.reconcile(usage.in + (usage.cacheRead || 0) + (usage.cacheWrite || 0));
+    this.log.addUsage(usage, cost, estimated);
+    this.emit('usage', { ...usage, cost, estimated, total: this.stats.cost });
+  }
+
+  /**
+   * One request, with transient-failure retries. Reports how many attempts it took, so
+   * a demotion can keep stream.jsonl attempt numbers monotonic across both requests.
+   */
+  async #streamOnce(provider, messages, attemptBase = 0) {
     let text = '';
+    let thinking = '';
     let usage = null;
     let stop = null;
+    /** @type {{id?: string, name: string, args: string}[]} */
+    let toolCalls = [];
 
-    for (let attempt = 0; ; attempt++) {
+    // Declared outside the loop so the attempt count survives the break and can be
+    // reported to #streamTurn, which numbers a demoted retry's stream records after it.
+    let attempt = 0;
+    for (; ; attempt++) {
+      // Opened before the request: from here on, everything streamed reaches disk as it
+      // arrives rather than at turn end (session/stream.js).
+      this.log.stream?.begin(this.stats.turns, attemptBase + attempt);
       try {
-        for await (const ev of this.provider.send({
+        for await (const ev of provider.send({
           system: this.ledger.system,
           messages,
           signal: this.controller.signal,
@@ -404,13 +562,19 @@ export class Agent extends EventEmitter {
           switch (ev.t) {
             case 'text':
               text += ev.delta;
+              this.log.stream?.write('text', ev.delta);
               this.emit('text', ev.delta);
               break;
             case 'thinking':
+              thinking += ev.delta;
+              this.log.stream?.write('thinking', ev.delta);
               this.emit('thinking', ev.delta);
               break;
             case 'usage':
               usage = ev;
+              break;
+            case 'tool_calls':
+              toolCalls = ev.calls || [];
               break;
             case 'stop':
               stop = ev;
@@ -419,11 +583,22 @@ export class Agent extends EventEmitter {
         }
         break;
       } catch (err) {
-        if (err?.cancelled) return { cancelled: true, text };
+        // Close the stream record first: it holds the deltas themselves, and every path
+        // out of this catch either returns, throws or retries.
+        this.log.stream?.end({
+          status: err?.cancelled ? 'cancelled' : 'error',
+          ...(err?.message ? { error: err.message } : {}),
+        });
+        // Whatever streamed before the failure is otherwise lost: the assistant event
+        // below is never reached, and the UI drops the partial turn on cancel.
+        this.#logPartial(err?.cancelled ? 'cancelled' : 'error', text, thinking, err);
+        if (err?.cancelled) return { cancelled: true, text, attempts: attempt + 1 };
         // Retry only a transient failure that produced nothing: re-sending after the
         // model has already streamed half an answer would duplicate it. A 429 with
         // "limit: 0" is marked unretryable upstream precisely so it lands here.
         if (!err?.retryable || text || attempt >= MAX_PROVIDER_RETRIES) throw err;
+        // Already logged above; the retry streams a fresh turn.
+        thinking = '';
 
         const waitMs = Math.min(err.retryAfterMs || RETRY_BASE_MS * 2 ** attempt, RETRY_CAP_MS);
         this.emit('retry', {
@@ -433,38 +608,55 @@ export class Agent extends EventEmitter {
           message: err.message,
         });
         this.log.event('provider-retry', { attempt: attempt + 1, waitMs, message: err.message });
-        if (!(await this.#wait(waitMs))) return { cancelled: true, text };
+        if (!(await this.#wait(waitMs))) return { cancelled: true, text, attempts: attempt + 1 };
       }
     }
 
-    if (usage) {
-      const cost = costOf(this.cfg.model, usage);
-      // Models with no seed pricing are costed at FALLBACK_PRICE. Flag it so every
-      // display can mark the figure as an estimate.
-      const estimated = isPriceEstimated(this.cfg.model);
-      if (estimated) this.stats.costEstimated = true;
-      this.stats.cost += cost;
-      this.ledger.reconcile(usage.in + (usage.cacheRead || 0) + (usage.cacheWrite || 0));
-      this.log.addUsage(usage, cost, estimated);
-      this.emit('usage', { ...usage, cost, estimated, total: this.stats.cost });
-    }
-
-    if (stop?.reason === 'refusal') {
-      this.emit('error', { message: `The model declined: ${stop.detail || 'no reason given'}` });
-      return { cancelled: true, text };
-    }
-    if (stop?.reason === 'max_tokens') {
-      this.emit('warning', {
-        message: 'Response hit max_tokens and was truncated. Raise DAVAI_MAX_TOKENS if this recurs.',
-      });
-    }
-
-    this.emit('turn-end', { text });
-    this.log.event('assistant', { text, usage, stop: stop?.reason });
-    return { text, usage, stop };
+    this.log.stream?.end({ status: 'ok', ...(stop?.reason ? { stop: stop.reason } : {}) });
+    // davai offers no tools, but some models call one anyway. The raw calls ride back with
+    // the turn; #streamTurn logs them and run() decides what becomes of them (native.js).
+    return { text, thinking, usage, stop, toolCalls, attempts: attempt + 1 };
   }
 
-  async #executeOps(rawOps) {
+  /**
+   * Record a turn that never completed. Its own event type rather than `assistant`:
+   * resume replays `assistant` text into context, and a half-written turn does not
+   * belong there. Without this, a cancelled turn left no trace of what the model
+   * produced (session 9290eb08bb: ~100k chars of thinking, gone).
+   */
+  #logPartial(reason, text, thinking, err) {
+    if (!text && !thinking) return;
+    this.log.event('assistant-partial', {
+      reason,
+      text,
+      ...(thinking ? { thinking } : {}),
+      ...(reason === 'error' && err?.message ? { error: err.message } : {}),
+    });
+  }
+
+  /**
+   * Decide what becomes of the turn's native tool calls (agent/native.js) and record
+   * it: each call's disposition goes to the transcript, with the fenced equivalent of
+   * anything that ran, so --resume restores the request alongside its results.
+   */
+  #resolveNative(turn, fenced) {
+    const native = resolveNativeCalls(turn.toolCalls, turn.text, {
+      fenced: Boolean(fenced.ops || fenced.parseError),
+    });
+    if (!native.report.length) return native;
+    this.stats.nativeCalls += native.report.length;
+    if (native.ops) this.stats.nativeSalvaged++;
+    this.log.event('native-calls', {
+      stop: turn.stop?.reason,
+      calls: native.report,
+      ...(native.block ? { block: native.block } : {}),
+    });
+    this.emit('warning', { message: describeNative(native) });
+    return native;
+  }
+
+  /** @param {string} [note] prefixed to the results, e.g. for a salvaged native call */
+  async #executeOps(rawOps, note = '') {
     const { ops, errors } = normalizeBatch(rawOps);
 
     if (errors.length) {
@@ -476,7 +668,7 @@ export class Agent extends EventEmitter {
         type: 'op-result',
         label: `batch rejected (${errors.length} error${errors.length > 1 ? 's' : ''})`,
         role: 'user',
-        text: opsResultPrompt(formatResults(outcome), this.prompts),
+        text: withNote(note, opsResultPrompt(formatResults(outcome), this.prompts)),
       });
       return outcome.status;
     }
@@ -501,7 +693,7 @@ export class Agent extends EventEmitter {
       outcome.status === 'ok'
         ? `${ops.length} op${ops.length > 1 ? 's' : ''} ok`
         : `batch ${outcome.status}`;
-    const text = opsResultPrompt(formatResults(outcome), this.prompts);
+    const text = withNote(note, opsResultPrompt(formatResults(outcome), this.prompts));
 
     // label and text are logged verbatim so --resume can rebuild this segment
     // exactly, rather than re-deriving it from per-op status.
@@ -564,8 +756,36 @@ export class Agent extends EventEmitter {
   }
 }
 
-/** What the model is told after a turn that produced no visible text. */
-function emptyTurnPrompt(reason, maxTokens) {
+/**
+ * Point the operator at the streamed reasoning of a turn that produced nothing else.
+ * The text is on disk either way (session/stream.js); without this nobody knows to look.
+ */
+function thinkingNote(chars, turn) {
+  if (!chars) return '';
+  return ` ${chars.toLocaleString()} chars of thinking were streamed — see /stream ${turn}.`;
+}
+
+/**
+ * What the model is told after a turn that produced no visible text.
+ *
+ * The thinking-blowout case gets different advice from the rest. "Continue from where
+ * you were, keep it small" invites more reasoning, which is the one thing that cannot
+ * help a model that just reasoned its budget away — and the reasoning itself is not in
+ * context, so there is no "where you were" for it to resume from. What the transcripts
+ * show it doing instead is re-deriving facts about the machine it is sitting on, so the
+ * useful instruction is to stop deducing and go and read.
+ */
+function emptyTurnPrompt(reason, maxTokens, thinkingChars = 0) {
+  if (reason === 'max_tokens' && thinkingChars) {
+    return (
+      `Your previous turn spent its entire output budget (max_tokens ${maxTokens ?? 'unknown'}) ` +
+      'on reasoning and wrote no reply, so nothing was executed and none of that reasoning ' +
+      'is in this conversation.\n' +
+      'Do not try to reconstruct it. Send one small da_ops batch that establishes the facts ' +
+      'you were missing — read the file, list the directory, run the command that settles it. ' +
+      'Anything about this machine or this codebase is cheaper to look up than to deduce.'
+    );
+  }
   const why =
     reason === 'max_tokens'
       ? `it hit the output limit (max_tokens ${maxTokens ?? 'unknown'}) before writing any ` +
@@ -576,6 +796,20 @@ function emptyTurnPrompt(reason, maxTokens) {
     'Continue from where you were, but keep this turn small: one modest da_ops batch or a ' +
     'short answer. Split large edits across several turns rather than planning them all at once.'
   );
+}
+
+/** The assistant text as context should hold it, given what its native calls became. */
+function assistantText(text, native) {
+  const body = (text || '').trim();
+  if (native.block) return body ? `${text}\n\n${native.block}` : native.block;
+  if (body) return text;
+  // Never an empty segment (Anthropic rejects one): say what the turn consisted of.
+  return `(no text; native tool call: ${native.report.map((r) => r.name).join(', ')})`;
+}
+
+/** Prefix an ops-result with a note, when there is one. */
+function withNote(note, text) {
+  return note ? `${note}\n\n${text}` : text;
 }
 
 function firstLine(text) {

@@ -10,6 +10,11 @@
  * `delta.content` is a string on OpenAI and xAI, but Mistral's newer models stream it
  * as an array of chunks: `{type:'text', text}` and, at higher effort,
  * `{type:'thinking', thinking:[{type:'text', text}]}`. contentDeltas() flattens both.
+ *
+ * davai sends no `tools`, yet some models (Mistral, at least) emit native function
+ * calls anyway and finish with `finish_reason: "tool_calls"`. Mistral's carry a valid
+ * da_ops envelope, so they are reassembled and surfaced as a `tool_calls` event; the
+ * loop runs any that hold a batch (agent/native.js) and logs every one.
  */
 import OpenAI from 'openai';
 import { OPENAI_EFFORT, wrapError } from './base.js';
@@ -22,8 +27,8 @@ export function createOpenAI({
   temperature,
   baseURL = undefined,
   name = 'openai',
+  client = new OpenAI({ apiKey, baseURL, maxRetries: 3, timeout: 10 * 60 * 1000 }),
 }) {
-  const client = new OpenAI({ apiKey, baseURL, maxRetries: 3, timeout: 10 * 60 * 1000 });
 
   return {
     name,
@@ -62,7 +67,9 @@ export function createOpenAI({
       }
 
       let usage = null;
-      let finish = 'end_turn';
+      let finish = null;
+      /** @type {Map<number, {id?: string, name: string, args: string}>} */
+      const toolCalls = new Map();
       try {
         for await (const chunk of stream) {
           if (chunk.usage) usage = chunk.usage;
@@ -71,11 +78,14 @@ export function createOpenAI({
           const d = choice.delta;
           if (d?.content) yield* contentDeltas(d.content);
           if (d?.reasoning_content) yield { t: 'thinking', delta: d.reasoning_content };
+          if (d?.tool_calls) mergeToolCallDeltas(toolCalls, d.tool_calls);
           if (choice.finish_reason) finish = choice.finish_reason;
         }
       } catch (err) {
         throw wrapError(err, name);
       }
+
+      if (toolCalls.size) yield { t: 'tool_calls', calls: [...toolCalls.values()] };
 
       if (usage) {
         yield {
@@ -86,9 +96,18 @@ export function createOpenAI({
           cacheWrite: 0,
         };
       }
+      // A stream that closes without a finish_reason was cut off (dropped connection,
+      // proxy timeout), not finished. Calling it end_turn hid a 4-minute Mistral stall.
       yield {
         t: 'stop',
-        reason: finish === 'length' ? 'max_tokens' : finish === 'stop' ? 'end_turn' : finish,
+        reason:
+          finish == null
+            ? 'error'
+            : finish === 'length'
+              ? 'max_tokens'
+              : finish === 'stop'
+                ? 'end_turn'
+                : finish,
       };
     },
 
@@ -124,6 +143,28 @@ export function* contentDeltas(content) {
             : '';
       if (text) yield { t: 'thinking', delta: text };
     }
+  }
+}
+
+/**
+ * Fold streamed `delta.tool_calls` fragments into `acc`, keyed by index. The first
+ * fragment for an index carries the id and name; later ones append to `arguments`.
+ * A fragment without an index is treated as a complete call of its own.
+ * @param {Map<number, {id?: string, name: string, args: string}>} acc
+ * @param {unknown} deltas
+ */
+export function mergeToolCallDeltas(acc, deltas) {
+  if (!Array.isArray(deltas)) return;
+  for (const d of deltas) {
+    if (!d || typeof d !== 'object') continue;
+    const i = typeof d.index === 'number' ? d.index : acc.size;
+    const call = acc.get(i) || { id: undefined, name: '', args: '' };
+    if (d.id) call.id = d.id;
+    const fn = d.function;
+    if (fn?.name && !call.name) call.name = fn.name;
+    if (typeof fn?.arguments === 'string') call.args += fn.arguments;
+    else if (fn?.arguments && typeof fn.arguments === 'object') call.args += JSON.stringify(fn.arguments);
+    acc.set(i, call);
   }
 }
 

@@ -117,6 +117,190 @@ afterEach(() => {
 
 const READ_OPS = '```da_ops\n{"ops": [{"op": "read", "path": "index.js"}]}\n```';
 
+describe('native tool calls', () => {
+  /** One turn of text plus whatever native calls the model "made". */
+  function toolCallProvider(text, calls, reason = 'tool_calls') {
+    return {
+      sent: [],
+      calls: 0,
+      async *send({ system, messages }) {
+        this.sent.push({ system, messages });
+        this.calls++;
+        yield { t: 'text', delta: text };
+        if (calls.length) yield { t: 'tool_calls', calls };
+        yield { t: 'usage', in: 100, out: 20, cacheRead: 0, cacheWrite: 0 };
+        yield { t: 'stop', reason };
+      },
+    };
+  }
+
+  function captureLog() {
+    const logged = [];
+    deps.log = { ...deps.log, event: (type, data = {}) => logged.push({ type, ...data }) };
+    return logged;
+  }
+
+  it('answers an unmappable call with a reminder that names it, and logs it', async () => {
+    const logged = captureLog();
+    // Mistral's shape: a line of narration, a call, finish_reason "tool_calls". The prose
+    // has no intent phrase, so this used to end the run with nothing done.
+    const provider = toolCallProvider('Reading the project docs.', [
+      { id: 'c1', name: 'read_file', args: '{"path":"README.md"}' },
+    ]);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'look around');
+
+    expect(events.warning.some((w) => /read_file: not a da_ops batch/.test(w.message))).toBe(true);
+    const turn = logged.find((e) => e.type === 'assistant');
+    expect(turn.stop).toBe('tool_calls');
+    expect(turn.toolCalls).toEqual([{ id: 'c1', name: 'read_file', args: '{"path":"README.md"}' }]);
+    expect(logged.find((e) => e.type === 'native-calls').calls).toEqual([
+      expect.objectContaining({ id: 'c1', name: 'read_file', disposition: 'unusable' }),
+    ]);
+    expect(events.opsResult).toHaveLength(0);
+    expect(events.nudge).toHaveLength(2);
+    expect(events.nudge[0].nativeCalls).toEqual(['read_file']);
+    expect(requestText(provider, 1)).toMatch(/read_file.*none of them ran/s);
+    expect(provider.calls).toBe(3);
+    expect(agent.stats.nativeCalls).toBe(3);
+  });
+
+  it('adds nothing to the log or the warnings when there were no calls', async () => {
+    const logged = captureLog();
+    const provider = toolCallProvider('Nothing to do.', [], 'end_turn');
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'anything?');
+
+    expect(events.warning.some((w) => /native tool call/.test(w.message))).toBe(false);
+    expect(logged.find((e) => e.type === 'assistant')).not.toHaveProperty('toolCalls');
+  });
+
+  /** Turns as {text, calls}; a turn with calls stops on "tool_calls", like Mistral's. */
+  function scriptedProvider(turns) {
+    return {
+      sent: [],
+      calls: 0,
+      async *send({ system, messages }) {
+        this.sent.push({ system, messages });
+        const turn = turns[this.calls++] ?? { text: 'Done.' };
+        if (turn.text) yield { t: 'text', delta: turn.text };
+        if (turn.calls?.length) yield { t: 'tool_calls', calls: turn.calls };
+        yield { t: 'usage', in: 100, out: 20, cacheRead: 0, cacheWrite: 0 };
+        yield { t: 'stop', reason: turn.calls?.length ? 'tool_calls' : 'end_turn' };
+      },
+    };
+  }
+
+  const READ_ARGS = '{"ops": [{"op": "read", "path": "index.js"}]}';
+
+  it('runs a native da_ops call as the batch it carries (session 0a7d6caba0)', async () => {
+    const logged = captureLog();
+    const provider = scriptedProvider([
+      {
+        text: 'Let me look at the project first.',
+        calls: [{ id: 'c1', name: 'da_ops', args: READ_ARGS }],
+      },
+      { text: 'index.js exports one constant.' },
+    ]);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'look around');
+
+    expect(events.opsResult).toHaveLength(1);
+    expect(events.opsResult[0].outcome.status).toBe('ok');
+    expect(events.nudge).toHaveLength(0);
+    expect(events.done[0].prose).toContain('one constant');
+
+    // The request is in history as a fenced block, so the results answer something.
+    const second = requestText(provider, 1);
+    expect(second).toContain('```da_ops');
+    expect(second).toContain('"path":"index.js"');
+    expect(second).toContain('Results of your da_ops batch');
+    expect(second).toMatch(/Received as a native tool call/);
+
+    const native = logged.find((e) => e.type === 'native-calls');
+    expect(native.calls[0]).toMatchObject({ id: 'c1', name: 'da_ops', disposition: 'executed' });
+    expect(native.block).toContain('```da_ops');
+    expect(agent.stats.nativeSalvaged).toBe(1);
+  });
+
+  it('runs a native call that came with no text at all', async () => {
+    const provider = scriptedProvider([
+      { text: '', calls: [{ name: 'da_ops', args: READ_ARGS }] },
+      { text: 'Done.' },
+    ]);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'look around');
+
+    expect(events.opsResult).toHaveLength(1);
+    expect(events.warning.some((w) => /empty turn/.test(w.message))).toBe(false);
+  });
+
+  it('resolves payload references against blocks in the reply text', async () => {
+    const provider = scriptedProvider([
+      {
+        text: 'Writing it.\n--davai:1--\nhello\nworld\n--davai:end--',
+        calls: [{ name: 'da_ops', args: '{"ops": [{"op": "write", "path": "new.txt", "text": "@1"}]}' }],
+      },
+      { text: 'Wrote new.txt.' },
+    ]);
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'write it');
+
+    expect(fs.readFileSync(path.join(root, 'new.txt'), 'utf8')).toContain('hello\nworld');
+  });
+
+  it('merges op-named calls into one batch', async () => {
+    const provider = scriptedProvider([
+      {
+        text: 'Looking.',
+        calls: [
+          { name: 'read', args: '{"path": "index.js"}' },
+          { name: 'list', args: '{"path": "."}' },
+        ],
+      },
+      { text: 'Done.' },
+    ]);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'look around');
+
+    expect(events.opsResult).toHaveLength(1);
+    expect(events.opsResult[0].ops.map((o) => o.op)).toEqual(['read', 'list']);
+  });
+
+  it('lets a fenced block win over native calls in the same reply', async () => {
+    const logged = captureLog();
+    const provider = scriptedProvider([
+      {
+        text: `Reading.\n${READ_OPS}`,
+        calls: [{ name: 'da_ops', args: '{"ops": [{"op": "delete", "path": "index.js"}]}' }],
+      },
+      { text: 'Done.' },
+    ]);
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'look around');
+
+    expect(fs.existsSync(path.join(root, 'index.js'))).toBe(true);
+    expect(events.opsResult[0].ops.map((o) => o.op)).toEqual(['read']);
+    expect(logged.find((e) => e.type === 'native-calls').calls[0].disposition).toBe('shadowed');
+  });
+
+  it('sends a malformed native call through repair', async () => {
+    const provider = scriptedProvider([
+      { text: 'Reading.', calls: [{ name: 'da_ops', args: '{"ops": [{"op": "read"' }] },
+      { text: 'Gave up; nothing changed.' },
+    ]);
+    const { agent } = makeAgent(provider);
+    const repairs = [];
+    agent.on('repair', (r) => repairs.push(r));
+    const events = await drive(agent, 'look around');
+
+    expect(repairs).toHaveLength(1);
+    expect(repairs[0].error).toMatch(/^native da_ops tool call: da_ops envelope is not valid JSON/);
+    expect(events.opsResult).toHaveLength(0);
+    expect(events.done).toHaveLength(1);
+  });
+});
+
 describe('stalled turns', () => {
   it('nudges a model that announces work and emits no ops', async () => {
     // Exactly what grok-4.7 did: one sentence of intent, stop reason end_turn.
@@ -479,5 +663,105 @@ describe('conclusive turns', () => {
     expect(events.nudge).toHaveLength(0);
     expect(events.opsResult[0].outcome.status).toBe('ok');
     expect(events.done).toHaveLength(1);
+  });
+});
+
+describe('transcript records every model output', () => {
+  function captureLog() {
+    const logged = [];
+    deps.log = { ...deps.log, event: (type, data = {}) => logged.push({ type, ...data }) };
+    return logged;
+  }
+
+  /** A provider that runs one scripted generator per call. */
+  function scripted(...turns) {
+    return {
+      sent: [],
+      calls: 0,
+      async *send() {
+        const turn = turns[this.calls++] ?? (async function* () {
+          yield { t: 'text', delta: 'Done.' };
+          yield { t: 'stop', reason: 'end_turn' };
+        });
+        yield* turn();
+      },
+    };
+  }
+
+  it('logs thinking alongside the completed turn', async () => {
+    const logged = captureLog();
+    const provider = scripted(async function* () {
+      yield { t: 'thinking', delta: 'hmm ' };
+      yield { t: 'thinking', delta: 'ok' };
+      yield { t: 'text', delta: 'Done.' };
+      yield { t: 'stop', reason: 'end_turn' };
+    });
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'go');
+
+    expect(logged.find((e) => e.type === 'assistant')).toMatchObject({ text: 'Done.', thinking: 'hmm ok' });
+  });
+
+  it('keeps the thinking of a turn that spent max_tokens on it (session 9290eb08bb)', async () => {
+    const logged = captureLog();
+    const provider = scripted(async function* () {
+      yield { t: 'thinking', delta: 'x'.repeat(5000) };
+      yield { t: 'usage', in: 100, out: 16000, cacheRead: 0, cacheWrite: 0 };
+      yield { t: 'stop', reason: 'max_tokens' };
+    });
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'go');
+
+    const first = logged.find((e) => e.type === 'assistant');
+    expect(first.text).toBe('');
+    expect(first.stop).toBe('max_tokens');
+    expect(first.thinking).toHaveLength(5000);
+  });
+
+  it('logs a cancelled turn as a partial, never as an assistant turn', async () => {
+    const logged = captureLog();
+    const provider = scripted(async function* () {
+      yield { t: 'thinking', delta: 'still thinking' };
+      yield { t: 'text', delta: 'half' };
+      throw Object.assign(new Error('cancelled'), { cancelled: true });
+    });
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'go');
+
+    expect(logged.filter((e) => e.type === 'assistant')).toHaveLength(0);
+    expect(logged.find((e) => e.type === 'assistant-partial')).toMatchObject({
+      reason: 'cancelled',
+      text: 'half',
+      thinking: 'still thinking',
+    });
+  });
+
+  it('logs what streamed before a provider error, with the error', async () => {
+    const logged = captureLog();
+    const provider = scripted(async function* () {
+      yield { t: 'thinking', delta: 'partway' };
+      throw Object.assign(new Error('openai: connection reset'), { retryable: false });
+    });
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'go');
+
+    expect(events.error).toHaveLength(1);
+    expect(logged.find((e) => e.type === 'assistant-partial')).toMatchObject({
+      reason: 'error',
+      thinking: 'partway',
+      error: 'openai: connection reset',
+    });
+  });
+
+  it('writes no partial when nothing streamed', async () => {
+    const logged = captureLog();
+    // eslint-disable-next-line require-yield -- fails before streaming anything, which is the case
+    const provider = scripted(async function* () {
+      throw Object.assign(new Error('cancelled'), { cancelled: true });
+    });
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'go');
+
+    expect(logged.some((e) => e.type === 'assistant-partial')).toBe(false);
   });
 });

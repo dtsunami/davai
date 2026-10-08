@@ -8,8 +8,12 @@
  *
  *   { t:'text',     delta }
  *   { t:'thinking', delta }
+ *   { t:'tool_calls', calls }  [{id, name, args}] — native calls the model made despite
+ *                              being offered no tools; the loop runs any that carry a
+ *                              da_ops batch (agent/native.js) and logs every one
  *   { t:'usage',    in, out, cacheRead, cacheWrite }
  *   { t:'stop',     reason }   end_turn | max_tokens | refusal | cancelled | error
+ *                              (or a provider's own reason, passed through, e.g. tool_calls)
  *
  * A `message` is { role: 'user'|'assistant', content: Part[] } where a Part is
  * { type:'text', text } or { type:'image', mediaType, data }  (data = base64).

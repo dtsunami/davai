@@ -194,8 +194,13 @@ export function App({ session, initialInput }) {
     };
     const onRepair = ({ error, attempt }) =>
       push({ type: 'warning', message: `malformed da_ops (repair ${attempt}): ${error}` });
-    const onNudge = ({ attempt }) =>
-      push({ type: 'notice', message: `no ops in that turn — asking it to continue (${attempt})` });
+    const onNudge = ({ attempt, nativeCalls }) =>
+      push({
+        type: 'notice',
+        message: nativeCalls?.length
+          ? `native tool call ${nativeCalls.join(', ')} not run — told the model to use da_ops (${attempt})`
+          : `no ops in that turn — asking it to continue (${attempt})`,
+      });
 
     agent.on('thinking', onThinking);
     agent.on('text', onText);

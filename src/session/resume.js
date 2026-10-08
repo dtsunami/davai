@@ -76,6 +76,17 @@ export function replaySegments(dir) {
         });
         break;
 
+      case 'native-calls':
+        // A batch that arrived as a native tool call is not in the logged assistant
+        // text. Its fenced equivalent is logged here; put it back on the turn it came
+        // from, so the results that follow answer a request the model can see.
+        if (ev.block) {
+          const last = specs.at(-1);
+          if (last?.type === 'assistant') last.text = `${last.text}\n\n${ev.block}`;
+          else specs.push({ type: 'assistant', label: 'assistant', role: 'assistant', text: ev.block });
+        }
+        break;
+
       case 'operator-shell':
         specs.push({
           type: 'shell',

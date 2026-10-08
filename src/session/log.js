@@ -3,12 +3,18 @@
  *
  *   meta.json         provider, model, cwd, argv, start/end, token and cost totals
  *   transcript.jsonl  one object per event
+ *   stream.jsonl      raw streamed deltas, written as they arrive (StreamLog)
  *   journal.jsonl     the undo log (written by Journal)
  *   snaps/            pre-change file snapshots
+ *
+ * transcript.jsonl is the durable *result* of a turn; stream.jsonl is what was on
+ * screen while it ran. They overlap on a turn that finishes and diverge on one that
+ * does not, which is the only time it matters.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { StreamLog } from './stream.js';
 
 /** Anything that looks like a credential is redacted on the way in. */
 const SECRET = /\b(sk-[A-Za-z0-9_-]{16,}|xai-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{20,})\b/g;
@@ -34,6 +40,9 @@ export class SessionLog {
     this.dir = path.join(home, 'sessions', `${stamp}-${this.id}`);
     fs.mkdirSync(this.dir, { recursive: true });
     this.transcriptFile = path.join(this.dir, 'transcript.jsonl');
+    // Owned here so every consumer of a SessionLog gets streamed output persisted
+    // without opting in. Test fakes omit it; call sites use `log.stream?.`.
+    this.stream = new StreamLog({ dir: this.dir });
     this.startedAt = Date.now();
     this.totals = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0, ops: 0 };
 
@@ -85,6 +94,7 @@ export class SessionLog {
   }
 
   close(reason = 'exit') {
+    this.stream.close();
     this.meta.endedAt = new Date().toISOString();
     this.meta.durationMs = Date.now() - this.startedAt;
     this.meta.closeReason = reason;

@@ -5,10 +5,12 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_PROMPTS, PROMPT_SPECS, promptDirs } from '../agent/prompt.js';import { runShell } from '../agent/ops/shell.js';
+import { DEFAULT_PROMPTS, PROMPT_SPECS, promptDirs } from '../agent/prompt.js';
+import { runShell } from '../agent/ops/shell.js';
 import { gateShell } from '../agent/ops/executor.js';
 import { loadImage, clipboardImage } from '../context/images.js';
 import { listSessions } from '../session/log.js';
+import { readStream } from '../session/stream.js';
 import { compact } from '../context/compact.js';
 import { formatTokens, glyphs } from './theme.js';
 
@@ -20,6 +22,7 @@ const HELP = `Commands
   /image [path]       attach an image (no path = clipboard, Windows)
   /compact            compact the context now
   /sessions           recent sessions
+  /stream [n]         streamed reasoning + text for a turn, read back from disk
   /config             resolved configuration
   /prompts [export]   where each prompt comes from; export writes them to ./.prompts
   /clear              drop conversation context, keep grounding
@@ -315,6 +318,46 @@ export async function handleCommand(text, deps) {
       } catch (err) {
         push({ type: 'error', message: err.message });
       }
+      return { handled: true };
+    }
+
+    case 'stream': {
+      // Flush first: the tail of the turn in flight is still buffered.
+      log.stream?.flush();
+      const turns = readStream(log.dir);
+      if (!turns.length) {
+        push({ type: 'info', text: 'nothing streamed to disk yet this session' });
+        return { handled: true };
+      }
+      const n = Number.parseInt(arg, 10);
+      const picked =
+        Number.isFinite(n) && n > 0 ? turns.filter((t) => t.turn === n) : turns.slice(-1);
+      if (!picked.length) {
+        push({
+          type: 'warning',
+          message: `no turn ${n} on disk (streamed: ${turns.map((t) => t.turn).join(', ')})`,
+        });
+        return { handled: true };
+      }
+      const lines = [];
+      for (const t of picked) {
+        const how =
+          t.status === 'ok'
+            ? t.stop || 'ok'
+            : t.error
+              ? `${t.status}: ${t.error}`
+              : t.status === 'open'
+                ? 'open — no end marker, the turn never finished'
+                : t.status;
+        lines.push(
+          `turn ${t.turn}${t.attempts ? ` (${t.attempts} attempts)` : ''} ${glyphs.arrow} ${how}` +
+            `  ${t.thinking.length} chars thinking, ${t.text.length} chars text`,
+        );
+        if (t.thinking) lines.push('', '--- thinking ---', t.thinking);
+        if (t.text) lines.push('', '--- text ---', t.text);
+      }
+      lines.push('', `${turns.length} turn(s) in ${path.join(log.dir, 'stream.jsonl')}`);
+      push({ type: 'info', text: lines.join('\n') });
       return { handled: true };
     }
 
