@@ -90,6 +90,40 @@ describe('OpenRouter provider & catalog integration', () => {
     expect(spec.vision).toBe(false);
   });
 
+  it('refining a curated seed keeps capabilities and prices the catalog omits', async () => {
+    const spec = resolveModel('openrouter', 'anthropic/claude-sonnet-4.5');
+    expect(spec.unverified).toBeUndefined();
+
+    const fakeFetch = async () => ({
+      ok: true,
+      async json() {
+        return {
+          data: [
+            {
+              id: 'anthropic/claude-sonnet-4.5',
+              name: 'Claude Sonnet 4.5',
+              context_length: 200000,
+              top_provider: { max_completion_tokens: 64000 },
+              pricing: {},
+              architecture: { input_modalities: ['text', 'image'] },
+              supported_parameters: [],
+            },
+          ],
+        };
+      },
+    });
+
+    await refineModel(spec, { fetchImpl: fakeFetch });
+    // The catalog's numbers win…
+    expect(spec.context).toBe(200000);
+    expect(spec.maxOutput).toBe(64000);
+    // …but it must not write null over a hand-checked price.
+    expect(spec.inputPrice).toBe(3);
+    expect(spec.outputPrice).toBe(15);
+    expect(spec.effort).toBe(true);
+    expect(spec.thinking).toBe(true);
+  });
+
   it('streams OpenRouter delta.reasoning alongside delta.content', async () => {
     const fakeClient = {
       chat: {
@@ -130,6 +164,47 @@ describe('OpenRouter provider & catalog integration', () => {
       { t: 'usage', in: 100, out: 25, cacheRead: 0, cacheWrite: 0 },
       { t: 'stop', reason: 'end_turn' },
     ]);
+  });
+
+  it('sends OpenRouter a reasoning object, never OpenAI reasoning_effort', async () => {
+    const capture = async (name) => {
+      let seen;
+      const fakeClient = {
+        chat: {
+          completions: {
+            async create(params) {
+              seen = params;
+              return (async function* () {
+                yield { choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] };
+              })();
+            },
+          },
+        },
+      };
+      const p = createOpenAI({
+        apiKey: 'k',
+        model: 'm',
+        maxTokens: 1024,
+        effort: 'xhigh',
+        name,
+        client: fakeClient,
+      });
+      await collect(
+        p.send({
+          system: 'sys',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        }),
+      );
+      return seen;
+    };
+
+    const or = await capture('openrouter');
+    expect(or.reasoning).toEqual({ effort: 'high' });
+    expect(or.reasoning_effort).toBeUndefined();
+
+    const oa = await capture('openai');
+    expect(oa.reasoning_effort).toBe('high');
+    expect(oa.reasoning).toBeUndefined();
   });
 
   it('recognizes sk-or-v1- keys in maskKey and warns if sent to OpenAI by mistake', () => {

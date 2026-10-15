@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import {
   PROVIDERS,
@@ -23,6 +23,9 @@ export function ModelPane({ session, onClose, push }) {
   const [sel, setSel] = useState(0);
   const [remote, setRemote] = useState(null); // array of strings or ModelSpecs
   const [loading, setLoading] = useState(false);
+  // Guards the auto-load below. `remote`/`loading` cannot: a rejected fetch leaves both
+  // in the state that re-triggers the effect.
+  const catalogTried = useRef(false);
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState(() => session.modelSearch || '');
   useEffect(() => { delete session.modelSearch; }, [session]);
@@ -30,15 +33,23 @@ export function ModelPane({ session, onClose, push }) {
 
   // Auto-load the OpenRouter catalog when opening /model on openrouter so the user
   // immediately gets the full searchable model list with pricing and context sizes.
+  // The ref, not `remote`/`loading`, is what stops it retrying: both of those are
+  // dependencies, so a rejected fetch — leaving remote null and loading false —
+  // re-ran the effect and refetched forever. A failure now reports and stops.
   useEffect(() => {
-    if (cfg.provider === 'openrouter' && !remote && !loading) {
-      setLoading(true);
-      fetchOpenRouterCatalog({ baseURL: cfg.baseURL })
-        .then((specs) => setRemote(specs))
-        .catch(() => {})
-        .finally(() => setLoading(false));
-    }
-  }, [cfg.provider, cfg.baseURL, remote, loading]);
+    if (cfg.provider !== 'openrouter' || remote || catalogTried.current) return;
+    catalogTried.current = true;
+    setLoading(true);
+    fetchOpenRouterCatalog({ baseURL: cfg.baseURL })
+      .then((specs) => setRemote(specs))
+      .catch((err) =>
+        push({
+          type: 'warning',
+          message: `model catalog failed: ${err.message} ${glyphs.bullet} r to retry`,
+        }),
+      )
+      .finally(() => setLoading(false));
+  }, [cfg.provider, cfg.baseURL, remote, push]);
 
   const providerModels = modelsFor(cfg.provider);
   const known = new Set(providerModels.map((m) => m.id));
@@ -115,10 +126,15 @@ export function ModelPane({ session, onClose, push }) {
     setRemote(null);
     setQuery('');
     setSearching(false);
+    // A different provider means a different catalog; switching back should retry.
+    catalogTried.current = false;
     force((n) => n + 1);
   };
 
   const refreshModels = () => {
+    // An explicit refresh owns the fetch; mark it tried so the auto-load effect does
+    // not race a second one alongside it.
+    catalogTried.current = true;
     setLoading(true);
     const p =
       cfg.provider === 'openrouter'

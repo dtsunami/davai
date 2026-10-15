@@ -31,6 +31,20 @@ export const OPENAI_EFFORT = {
   max: 'high',
 };
 
+/**
+ * OpenRouter takes a `reasoning` object and maps the effort onto whichever upstream
+ * provider it routes the request to. The OpenAI-shaped `reasoning_effort` field is not
+ * honoured for routed models — depending on the upstream it is ignored or 400s — so the
+ * two providers need different fields even though they share this adapter.
+ */
+export const OPENROUTER_EFFORT = {
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: 'high',
+  max: 'high',
+};
+
 export class ProviderError extends Error {
   constructor(message, { status, retryable = false, provider } = {}) {
     super(message);

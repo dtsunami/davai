@@ -389,7 +389,22 @@ export async function refineModel(spec, { apiKey, baseURL, fetchImpl } = {}) {
       });
       const match = catalog.find((m) => m.id === spec.id);
       if (match) {
-        Object.assign(spec, match);
+        // Field by field, not Object.assign. A catalog entry is derived — the reasoning
+        // flags come from a regex over the id, vision from whether modalities happen to
+        // be listed — while a seeded spec is curated. Assigning wholesale let a regex
+        // guess overwrite a hand-checked capability, and wrote null over a seed's price
+        // whenever the catalog omitted pricing.
+        const curated = !spec.unverified;
+        spec.label = match.label || spec.label;
+        if (Number.isFinite(match.context)) spec.context = match.context;
+        if (Number.isFinite(match.maxOutput)) spec.maxOutput = match.maxOutput;
+        if (match.inputPrice != null) spec.inputPrice = match.inputPrice;
+        if (match.outputPrice != null) spec.outputPrice = match.outputPrice;
+        // A curated seed can gain a capability from the catalog but not lose one.
+        spec.vision = curated ? spec.vision || match.vision : match.vision;
+        spec.effort = curated ? spec.effort || match.effort : match.effort;
+        spec.thinking = curated ? spec.thinking || match.thinking : match.thinking;
+        spec.refined = true;
         delete spec.unverified;
       }
     } catch {

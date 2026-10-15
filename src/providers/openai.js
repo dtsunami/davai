@@ -17,7 +17,7 @@
  * loop runs any that hold a batch (agent/native.js) and logs every one.
  */
 import OpenAI from 'openai';
-import { OPENAI_EFFORT, wrapError } from './base.js';
+import { OPENAI_EFFORT, OPENROUTER_EFFORT, wrapError } from './base.js';
 
 export function createOpenAI({
   apiKey,
@@ -53,16 +53,27 @@ export function createOpenAI({
         stream_options: { include_usage: true },
       };
       if (temperature != null) params.temperature = temperature;
-      // Reasoning-capable models take an effort hint; older ones reject it, so this
-      // is best-effort and stripped on a 400 below.
-      if (effort) params.reasoning_effort = OPENAI_EFFORT[effort] || 'medium';
+      // Reasoning-capable models take an effort hint; older ones reject it, so this is
+      // best-effort and stripped on a 400 below. OpenRouter is the exception to the
+      // shared shape: it wants a `reasoning` object and maps the effort per upstream,
+      // and `reasoning_effort` meant for OpenAI is not honoured on a routed model.
+      if (effort) {
+        if (name === 'openrouter') {
+          params.reasoning = { effort: OPENROUTER_EFFORT[effort] || 'medium' };
+        } else {
+          params.reasoning_effort = OPENAI_EFFORT[effort] || 'medium';
+        }
+      }
 
       let stream;
       try {
         stream = await client.chat.completions.create(params, { signal });
       } catch (err) {
-        if (err?.status === 400 && params.reasoning_effort) {
-          delete params.reasoning_effort;
+        // Whichever hint this adapter sent, not a fixed one: OpenRouter carries
+        // `reasoning`, everyone else `reasoning_effort`.
+        const hint = params.reasoning ? 'reasoning' : params.reasoning_effort ? 'reasoning_effort' : null;
+        if (err?.status === 400 && hint) {
+          delete params[hint];
           try {
             stream = await client.chat.completions.create(params, { signal });
           } catch (retryErr) {
