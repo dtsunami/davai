@@ -61,12 +61,18 @@ export function createAnthropic({ apiKey, model, maxTokens, effort, temperature,
         }
 
         const final = await stream.finalMessage();
+        const input = final.usage.input_tokens || 0;
+        const cacheRead = final.usage.cache_read_input_tokens || 0;
+        const cacheWrite = final.usage.cache_creation_input_tokens || 0;
         yield {
           t: 'usage',
-          in: final.usage.input_tokens || 0,
+          // Anthropic is already the canonical shape: input_tokens excludes the cache
+          // fields, so `in` is fresh and the total is the sum.
+          in: input,
           out: final.usage.output_tokens || 0,
-          cacheRead: final.usage.cache_read_input_tokens || 0,
-          cacheWrite: final.usage.cache_creation_input_tokens || 0,
+          cacheRead,
+          cacheWrite,
+          contextIn: input + cacheRead + cacheWrite,
         };
 
         if (final.stop_reason === 'refusal') {

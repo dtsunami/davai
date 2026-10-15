@@ -53,7 +53,15 @@ describe('translateStream', () => {
   it('reports usage with cached reads, counting reasoning inside output', async () => {
     const events = await collect(translateStream(REASONING_STREAM));
     const usage = events.find((e) => e.t === 'usage');
-    expect(usage).toEqual({ t: 'usage', in: 1200, out: 340, cacheRead: 900, cacheWrite: 0 });
+    // `in` is fresh input only (1200 - 900 cached); contextIn carries the billed total.
+    expect(usage).toEqual({
+      t: 'usage',
+      in: 300,
+      out: 340,
+      cacheRead: 900,
+      cacheWrite: 0,
+      contextIn: 1200,
+    });
   });
 
   it('ends on end_turn', async () => {

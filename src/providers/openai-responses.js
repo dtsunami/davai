@@ -146,13 +146,17 @@ export async function* translateStream(stream, name = 'openai') {
   }
 
   if (usage) {
+    const cached = usage.input_tokens_details?.cached_tokens || 0;
+    const input = usage.input_tokens || 0;
     yield {
       t: 'usage',
-      in: usage.input_tokens || 0,
+      // input_tokens already includes the cached prefix; `in` is fresh-only. See billedInput().
+      in: Math.max(0, input - cached),
       // Reasoning tokens are already inside output_tokens — counted, not added twice.
       out: usage.output_tokens || 0,
-      cacheRead: usage.input_tokens_details?.cached_tokens || 0,
+      cacheRead: cached,
       cacheWrite: 0,
+      contextIn: input,
     };
   }
 

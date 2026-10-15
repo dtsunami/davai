@@ -8,6 +8,7 @@ const COMMANDS = [
   '/help',
   '/model',
   '/tps',
+  '/perf',
   '/context',
   '/artifacts',
   '/image',

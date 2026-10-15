@@ -8,6 +8,7 @@ import { ModelPane } from './ModelPane.jsx';
 import { ArtifactPane } from './ArtifactPane.jsx';
 import { ApprovalPane } from './ApprovalPane.jsx';
 import { ThroughputPane } from './ThroughputPane.jsx';
+import { PerfHud } from './PerfHud.jsx';
 import { ThinkingBox } from './ThinkingBox.jsx';
 import { renderMarkdown } from './markdown.js';
 import { colors, glyphs, formatMeter } from './theme.js';
@@ -123,9 +124,16 @@ export function App({ session, initialInput }) {
       setBusy(true);
       setStatus('thinking');
       clearThinking();
-      throughput.startTurn({ turn: agent.stats.turns + 1, model: session.cfg.model.id });
+      throughput.startTurn({
+        turn: agent.stats.turns + 1,
+        model: session.cfg.model.id,
+        provider: session.cfg.provider,
+      });
     };
-    const onTurnEnd = ({ text }) => {
+    const onTurnEnd = ({ text, ttftMs, durationMs }) => {
+      // Hand the harness's measurements over before the turn closes, so what is on screen
+      // and what is in the session log are the same numbers.
+      throughput.applyTiming({ ttftMs, durationMs });
       throughput.endTurn();
       clearTimeout(frameRef.current);
       frameRef.current = null;
@@ -377,6 +385,8 @@ export function App({ session, initialInput }) {
     <Box flexDirection="column" width={width}>
       <Static items={history}>{(item) => <HistoryItem key={item.key} item={item} />}</Static>
 
+      {!pane ? <PerfHud tracker={throughput} width={width} /> : null}
+
       {thinking ? <ThinkingBox text={thinking} width={width} /> : null}
 
       {live ? (
@@ -442,7 +452,13 @@ export function App({ session, initialInput }) {
         />
       ) : null}
       {pane === 'tps' ? (
-        <ThroughputPane tracker={throughput} width={width} onClose={() => setPane(null)} />
+        <ThroughputPane
+          tracker={throughput}
+          width={width}
+          home={cfg.home}
+          excludeDir={log.dir}
+          onClose={() => setPane(null)}
+        />
       ) : null}
 
       {!approval && !pane ? <Composer onSubmit={submit} session={session} busy={busy} /> : null}

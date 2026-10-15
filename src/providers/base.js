@@ -11,7 +11,7 @@
  *   { t:'tool_calls', calls }  [{id, name, args}] — native calls the model made despite
  *                              being offered no tools; the loop runs any that carry a
  *                              da_ops batch (agent/native.js) and logs every one
- *   { t:'usage',    in, out, cacheRead, cacheWrite }
+ *   { t:'usage',    in, out, cacheRead, cacheWrite, contextIn }
  *   { t:'stop',     reason }   end_turn | max_tokens | refusal | cancelled | error
  *                              (or a provider's own reason, passed through, e.g. tool_calls)
  *
@@ -66,6 +66,29 @@ export function textOf(message) {
 /** True when a message carries at least one image part. */
 export function hasImages(messages) {
   return messages.some((m) => (m.content || []).some((p) => p.type === 'image'));
+}
+
+/**
+ * Total input the provider actually read, cache hits and writes included.
+ *
+ * `in` on a usage event is *fresh* input by contract, not the whole prompt. The
+ * adapters normalise each provider's shape onto that so downstream code never has to
+ * know which API it came from: Anthropic reports `input_tokens` with the cache fields
+ * separate, while the OpenAI-shaped APIs report a prompt total that already contains
+ * the cached subset. Costing the inclusive figure at full price and again at the cache
+ * rate charged for the same tokens twice.
+ *
+ * `contextIn` carries the prompt total where the adapter knows it. The sum is the
+ * fallback for a provider that reports the parts separately, and for transcripts
+ * written before `contextIn` existed.
+ *
+ * @param {{in?: number, cacheRead?: number, cacheWrite?: number, contextIn?: number}} usage
+ * @returns {number}
+ */
+export function billedInput(usage) {
+  if (!usage) return 0;
+  if (typeof usage.contextIn === 'number') return usage.contextIn;
+  return (usage.in || 0) + (usage.cacheRead || 0) + (usage.cacheWrite || 0);
 }
 
 const MAX_UNWRAP = 5;

@@ -441,6 +441,25 @@ export async function refineModel(spec, { apiKey, baseURL, fetchImpl } = {}) {
  */
 export const FALLBACK_PRICE = { input: 3.0, output: 15.0 };
 
+/**
+ * What a cached input token costs, as a fraction of the model's input price.
+ *
+ * Only Anthropic's numbers are contractual: 0.1x to read a cache entry, 1.25x to write
+ * one. The rest are the published standard rates, and where a provider's rate varies by
+ * model family the higher figure is used, so an unlisted model overstates spend rather
+ * than understating it against a DAVAI_MAX_COST cap. OpenRouter passes through whatever
+ * the routed upstream charges, which is not uniform — treat its figure as approximate.
+ */
+export const CACHE_READ_MULTIPLIER = {
+  anthropic: 0.1,
+  openai: 0.5,
+  openrouter: 0.5,
+  grok: 0.5,
+  gemini: 0.25,
+};
+/** Cache writes are Anthropic-only; the others report none, so this only has to be right there. */
+export const CACHE_WRITE_MULTIPLIER = 1.25;
+
 /** True when costOf will fall back to FALLBACK_PRICE for this model. */
 export function isPriceEstimated(spec) {
   return !spec || spec.inputPrice == null || spec.outputPrice == null;
@@ -449,6 +468,13 @@ export function isPriceEstimated(spec) {
 /**
  * Cost in dollars. Uses FALLBACK_PRICE for whatever the spec does not price; check
  * isPriceEstimated() before presenting the figure as exact.
+ *
+ * `usage.in` is fresh input only — the adapters have already removed the cached subset.
+ * Passing an inclusive prompt total here charges the same tokens at full price and at
+ * the cache rate; use billedInput() to get the context total, not this.
+ *
+ * @param {{provider?: string, inputPrice: number|null, outputPrice: number|null}} spec
+ * @param {{in?: number, out?: number, cacheRead?: number, cacheWrite?: number}} usage
  * @returns {number}
  */
 export function costOf(spec, usage) {
@@ -458,10 +484,11 @@ export function costOf(spec, usage) {
   const fresh = usage.in || 0;
   const write = usage.cacheWrite || 0;
   const cached = usage.cacheRead || 0;
+  const readMultiplier = CACHE_READ_MULTIPLIER[spec.provider] ?? CACHE_READ_MULTIPLIER.anthropic;
   return (
     (fresh * inputPrice) / 1e6 +
-    (write * inputPrice * 1.25) / 1e6 +
-    (cached * inputPrice * 0.1) / 1e6 +
+    (write * inputPrice * CACHE_WRITE_MULTIPLIER) / 1e6 +
+    (cached * inputPrice * readMultiplier) / 1e6 +
     ((usage.out || 0) * outputPrice) / 1e6
   );
 }

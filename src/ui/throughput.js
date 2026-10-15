@@ -11,6 +11,7 @@
  * rescaled so the area under the curve matches the exact billed output token count.
  */
 import { estimate } from '../context/tokens.js';
+import { billedInput } from '../providers/base.js';
 import { glyphs } from './theme.js';
 
 const BUCKET_MS = 1000;
@@ -26,9 +27,16 @@ export class ThroughputTracker {
     this.maxBuckets = maxBuckets;
     /**
      * Completed and active turns.
+     *
+     * `contextTokens` is the provider's billed input count for the turn, and `ttftMs` /
+     * `durationMs` are the harness's own wall-clock measurements. Those three are what
+     * the perf history is built from, so they are recorded here rather than derived from
+     * the UI's delta-arrival timestamps, which a busy event loop can skew.
+     *
      * @type {Array<{
      *   turn: number,
      *   model: string,
+     *   provider: string,
      *   startedAt: number,
      *   firstTokenAt: number|null,
      *   endedAt: number|null,
@@ -36,6 +44,9 @@ export class ThroughputTracker {
      *   rawTokens: number,
      *   actualTokens: number|null,
      *   scale: number,
+     *   contextTokens: number|null,
+     *   ttftMs: number|null,
+     *   durationMs: number|null,
      * }>}
      */
     this.turns = [];
@@ -44,15 +55,16 @@ export class ThroughputTracker {
 
   /**
    * Start tracking a new assistant turn.
-   * @param {{turn?: number, model?: string, now?: number}} [info]
+   * @param {{turn?: number, model?: string, provider?: string, now?: number}} [info]
    */
-  startTurn({ turn = this.turns.length + 1, model = '', now = Date.now() } = {}) {
+  startTurn({ turn = this.turns.length + 1, model = '', provider = '', now = Date.now() } = {}) {
     if (this.active && !this.active.endedAt) {
       this.active.endedAt = now;
     }
     const entry = {
       turn,
       model,
+      provider,
       startedAt: now,
       firstTokenAt: null,
       endedAt: null,
@@ -60,6 +72,9 @@ export class ThroughputTracker {
       rawTokens: 0,
       actualTokens: null,
       scale: 1,
+      contextTokens: null,
+      ttftMs: null,
+      durationMs: null,
     };
     this.turns.push(entry);
     this.active = entry;
@@ -78,9 +93,11 @@ export class ThroughputTracker {
     const t = this.active;
     if (t.firstTokenAt == null) t.firstTokenAt = now;
 
-    // Estimate tokens for this chunk; fall back to chars/3.8 for tiny fragments where
-    // line/punctuation heuristics can jump around.
-    const tok = delta.length < 12 ? delta.length / 3.8 : estimate(delta);
+    // estimate() adds a per-line term that dominates a one-character delta, so short
+    // fragments are counted at the estimator's own prose rate. Using a different rate
+    // here made one turn's rawTokens mix two scales and the live rate step at the
+    // boundary. Reconcile rescales the turn against the provider's count regardless.
+    const tok = delta.length < 12 ? delta.length / 4.2 : estimate(delta);
     t.rawTokens += tok;
 
     const idx = Math.max(0, Math.floor((now - t.startedAt) / this.bucketMs));
@@ -126,12 +143,37 @@ export class ThroughputTracker {
    */
   reconcileUsage(usage) {
     const t = this.active || this.turns.at(-1);
-    if (!t || !usage?.out) return;
+    if (!t || !usage) return;
+    // The context point is recorded even when the turn produced no output. A refusal or a
+    // budget-blown turn still billed its input, and dropping it made the context axis
+    // understate how full the window was. It is the billed prompt — cache reads included —
+    // not the fresh part, which is the figure the provider and we actually agree on.
+    const ctx = billedInput(usage);
+    if (ctx) t.contextTokens = ctx;
+    // Left null rather than 0 when the turn produced nothing: a refusal has no rate to
+    // score, and every rollup treats a null as "count the turn, score it no rate" while a
+    // 0 would add this turn's whole duration to the denominator and dilute the average.
+    if (!usage.out) return;
     t.actualTokens = usage.out;
     if (t.rawTokens > 0) {
       const s = usage.out / t.rawTokens;
       if (Number.isFinite(s) && s > 0.1 && s < 10) t.scale = s;
     }
+  }
+
+  /**
+   * Attach the harness's own wall-clock timing to the turn that just finished.
+   *
+   * The tracker's delta-arrival timestamps are good enough to drive a live display, but
+   * these are the numbers that went into the session log, and the display should not
+   * disagree with the record.
+   * @param {{ttftMs?: number|null, durationMs?: number|null}} [timing]
+   */
+  applyTiming({ ttftMs = null, durationMs = null } = {}) {
+    const t = this.active || this.turns.at(-1);
+    if (!t) return;
+    if (ttftMs != null) t.ttftMs = ttftMs;
+    if (durationMs != null) t.durationMs = durationMs;
   }
 
   endTurn(now = Date.now()) {
@@ -154,6 +196,8 @@ export class ThroughputTracker {
       return {
         turn: 0,
         model: '',
+        provider: '',
+        contextTokens: null,
         active: false,
         currentTps: 0,
         avgTps: 0,
@@ -170,8 +214,11 @@ export class ThroughputTracker {
     if (t === this.active) this.tick(now);
 
     const endMs = t.endedAt || now;
-    const durationMs = Math.max(0, endMs - t.startedAt);
-    const ttftMs = t.firstTokenAt != null ? Math.max(0, t.firstTokenAt - t.startedAt) : null;
+    const durationMs = t.durationMs ?? Math.max(0, endMs - t.startedAt);
+    // The harness's measured value wins where we have it. The first delta we saw is the
+    // same instant to within a frame, and while a turn is still running it is all there is.
+    const ttftMs =
+      t.ttftMs ?? (t.firstTokenAt != null ? Math.max(0, t.firstTokenAt - t.startedAt) : null);
     const streamMs =
       t.firstTokenAt != null ? Math.max(250, endMs - t.firstTokenAt) : Math.max(250, durationMs);
     const scale = t.scale || 1;
@@ -211,6 +258,8 @@ export class ThroughputTracker {
     return {
       turn: t.turn,
       model: t.model,
+      provider: t.provider || '',
+      contextTokens: t.contextTokens,
       active: t === this.active && !t.endedAt,
       currentTps,
       avgTps,
@@ -317,4 +366,153 @@ function resampleBuckets(buckets, targetCols) {
     });
   }
   return out;
+}
+
+/**
+ * Roll the session's completed turns up per model.
+ *
+ * Deliberately the same shape as `rollup()` in session/perf.js, so the pane renders live
+ * and on-disk history with one component. A turn with no measured duration contributes
+ * its tokens and its context point but no rate, rather than being scored as instant.
+ *
+ * @param {Array<object>} turns
+ */
+export function byModel(turns) {
+  /** @type {Map<string, any>} */
+  const groups = new Map();
+  for (const t of turns) {
+    if (t.endedAt == null) continue; // still streaming: no final figures yet
+    const key = `${t.provider || '?'}/${t.model || '?'}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        key,
+        provider: t.provider || '',
+        model: t.model || '',
+        turns: 0,
+        outTokens: 0,
+        streamMs: 0,
+        peakTps: 0,
+        ttftSum: 0,
+        ttftN: 0,
+        ctxLo: null,
+        ctxHi: null,
+      };
+      groups.set(key, g);
+    }
+    const durationMs = t.durationMs ?? Math.max(0, t.endedAt - t.startedAt);
+    const ttftMs = t.ttftMs ?? null;
+    const streamMs = Math.max(1, durationMs - (ttftMs || 0));
+    const out = t.actualTokens;
+
+    g.turns++;
+    if (out != null) {
+      g.outTokens += out;
+      g.streamMs += streamMs;
+      g.peakTps = Math.max(g.peakTps, out / (streamMs / 1000));
+    }
+    if (ttftMs != null) {
+      g.ttftSum += ttftMs;
+      g.ttftN++;
+    }
+    if (t.contextTokens) {
+      g.ctxLo = g.ctxLo == null ? t.contextTokens : Math.min(g.ctxLo, t.contextTokens);
+      g.ctxHi = g.ctxHi == null ? t.contextTokens : Math.max(g.ctxHi, t.contextTokens);
+    }
+  }
+  return [...groups.values()]
+    .map((g) => ({
+      key: g.key,
+      provider: g.provider,
+      model: g.model,
+      turns: g.turns,
+      outTokens: g.outTokens,
+      avgTps: g.streamMs > 0 ? g.outTokens / (g.streamMs / 1000) : 0,
+      peakTps: g.peakTps,
+      avgTtftMs: g.ttftN ? g.ttftSum / g.ttftN : null,
+      contextRange: g.ctxLo != null ? [g.ctxLo, g.ctxHi] : null,
+    }))
+    .sort((a, b) => b.turns - a.turns || b.avgTps - a.avgTps);
+}
+
+/**
+ * One point per completed turn: the rate it ran at against the context it ran with.
+ *
+ * Time is the axis that shows a stall; context is the axis that explains a drift. This is
+ * what answers "is it slow because the conversation got long, or is it slow at 4k too?" —
+ * and those two have completely different remedies, so it is worth being able to tell.
+ *
+ * @param {Array<object>} turns
+ * @returns {Array<{ctx: number, tps: number, model: string, provider: string}>}
+ */
+export function byContextSeries(turns) {
+  const out = [];
+  for (const t of turns) {
+    if (t.endedAt == null) continue;
+    if (!t.contextTokens || !t.actualTokens) continue;
+    const durationMs = t.durationMs ?? Math.max(0, t.endedAt - t.startedAt);
+    const streamMs = Math.max(1, durationMs - (t.ttftMs || 0));
+    out.push({
+      ctx: t.contextTokens,
+      tps: t.actualTokens / (streamMs / 1000),
+      model: t.model || '',
+      provider: t.provider || '',
+    });
+  }
+  return out;
+}
+
+/**
+ * Bin context-vs-rate points into a readable trend.
+ *
+ * Bins are log-spaced because context grows multiplicatively and the interesting range
+ * spans two orders of magnitude: 2k and 4k are worth separating, 100k and 102k are not.
+ * A bin with a single point is still shown — flagged, so a one-turn "trend" is not read
+ * as one.
+ *
+ * @param {Array<{ctx: number, tps: number}>} points
+ * @param {{bins?: number}} [opts]
+ * @returns {Array<{lo: number, hi: number, avgTps: number, n: number, sparse: boolean}>}
+ */
+export function buildContextTrend(points, { bins = 9 } = {}) {
+  const live = points.filter((p) => p.ctx > 0 && p.tps > 0);
+  if (!live.length) return [];
+
+  const lo = Math.min(...live.map((p) => p.ctx));
+  const hi = Math.max(...live.map((p) => p.ctx));
+  // Everything landed in one narrow band: one bin, rather than nine empty ones.
+  if (hi - lo < lo * 0.1) {
+    return [
+      {
+        lo,
+        hi,
+        avgTps: live.reduce((s, p) => s + p.tps, 0) / live.length,
+        n: live.length,
+        sparse: live.length < 3,
+      },
+    ];
+  }
+
+  const logLo = Math.log2(lo);
+  const logHi = Math.log2(hi);
+  const step = (logHi - logLo) / bins;
+  const buckets = Array.from({ length: bins }, () => []);
+
+  for (const p of live) {
+    const i = Math.min(bins - 1, Math.max(0, Math.floor((Math.log2(p.ctx) - logLo) / step)));
+    buckets[i].push(p);
+  }
+
+  return buckets
+    .map((b, i) => {
+      if (!b.length) return null;
+      return {
+        lo: 2 ** (logLo + i * step),
+        hi: 2 ** (logLo + (i + 1) * step),
+        avgTps: b.reduce((s, p) => s + p.tps, 0) / b.length,
+        n: b.length,
+        sparse: b.length < 3,
+      };
+    })
+    .filter(Boolean);
 }

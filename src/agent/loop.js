@@ -14,6 +14,7 @@ import { DEFAULT_PROMPTS, opsResultPrompt, repairPrompt, steerPrompt } from './p
 import { describeNative, nativeCallPrompt, resolveNativeCalls, salvageNote } from './native.js';
 import { compact } from '../context/compact.js';
 import { costOf, isPriceEstimated } from '../config/models.js';
+import { billedInput } from '../providers/base.js';
 
 const MAX_REPAIRS = 2;
 const MAX_STEPS = 60;
@@ -414,9 +415,14 @@ export class Agent extends EventEmitter {
   #overBudget() {
     const cap = this.cfg?.maxCost;
     if (!cap) return false;
-    const est = this.stats.costEstimated
+    // Two different claims. `costEstimated` is sticky: it says the running total contains
+    // dollars priced from FALLBACK_PRICE, which stays true after a switch to a priced
+    // model. The message must not then claim *this* model has no pricing data.
+    const est = isPriceEstimated(this.cfg.model)
       ? ' — estimated, this model has no pricing data'
-      : '';
+      : this.stats.costEstimated
+        ? ' — the total includes earlier turns priced from FALLBACK_PRICE'
+        : '';
     if (this.stats.cost >= cap) {
       this.emit('error', {
         message:
@@ -453,7 +459,7 @@ export class Agent extends EventEmitter {
       attemptBase += turn.attempts || 1;
       if (turn.cancelled) return turn;
 
-      const { text, thinking, usage, stop, toolCalls } = turn;
+      const { text, thinking, usage, stop, toolCalls, ttftMs, durationMs } = turn;
       // Billed whatever happens next: a demoted retry pays for both attempts.
       if (usage) this.#accountUsage(usage);
 
@@ -507,17 +513,23 @@ export class Agent extends EventEmitter {
         });
       }
 
-      this.emit('turn-end', { text });
+      this.emit('turn-end', { text, usage, ttftMs, durationMs });
       // Thinking is logged but never replayed: resume reads only `text` (session/resume.js).
       this.log.event('assistant', {
         text,
         ...(thinking ? { thinking } : {}),
         usage,
         stop: stop?.reason,
+        // Timing is logged with the turn rather than recomputed later from stream.jsonl.
+        // That file coalesces deltas into runs, so the timestamp on its first line is a
+        // flush boundary, not the arrival of the first token — off by up to 500ms, which
+        // is the whole of a fast turn's ttft.
+        ...(ttftMs != null ? { ttftMs } : {}),
+        ...(durationMs != null ? { durationMs } : {}),
         ...(toolCalls.length ? { toolCalls } : {}),
         ...(demotion ? { effort, demotions: demotion } : {}),
       });
-      return { text, thinking, usage, stop, toolCalls };
+      return { text, thinking, usage, stop, toolCalls, ttftMs, durationMs };
     }
   }
 
@@ -526,10 +538,13 @@ export class Agent extends EventEmitter {
     const cost = costOf(this.cfg.model, usage);
     // Models with no seed pricing are costed at FALLBACK_PRICE. Flag it so every
     // display can mark the figure as an estimate.
+    // Sticky on purpose: once any turn has been priced from the fallback the session
+    // total is part estimate, and the displays mark the total, not the last turn. What
+    // #overBudget must not do is attribute that to the model in use now.
     const estimated = isPriceEstimated(this.cfg.model);
     if (estimated) this.stats.costEstimated = true;
     this.stats.cost += cost;
-    this.ledger.reconcile(usage.in + (usage.cacheRead || 0) + (usage.cacheWrite || 0));
+    this.ledger.reconcile(billedInput(usage));
     this.log.addUsage(usage, cost, estimated);
     this.emit('usage', { ...usage, cost, estimated, total: this.stats.cost });
   }
@@ -549,16 +564,30 @@ export class Agent extends EventEmitter {
     // Declared outside the loop so the attempt count survives the break and can be
     // reported to #streamTurn, which numbers a demoted retry's stream records after it.
     let attempt = 0;
+    // Wall-clock timing, measured here in the harness rather than in the UI. This is the
+    // number that goes into the session log, and a Pi repainting at 30fps should not be
+    // the instrument of record for it. Both reset per attempt: a retry that streamed
+    // nothing must not leave its (long) backoff wait behind as the turn's ttft.
+    const startedAt = Date.now();
+    let ttftMs;
     for (; ; attempt++) {
       // Opened before the request: from here on, everything streamed reaches disk as it
       // arrives rather than at turn end (session/stream.js).
       this.log.stream?.begin(this.stats.turns, attemptBase + attempt);
+      const requestAt = Date.now();
+      let firstDeltaAt = null;
       try {
         for await (const ev of provider.send({
           system: this.ledger.system,
           messages,
           signal: this.controller.signal,
         })) {
+          // Time to first token is the arrival of the first byte the model produced on
+          // either channel, not the first *text* byte: on a reasoning model the thinking
+          // starts long before the answer does, and that gap is the interesting one.
+          if (firstDeltaAt === null && (ev.t === 'text' || ev.t === 'thinking')) {
+            firstDeltaAt = Date.now();
+          }
           switch (ev.t) {
             case 'text':
               text += ev.delta;
@@ -581,6 +610,9 @@ export class Agent extends EventEmitter {
               break;
           }
         }
+        // Computed once the stream is over rather than per delta: nothing reads ttftMs
+        // until the turn ends, and the first delta's arrival is all the state needed.
+        ttftMs = firstDeltaAt === null ? null : firstDeltaAt - requestAt;
         break;
       } catch (err) {
         // Close the stream record first: it holds the deltas themselves, and every path
@@ -615,7 +647,16 @@ export class Agent extends EventEmitter {
     this.log.stream?.end({ status: 'ok', ...(stop?.reason ? { stop: stop.reason } : {}) });
     // davai offers no tools, but some models call one anyway. The raw calls ride back with
     // the turn; #streamTurn logs them and run() decides what becomes of them (native.js).
-    return { text, thinking, usage, stop, toolCalls, attempts: attempt + 1 };
+    return {
+      text,
+      thinking,
+      usage,
+      stop,
+      toolCalls,
+      attempts: attempt + 1,
+      ttftMs,
+      durationMs: Date.now() - startedAt,
+    };
   }
 
   /**

@@ -9,6 +9,7 @@ import { Sandbox } from '../src/agent/sandbox.js';
 import { DaIgnore } from '../src/agent/daignore.js';
 import { Journal } from '../src/agent/journal.js';
 import { resolveModel, costOf, isPriceEstimated, FALLBACK_PRICE } from '../src/config/models.js';
+import { billedInput } from '../src/providers/base.js';
 
 const READ_OPS = '```da_ops\n{"ops": [{"op": "read", "path": "index.js"}]}\n```';
 
@@ -106,5 +107,42 @@ describe('fallback pricing', () => {
     const spec = { inputPrice: 5, outputPrice: 25 };
     expect(costOf(spec, usage)).toBeCloseTo(30);
     expect(isPriceEstimated(spec)).toBe(false);
+  });
+});
+
+describe('cached input is billed once', () => {
+  it('charges a cached read at the cache rate, not full price as well', () => {
+    // The normalised shape every adapter now emits: 1M prompt tokens, 800k of them
+    // cache hits, `in` holding only the fresh 200k.
+    const spec = { provider: 'openai', inputPrice: 10, outputPrice: 0 };
+    expect(
+      costOf(spec, { in: 200_000, out: 0, cacheRead: 800_000, cacheWrite: 0 }),
+    ).toBeCloseTo((200_000 * 10 + 800_000 * 10 * 0.5) / 1e6);
+  });
+
+  it('uses each provider cache rate rather than Anthropic 0.1x everywhere', () => {
+    const cached = { in: 0, out: 0, cacheRead: 1_000_000, cacheWrite: 0 };
+    expect(costOf({ provider: 'anthropic', inputPrice: 10, outputPrice: 0 }, cached)).toBeCloseTo(1);
+    expect(costOf({ provider: 'openai', inputPrice: 10, outputPrice: 0 }, cached)).toBeCloseTo(5);
+  });
+
+  it('charges an Anthropic cache write above the input rate', () => {
+    const spec = { provider: 'anthropic', inputPrice: 10, outputPrice: 0 };
+    expect(costOf(spec, { in: 0, out: 0, cacheRead: 0, cacheWrite: 1_000_000 })).toBeCloseTo(12.5);
+  });
+});
+
+describe('billed input', () => {
+  it('prefers the adapter-reported prompt total', () => {
+    expect(billedInput({ in: 300, cacheRead: 900, cacheWrite: 0, contextIn: 1200 })).toBe(1200);
+  });
+
+  it('sums the split fields when no total was reported', () => {
+    expect(billedInput({ in: 300, cacheRead: 900, cacheWrite: 100 })).toBe(1300);
+  });
+
+  it('is zero for a missing usage event', () => {
+    expect(billedInput(undefined)).toBe(0);
+    expect(billedInput({})).toBe(0);
   });
 });

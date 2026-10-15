@@ -17,7 +17,7 @@ import { formatTokens, glyphs } from './theme.js';
 const HELP = `Commands
   sh <cmd>            run a shell command; output is added to context (sudo asks for a password)
   /model [id|query]   model and settings pane (with live OpenRouter search)
-  /tps                realtime token/s throughput plot over time (also ctrl+t)
+  /tps                token/s and time-to-first-token, per turn and per model (also ctrl+t)
   /context            context breakdown (also ctrl+g)
   /artifacts          artifacts from this session (also ctrl+a)
   /image [path]       attach an image (no path = clipboard, Windows)
@@ -36,7 +36,7 @@ const HELP = `Commands
 
 Keys
   esc                 cancel the running turn, or close a pane
-  ctrl+t              realtime token/s plot pane
+  ctrl+t              token/s and ttft pane (per turn, per model, vs context)
   ctrl+g              context pane
   ctrl+a              artifacts pane
   ctrl+s              toggle shell mode
@@ -225,6 +225,7 @@ export async function handleCommand(text, deps) {
     case 'tps':
     case 'throughput':
     case 'speed':
+    case 'perf':
       setPane('tps');
       return { handled: true };
 

@@ -43,14 +43,18 @@ export function StatusBar({ cfg, ledger, stats, throughput, width, exitArmed }) 
             </Text>
             <Text color={colors.dim}> {glyphs.bullet} </Text>
             <Text color={colors.dim}>{formatCost(stats.cost, stats.costUnknown, stats.costEstimated)}</Text>
-            {tpsVal > 0 ? (
-              <>
-                <Text color={colors.dim}> {glyphs.bullet} </Text>
-                <Text color={snap?.active ? colors.accent : colors.dim}>
-                  {tpsVal.toFixed(0)} tok/s{spark ? ` ${spark}` : ''}
-                </Text>
-              </>
-            ) : null}
+          </>
+        ) : null}
+        {/* The rate is deliberately not behind the `compact` cut. A narrow terminal — an
+            80-column ssh session, which is the common case on a Pi — is exactly where
+            watching the rate matters most, and gating it on width made the feature
+            invisible on the machines that need it. */}
+        {tpsVal > 0 ? (
+          <>
+            <Text color={colors.dim}> {glyphs.bullet} </Text>
+            <Text color={snap?.active ? colors.accent : colors.dim}>
+              {tpsVal.toFixed(0)} tok/s{spark ? ` ${spark}` : ''}
+            </Text>
           </>
         ) : null}
       </Box>

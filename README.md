@@ -24,8 +24,16 @@ validates as an atomic, reversible batch.
 All 7 tests pass. slug.js now lowercases, collapses each run of non-[a-z0-9]
 characters into a single hyphen, then strips leading and trailing hyphens.
 
-demo · claude-opus-5-5/high · ████░░░░░░ 4% 41.2k/1.0M · 3t 5ops · $0.14
+demo · claude-opus-5-5/high · ████░░░░░░ 4% 41.2k/1.0M · 3t 5ops · $0.14 · 41 tok/s ▃▅█▆▄
+                                                                 41.2 tok/s · ttft 1.84s
 ```
+
+The rate and its sparkline sit in the status bar, and the line above it — right-aligned, under
+the transcript — carries the live rate and this turn's time to first token. Both are plain
+text, both fit 80 columns, and neither is gated on terminal width: a narrow ssh session is
+where the number matters most. `ctrl+t` opens the full picture: tok/s second by second for one
+turn, per-model averages for every turn this session and the recent ones on disk, and a
+log-spaced chart of rate against billed context size.
 
 ## Install
 
@@ -61,6 +69,7 @@ davai --config                     # resolved configuration
 | `sh <cmd>` | run a command; its output is added to context |
 | `/model` | model, provider and effort — applied live |
 | `/context` · `ctrl+g` | context breakdown, drop or pin segments |
+| `/tps` · `ctrl+t` | tok/s and time to first token — per turn, per model, and vs context |
 | `/artifacts` · `ctrl+a` | code blocks the model emitted; copy or save |
 | `/image [path]` | attach an image (no path = clipboard, Windows) |
 | `/compact` | compact context now |
@@ -214,11 +223,62 @@ normal policy.
 | openai | `OPENAI_API_KEY` | Responses API, reasoning summaries, effort, cached input |
 | gemini | `GEMINI_API_KEY` | thought summaries, cached input |
 | grok | `XAI_API_KEY` | Chat Completions; no reasoning summaries on grok-4 |
+| openrouter | `OPENROUTER_API_KEY` | hundreds of models behind one key; catalog pricing, per-route context |
 
 davai ships a small table of model metadata for pricing and defaults, but it is a
 seed, not an authority — a hardcoded model list is wrong the moment a provider ships
 something new. An unrecognized model id is assumed real and its limits are fetched
 from the provider. `davai --models` lists what is actually available.
+
+### OpenRouter
+
+```bash
+DAVAI_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+DAVAI_MODEL=anthropic/claude-sonnet-4.5
+```
+
+Model ids are the full slugs. The seed table pins a handful; anything else resolves as
+unverified and is filled in from OpenRouter's own `/api/v1/models` catalog at startup,
+pricing included. `davai --models` fetches that catalog directly. A curated seed can
+gain a capability from the catalog but never lose one, and the catalog cannot write
+`null` over a hand-checked price.
+
+OpenRouter is not OpenAI-shaped at the request level, and the adapter does not pretend
+it is. Effort goes in a `reasoning` object rather than OpenAI's top-level
+`reasoning_effort`, which a routed model either ignores or rejects with a 400 depending
+on the upstream it lands on. Requests carry `HTTP-Referer` and `X-Title` so they are
+attributed in your OpenRouter dashboard.
+
+It is also the one provider whose route is not fixed. The same slug can land on
+different upstream servers with different context windows and different prices, and the
+catalog's `top_provider` is what davai reads. Cache pricing is passed through from
+whichever upstream served the request and is not uniform, so a cached-read figure for an
+OpenRouter model is an approximation in a way it is not for Anthropic — see
+[Cached input](#cached-input).
+
+A key that starts `sk-or-` being sent to OpenAI is a common enough mistake that the auth
+diagnostic names it and prints the fix.
+
+### Cached input
+
+Anthropic, OpenAI and Gemini all discount a repeated prefix, and all three report it
+differently. Anthropic returns `input_tokens` with the cache fields separate; the
+OpenAI-shaped APIs return a prompt total that already includes the cached subset. davai
+normalises both onto one event before anything costs it: `in` is always *fresh* input,
+`contextIn` is the whole billed prompt, and the cache fields are their own.
+
+That matters for more than tidiness. Costing the inclusive figure at full price and again
+at the cache rate charged for the same tokens twice, and on a warm session the cached
+prefix is most of the input — enough to misreport spend by an order of magnitude and trip
+`DAVAI_MAX_COST` early. The context axis in `/tps` uses `contextIn` for the same reason:
+`in` alone would make a long Anthropic session look like it was running at a fraction of
+the window it was actually filling.
+
+Cache rates differ by provider. Anthropic's 0.1x read and 1.25x write are exact; the
+others are the published standard rates, and where a rate varies by model family davai
+takes the higher one, so an unlisted model overstates spend rather than understating it
+against a cap.
 
 ### Reasoning
 
@@ -236,6 +296,10 @@ What each provider can actually send back differs:
 - **Grok** exposes nothing on grok-4. `reasoning_content` is handled for xAI's smaller
   reasoning models, but there is no equivalent of a summary stream. If you want visible
   rationale there, ask for it in the preamble — see [Prompts](#prompts).
+- **OpenRouter** passes through whatever the routed upstream sends. Both the
+  OpenRouter-style `delta.reasoning` and the xAI/DeepSeek-style `delta.reasoning_content`
+  are handled, but whether you get either is the upstream model's decision, and it can
+  change between two requests to the same slug.
 
 Thoughts are shown, never stored: they are not written to the session transcript and
 not restored by `--resume`.
@@ -294,7 +358,7 @@ in the session; set it to bare `{results}` for the block alone.
 ## Development
 
 ```bash
-npm test          # 248 tests: ops engine, sandbox, parser, prompts, providers, errors, events, loop, stdin, context, resume, history, UI
+npm test          # 416 tests: ops engine, sandbox, parser, prompts, providers, errors, events, loop, stdin, context, resume, history, UI
 npm run test:watch
 npm run lint      # eslint, flat config in eslint.config.js
 ```

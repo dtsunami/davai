@@ -161,7 +161,7 @@ describe('OpenRouter provider & catalog integration', () => {
     expect(events).toEqual([
       { t: 'thinking', delta: 'thinking step 1' },
       { t: 'text', delta: 'final answer' },
-      { t: 'usage', in: 100, out: 25, cacheRead: 0, cacheWrite: 0 },
+      { t: 'usage', in: 100, out: 25, cacheRead: 0, cacheWrite: 0, contextIn: 100 },
       { t: 'stop', reason: 'end_turn' },
     ]);
   });

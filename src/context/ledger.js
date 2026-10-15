@@ -111,7 +111,11 @@ export class Ledger {
     return this.usage >= this.compactAt;
   }
 
-  /** Feed the calibrator the provider's authoritative input-token count. */
+  /**
+   * Feed the calibrator the provider's authoritative *billed* input-token count: the
+   * whole prompt, cache reads and writes included, not just the fresh part. Callers pass
+   * `billedInput(usage)` (providers/base.js) so the two cannot drift.
+   */
   reconcile(actualInputTokens) {
     const raw = this.systemTokens + this.segments.reduce((n, s) => n + s.tokens, 0);
     this.calibrator.observe(raw, actualInputTokens);

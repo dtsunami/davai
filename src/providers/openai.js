@@ -109,12 +109,17 @@ export function createOpenAI({
       if (toolCalls.size) yield { t: 'tool_calls', calls: [...toolCalls.values()] };
 
       if (usage) {
+        const cached = usage.prompt_tokens_details?.cached_tokens || 0;
+        const prompt = usage.prompt_tokens || 0;
         yield {
           t: 'usage',
-          in: usage.prompt_tokens || 0,
+          // prompt_tokens already includes the cached prefix. Reporting it whole as `in`
+          // billed those tokens at full price *and* at the cache rate. See billedInput().
+          in: Math.max(0, prompt - cached),
           out: usage.completion_tokens || 0,
-          cacheRead: usage.prompt_tokens_details?.cached_tokens || 0,
+          cacheRead: cached,
           cacheWrite: 0,
+          contextIn: prompt,
         };
       }
       // A stream that closes without a finish_reason was cut off (dropped connection,

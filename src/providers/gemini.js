@@ -53,12 +53,16 @@ export function createGemini({ apiKey, model, maxTokens, temperature, thinkingVi
       }
 
       if (usage) {
+        const cached = usage.cachedContentTokenCount || 0;
+        const prompt = usage.promptTokenCount || 0;
         yield {
           t: 'usage',
-          in: usage.promptTokenCount || 0,
+          // promptTokenCount already includes the cached content; `in` is fresh-only.
+          in: Math.max(0, prompt - cached),
           out: (usage.candidatesTokenCount || 0) + (usage.thoughtsTokenCount || 0),
-          cacheRead: usage.cachedContentTokenCount || 0,
+          cacheRead: cached,
           cacheWrite: 0,
+          contextIn: prompt,
         };
       }
       yield {

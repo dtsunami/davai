@@ -33,6 +33,15 @@ describe('token estimation', () => {
     c.observe(100, 100_000); // ratio 1000 — bogus
     expect(c.apply(100)).toBe(130);
   });
+
+  it('ignores a low outlier as well as a high one', () => {
+    // One report far below the estimate must not drag the bar down for the rest of the
+    // session; the EMA would need many turns to climb back.
+    const c = new TokenCalibrator();
+    c.observe(100, 130);
+    c.observe(100, 5); // ratio 0.05 — bogus
+    expect(c.apply(100)).toBe(130);
+  });
 });
 
 describe('ledger', () => {

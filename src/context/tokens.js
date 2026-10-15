@@ -10,6 +10,15 @@
  */
 
 /**
+ * Observed/estimated ratios outside this band are discarded rather than folded into the
+ * EMA. Above 5x the provider is answering a different question than the one we estimated;
+ * below 0.2x is a mis-count, and letting even one through yanks the live bar down for the
+ * rest of the session while the EMA slowly climbs back.
+ */
+const MIN_RATIO = 0.2;
+const MAX_RATIO = 5;
+
+/**
  * Heuristic estimate. Code tokenizes denser than prose (more punctuation, more short
  * identifiers), so a flat chars/4 under-counts source files noticeably.
  */
@@ -40,11 +49,17 @@ export class TokenCalibrator {
     this.samples = 0;
   }
 
-  /** @param {number} estimated @param {number} actual */
+  /**
+   * @param {number} estimated @param {number} actual
+   *
+   * Implausible ratios are dropped in both directions. A high one is a provider reporting
+   * something other than what we estimated; a low one would yank the live bar down for the
+   * rest of the session before the EMA had any chance to climb back.
+   */
   observe(estimated, actual) {
     if (!estimated || !actual) return;
     const r = actual / estimated;
-    if (!Number.isFinite(r) || r <= 0 || r > 5) return;
+    if (!Number.isFinite(r) || r < MIN_RATIO || r > MAX_RATIO) return;
     this.samples++;
     // Exponential moving average, weighted toward recent turns.
     const alpha = this.samples === 1 ? 1 : 0.3;

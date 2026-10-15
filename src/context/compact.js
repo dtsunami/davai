@@ -25,6 +25,9 @@ const KEEP_RECENT_TURNS = 3;
 export async function compact(ledger, { cfg, makeProvider, onEvent }) {
   const before = ledger.tokens;
   const actions = [];
+  // Action figures are reported in the same units as `freed` and the status bar: the
+  // calibrated totals, not the raw segment estimates they are derived from.
+  const cal = (n) => ledger.calibrator.apply(n);
   const target = Math.floor(ledger.limit * (ledger.compactAt - 0.15));
 
   const recentIds = new Set(recentTurnIds(ledger));
@@ -41,7 +44,7 @@ export async function compact(ledger, { cfg, makeProvider, onEvent }) {
     if (ledger.tokens <= target) break;
     if (s.type === 'op-result' && !s.pinned && !currentIds.has(s.id)) {
       ledger.drop(s.id);
-      actions.push(`dropped op-result #${s.id} (${s.label}, ~${s.tokens} tok)`);
+      actions.push(`dropped op-result #${s.id} (${s.label}, ~${cal(s.tokens)} tok)`);
     }
   }
 
@@ -58,7 +61,7 @@ export async function compact(ledger, { cfg, makeProvider, onEvent }) {
         // segment truncated to 57 tokens still reported 868, so compaction thought it
         // had freed nothing and kept escalating to summarization it did not need.
         s.tokens = estimate(s.part.text) || 1;
-        actions.push(`truncated ${s.type} #${s.id} (~${saved - s.tokens} tok)`);
+        actions.push(`truncated ${s.type} #${s.id} (~${cal(saved) - cal(s.tokens)} tok)`);
       }
     }
   }
