@@ -26,8 +26,15 @@ export function createOpenAI({
   effort,
   temperature,
   baseURL = undefined,
+  defaultHeaders = undefined,
   name = 'openai',
-  client = new OpenAI({ apiKey, baseURL, maxRetries: 3, timeout: 10 * 60 * 1000 }),
+  client = new OpenAI({
+    apiKey,
+    baseURL,
+    defaultHeaders,
+    maxRetries: 3,
+    timeout: 10 * 60 * 1000,
+  }),
 }) {
 
   return {
@@ -77,7 +84,10 @@ export function createOpenAI({
           if (!choice) continue;
           const d = choice.delta;
           if (d?.content) yield* contentDeltas(d.content);
-          if (d?.reasoning_content) yield { t: 'thinking', delta: d.reasoning_content };
+          // OpenRouter normalizes reasoning deltas onto `delta.reasoning`, while xAI/DeepSeek
+          // use `delta.reasoning_content`. Handle both without duplicating if a backend sets both.
+          const reasoningDelta = d?.reasoning_content || (typeof d?.reasoning === 'string' ? d.reasoning : '');
+          if (reasoningDelta) yield { t: 'thinking', delta: reasoningDelta };
           if (d?.tool_calls) mergeToolCallDeltas(toolCalls, d.tool_calls);
           if (choice.finish_reason) finish = choice.finish_reason;
         }

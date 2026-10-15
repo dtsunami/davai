@@ -7,19 +7,57 @@ import { createOpenAIResponses } from './openai-responses.js';
 import { createGemini } from './gemini.js';
 
 const GROK_BASE_URL = 'https://api.x.ai/v1';
+export const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 
 const DEFAULT_ENDPOINTS = {
   anthropic: 'https://api.anthropic.com/v1',
   openai: 'https://api.openai.com/v1',
   grok: GROK_BASE_URL,
+  openrouter: OPENROUTER_BASE_URL,
   gemini: 'https://generativelanguage.googleapis.com',
 };
 
 /** Statuses where "which key went where" is the first question. */
 const AUTH_STATUSES = new Set([401, 403]);
 
+/**
+ * A 400 that *may* mean the request went to the wrong API surface — the model is
+ * served by Responses and was asked on Chat Completions, or the reverse.
+ *
+ * "May" is the whole point. Some servers behind an OpenAI-shaped base URL emit one
+ * generic refusal ("does not support completions requests") for every surface, so the
+ * text cannot distinguish "wrong endpoint" from "this model is not a chat model and
+ * this server only answers on its own custom route". An
+ * earlier version of this helper read the message as proof of a surface mismatch and
+ * told the operator to flip DAVAI_OPENAI_API; flipping it produced the identical
+ * error, and the advice then pointed back the other way. Suggest the flip, but say
+ * what it means when it does not help.
+ */
+const SURFACE_RE =
+  /does not support (chat )?completions|does not support responses|must be used with the (responses|chat completions) api/i;
+
+/**
+ * @param {import('../config/env.js').Config} cfg
+ * @param {string} model
+ * @returns {string}
+ */
+export function describeSurface(cfg, model) {
+  const using = cfg.openaiApi === 'chat' ? 'chat' : 'responses';
+  const other = using === 'chat' ? 'responses' : 'chat';
+  return [
+    `  endpoint  ${endpointOf(cfg)}`,
+    `  model     ${model}`,
+    `  api       DAVAI_OPENAI_API=${using}` +
+      (cfg.baseURL ? ' — a custom DAVAI_BASE_URL defaults to chat unless this is set' : ''),
+    `  try       DAVAI_OPENAI_API=${other} in $DAVAI_HOME/.env`,
+    `  if same   the surface is not the problem: this server returns one refusal for`,
+    `            every endpoint. Check that the key is entitled to "${model}"`,
+    `            (/models listing a model does not mean your key may call it).`,
+  ].join('\n');
+}
+
 /** Prefixes that identify a key's issuer. Showing them leaks nothing secret. */
-const KEY_PREFIX = /^(sk-ant-|sk-proj-|sk-svcacct-|sk-|xai-|AIza)/;
+const KEY_PREFIX = /^(sk-or-v1-|sk-or-|sk-ant-|sk-proj-|sk-svcacct-|sk-|xai-|AIza)/;
 
 /**
  * Describe a key without revealing it: issuer prefix, length, last four characters,
@@ -61,7 +99,8 @@ export function describeAuth(cfg, model) {
   const key = cfg.keys?.[cfg.provider];
   const ko = cfg.keyOrigins?.[cfg.provider];
   const bo = cfg.baseURLOrigin;
-  const custom = cfg.provider === 'openai' || cfg.provider === 'grok';
+  const custom =
+    cfg.provider === 'openai' || cfg.provider === 'grok' || cfg.provider === 'openrouter';
   const endpointSource = bo
     ? `${bo.name} from ${bo.from || 'unknown source'}`
     : custom
@@ -73,7 +112,12 @@ export function describeAuth(cfg, model) {
     `  model     ${model}`,
     `  key       ${maskKey(key)}  (${keySource})`,
   ];
-  if (cfg.provider === 'openai' && !cfg.baseURL && key && !String(key).startsWith('sk-')) {
+  if (cfg.provider === 'openai' && !cfg.baseURL && key && String(key).startsWith('sk-or-')) {
+    lines.push(
+      `  note      this looks like an OpenRouter key (sk-or-…) being sent to OpenAI. ` +
+        `Set DAVAI_PROVIDER=openrouter and OPENROUTER_API_KEY in $DAVAI_HOME/.env.`,
+    );
+  } else if (cfg.provider === 'openai' && !cfg.baseURL && key && !String(key).startsWith('sk-')) {
     lines.push(
       `  note      this key has no sk- prefix but is being sent to OpenAI. For Mistral or ` +
         `another OpenAI-compatible server, set DAVAI_BASE_URL in $DAVAI_HOME/.env.`,
@@ -97,6 +141,14 @@ export function withAuthDiagnostics(adapter, cfg, model) {
       } catch (err) {
         if (AUTH_STATUSES.has(err?.status) && !err.authContext) {
           err.authContext = describeAuth(cfg, model);
+          err.message = `${err.message}\n${err.authContext}`;
+        } else if (
+          err?.status === 400 &&
+          cfg.provider === 'openai' &&
+          !err.authContext &&
+          SURFACE_RE.test(`${err.message || ''} ${err.detail || ''}`)
+        ) {
+          err.authContext = describeSurface(cfg, model);
           err.message = `${err.message}\n${err.authContext}`;
         }
         throw err;
@@ -135,6 +187,16 @@ function adapterFor(cfg, common) {
       return cfg.openaiApi === 'chat' ? createOpenAI(common) : createOpenAIResponses(common);
     case 'grok':
       return createOpenAI({ ...common, baseURL: cfg.baseURL || GROK_BASE_URL, name: 'grok' });
+    case 'openrouter':
+      return createOpenAI({
+        ...common,
+        baseURL: cfg.baseURL || OPENROUTER_BASE_URL,
+        name: 'openrouter',
+        defaultHeaders: {
+          'HTTP-Referer': 'https://github.com/davai-cli/davai',
+          'X-Title': 'davai',
+        },
+      });
     case 'gemini':
       return createGemini(common);
     default:
@@ -148,6 +210,15 @@ function adapterFor(cfg, common) {
  * @returns {Promise<string[]>}
  */
 export async function listRemoteModels(cfg) {
+  if (cfg.provider === 'openrouter') {
+    const { fetchOpenRouterCatalog } = await import('../config/models.js');
+    const specs = await fetchOpenRouterCatalog({
+      baseURL: cfg.baseURL || OPENROUTER_BASE_URL,
+      force: true,
+    });
+    return specs.map((s) => s.id).sort();
+  }
+
   const apiKey = cfg.keys[cfg.provider];
   if (!apiKey) throw new Error(`no API key for ${cfg.provider}`);
 

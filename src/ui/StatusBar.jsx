@@ -2,12 +2,17 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import path from 'node:path';
 import { colors, glyphs, bar, usageColor, formatCost, formatTokens } from './theme.js';
+import { renderSparkline } from './throughput.js';
 
-export function StatusBar({ cfg, ledger, stats, width, exitArmed }) {
+export function StatusBar({ cfg, ledger, stats, throughput, width, exitArmed }) {
   const tokens = ledger.tokens;
   const pct = Math.min(100, (tokens / ledger.limit) * 100);
   const dir = path.basename(cfg.cwd) || cfg.cwd;
   const compact = width < 100;
+
+  const snap = throughput ? throughput.snapshot(Date.now(), { seriesPoints: 10 }) : null;
+  const tpsVal = snap ? (snap.active ? snap.currentTps : snap.avgTps) : 0;
+  const spark = snap && snap.series.length ? renderSparkline(snap.series, { width: compact ? 6 : 10 }) : '';
 
   return (
     <Box paddingX={1} marginTop={1} flexDirection="column">
@@ -38,6 +43,14 @@ export function StatusBar({ cfg, ledger, stats, width, exitArmed }) {
             </Text>
             <Text color={colors.dim}> {glyphs.bullet} </Text>
             <Text color={colors.dim}>{formatCost(stats.cost, stats.costUnknown, stats.costEstimated)}</Text>
+            {tpsVal > 0 ? (
+              <>
+                <Text color={colors.dim}> {glyphs.bullet} </Text>
+                <Text color={snap?.active ? colors.accent : colors.dim}>
+                  {tpsVal.toFixed(0)} tok/s{spark ? ` ${spark}` : ''}
+                </Text>
+              </>
+            ) : null}
           </>
         ) : null}
       </Box>

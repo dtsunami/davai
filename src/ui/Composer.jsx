@@ -121,6 +121,7 @@ export function Composer({ onSubmit, session, busy }) {
         return;
       }
       if (key.ctrl && input === 'a') return; // reserved: artifacts pane
+      if (key.ctrl && input === 't') return; // reserved: throughput pane
       if (key.ctrl && input === 'e') return setCursor(value.length);
 
       // Ignore remaining control chords so they don't land in the buffer.

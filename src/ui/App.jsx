@@ -7,9 +7,11 @@ import { ContextPane } from './ContextPane.jsx';
 import { ModelPane } from './ModelPane.jsx';
 import { ArtifactPane } from './ArtifactPane.jsx';
 import { ApprovalPane } from './ApprovalPane.jsx';
+import { ThroughputPane } from './ThroughputPane.jsx';
 import { ThinkingBox } from './ThinkingBox.jsx';
 import { renderMarkdown } from './markdown.js';
 import { colors, glyphs, formatMeter } from './theme.js';
+import { ThroughputTracker, renderSparkline } from './throughput.js';
 import { handleCommand } from './commands.js';
 import { extractImageRefs, loadImage } from '../context/images.js';
 
@@ -50,6 +52,12 @@ export function App({ session, initialInput }) {
   // samples them once a second rather than re-rendering on every token.
   const runRef = useRef({ startedAt: 0, chars: 0, thought: 0, ops0: 0 });
   const meterTimerRef = useRef(null);
+  const throughputRef = useRef(null);
+  if (!throughputRef.current) {
+    throughputRef.current = session.throughput || new ThroughputTracker();
+    session.throughput = throughputRef.current;
+  }
+  const throughput = throughputRef.current;
 
   const push = useCallback((entry) => {
     setHistory((h) => [...h, { key: nextKey++, ...entry }]);
@@ -75,10 +83,12 @@ export function App({ session, initialInput }) {
     runRef.current = { startedAt: Date.now(), chars: 0, thought: 0, ops0: agent.stats.ops };
     setRunStartedAt(runRef.current.startedAt);
     clearInterval(meterTimerRef.current);
-    // Only advances the clock. Streaming drives its own repaints; this is what keeps the
-    // timer moving while ops run and nothing else changes.
-    meterTimerRef.current = setInterval(() => tickMeter((t) => t + 1), METER_MS);
-  }, [agent]);
+    // Advances the clock and ticks the throughput tracker so stalls drop to 0 tok/s live.
+    meterTimerRef.current = setInterval(() => {
+      throughput.tick();
+      tickMeter((t) => t + 1);
+    }, METER_MS);
+  }, [agent, throughput]);
 
   const stopMeter = useCallback(() => {
     clearInterval(meterTimerRef.current);
@@ -98,6 +108,7 @@ export function App({ session, initialInput }) {
     const onThinking = (delta) => {
       thinkRef.current += delta;
       runRef.current.thought += delta.length;
+      throughput.record('thinking', delta);
       flushThinking();
     };
     const onText = (delta) => {
@@ -105,14 +116,17 @@ export function App({ session, initialInput }) {
       if (thinkRef.current) clearThinking();
       liveRef.current += delta;
       runRef.current.chars += delta.length;
+      throughput.record('text', delta);
       flushLive();
     };
     const onTurnStart = () => {
       setBusy(true);
       setStatus('thinking');
       clearThinking();
+      throughput.startTurn({ turn: agent.stats.turns + 1, model: session.cfg.model.id });
     };
     const onTurnEnd = ({ text }) => {
+      throughput.endTurn();
       clearTimeout(frameRef.current);
       frameRef.current = null;
       liveRef.current = '';
@@ -150,8 +164,12 @@ export function App({ session, initialInput }) {
         message: `${message} — retrying in ${Math.round(waitMs / 1000)}s (${attempt}/${of})`,
       });
     const onArtifact = (item) => push({ type: 'artifact', item });
-    const onUsage = () => setStats({ ...agent.stats });
+    const onUsage = (u) => {
+      throughput.reconcileUsage(u);
+      setStats({ ...agent.stats });
+    };
     const onError = (e) => {
+      throughput.endTurn();
       push({ type: 'error', message: e.message, detail: e.detail });
       setBusy(false);
       setStatus(null);
@@ -159,12 +177,14 @@ export function App({ session, initialInput }) {
     };
     const onWarning = (w) => push({ type: 'warning', message: w.message });
     const onDone = () => {
+      throughput.endTurn();
       setBusy(false);
       setStatus(null);
       setStats({ ...agent.stats });
       stopMeter();
     };
     const onCancelled = () => {
+      throughput.endTurn();
       clearTimeout(frameRef.current);
       frameRef.current = null;
       if (liveRef.current.trim()) push({ type: 'assistant', text: liveRef.current, cancelled: true });
@@ -229,7 +249,7 @@ export function App({ session, initialInput }) {
       clearTimeout(thinkFrameRef.current);
       clearInterval(meterTimerRef.current);
     };
-  }, [agent, flushLive, flushThinking, clearThinking, stopMeter, push, session]);
+  }, [agent, flushLive, flushThinking, clearThinking, stopMeter, push, session, throughput]);
 
   const submit = useCallback(
     async (raw) => {
@@ -345,11 +365,13 @@ export function App({ session, initialInput }) {
       }
       if (key.ctrl && input === 'g') return setPane(pane === 'context' ? null : 'context');
       if (key.ctrl && input === 'a') return setPane(pane === 'artifacts' ? null : 'artifacts');
+      if (key.ctrl && input === 't') return setPane(pane === 'tps' ? null : 'tps');
     },
     { isActive: true },
   );
 
   const width = stdout?.columns || 80;
+  const liveSnap = runStartedAt ? throughput.snapshot(Date.now(), { seriesPoints: 12 }) : null;
 
   return (
     <Box flexDirection="column" width={width}>
@@ -376,10 +398,12 @@ export function App({ session, initialInput }) {
                 chars: runRef.current.chars,
                 thought: runRef.current.thought,
                 ops: Math.max(0, stats.ops - runRef.current.ops0),
+                tps: liveSnap?.currentTps || 0,
+                spark: liveSnap?.series?.length ? renderSparkline(liveSnap.series, { width: 10 }) : '',
               })}{' '}
             </Text>
           ) : null}
-          <Text color={colors.dim}>(esc to cancel{busy ? ', type to steer' : ''})</Text>
+          <Text color={colors.dim}>(esc to cancel{busy ? ', type to steer, ctrl+t plot' : ''})</Text>
         </Box>
       ) : null}
 
@@ -417,6 +441,9 @@ export function App({ session, initialInput }) {
           push={push}
         />
       ) : null}
+      {pane === 'tps' ? (
+        <ThroughputPane tracker={throughput} width={width} onClose={() => setPane(null)} />
+      ) : null}
 
       {!approval && !pane ? <Composer onSubmit={submit} session={session} busy={busy} /> : null}
 
@@ -424,6 +451,7 @@ export function App({ session, initialInput }) {
         cfg={cfg}
         ledger={ledger}
         stats={stats}
+        throughput={throughput}
         width={width}
         exitArmed={exitArmed}
         tick={tick}

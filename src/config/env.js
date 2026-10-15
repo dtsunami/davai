@@ -110,7 +110,7 @@ export function applyModelLimits(cfg) {
 }
 
 /** Providers whose adapter can be pointed at another endpoint. */
-const BASE_URL_PROVIDERS = ['openai', 'grok'];
+const BASE_URL_PROVIDERS = ['openai', 'grok', 'openrouter'];
 
 /**
  * The API endpoint, for an OpenAI-compatible server (Mistral, a local server, a proxy).
@@ -158,6 +158,7 @@ const KEY_VARS = {
   openai: ['OPENAI_API_KEY'],
   gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
   grok: ['XAI_API_KEY', 'GROK_API_KEY'],
+  openrouter: ['OPENROUTER_API_KEY'],
 };
 
 /** Single-quote a string for sh. */
@@ -326,6 +327,7 @@ export function loadConfig(opts = {}) {
     openai: merged.OPENAI_API_KEY,
     gemini: merged.GEMINI_API_KEY || merged.GOOGLE_API_KEY,
     grok: merged.XAI_API_KEY || merged.GROK_API_KEY,
+    openrouter: merged.OPENROUTER_API_KEY,
   };
   // Where the key and endpoint came from, for the auth-failure diagnostic. Names and
   // sources only; the values stay in `keys` and `baseURL`.
@@ -405,6 +407,7 @@ export function requireKey(cfg) {
       openai: 'OPENAI_API_KEY',
       gemini: 'GEMINI_API_KEY',
       grok: 'XAI_API_KEY',
+      openrouter: 'OPENROUTER_API_KEY',
     }[cfg.provider];
     throw new Error(
       `No API key for provider "${cfg.provider}".\n` +

@@ -85,10 +85,13 @@ export function prepareTerminal() {
  * the request in flight. Thought characters are counted separately: they are streamed and
  * billed but never appear in the answer, so folding them into `chars` would overstate it.
  */
-export function formatMeter({ ms, chars, thought, ops }) {
+export function formatMeter({ ms, chars, thought, ops, tps, spark }) {
   const parts = [formatElapsed(ms)];
   if (chars) parts.push(`${countLabel(chars)} chars`);
   if (thought) parts.push(`${countLabel(thought)} thought`);
+  if (tps != null && tps > 0) {
+    parts.push(`${tps.toFixed(1)} tok/s${spark ? ` ${spark}` : ''}`);
+  }
   if (ops) parts.push(`${ops} op${ops === 1 ? '' : 's'}`);
   return parts.join(` ${glyphs.bullet} `);
 }

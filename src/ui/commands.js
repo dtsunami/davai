@@ -16,7 +16,8 @@ import { formatTokens, glyphs } from './theme.js';
 
 const HELP = `Commands
   sh <cmd>            run a shell command; output is added to context (sudo asks for a password)
-  /model              model and settings pane
+  /model [id|query]   model and settings pane (with live OpenRouter search)
+  /tps                realtime token/s throughput plot over time (also ctrl+t)
   /context            context breakdown (also ctrl+g)
   /artifacts          artifacts from this session (also ctrl+a)
   /image [path]       attach an image (no path = clipboard, Windows)
@@ -35,6 +36,7 @@ const HELP = `Commands
 
 Keys
   esc                 cancel the running turn, or close a pane
+  ctrl+t              realtime token/s plot pane
   ctrl+g              context pane
   ctrl+a              artifacts pane
   ctrl+s              toggle shell mode
@@ -158,8 +160,72 @@ export async function handleCommand(text, deps) {
       exit();
       return { handled: true };
 
-    case 'model':
+    case 'model': {
+      if (!arg) {
+        setPane('model');
+        return { handled: true };
+      }
+      // `/model openrouter` switches provider and opens the pane; `/model provider/slug`
+      // or `/model <known-id>` switches directly; otherwise treat `arg` as a filter query.
+      const { PROVIDERS, findModel, refineModel } = await import('../config/models.js');
+      const { loadConfig, applyModelLimits } = await import('../config/env.js');
+      const { createProvider } = await import('../providers/index.js');
+      const { saveSettings } = await import('../config/settings.js');
+      const trimmed = arg.trim();
+      if (PROVIDERS.includes(trimmed.toLowerCase())) {
+        const nextProv = trimmed.toLowerCase();
+        if (!cfg.keys?.[nextProv]) {
+          push({ type: 'warning', message: `no API key configured for ${nextProv}` });
+          return { handled: true };
+        }
+        cfg.provider = nextProv;
+        setPane('model');
+        return { handled: true };
+      }
+      const isSlug = trimmed.includes('/');
+      const known = findModel(trimmed);
+      if (isSlug || known) {
+        const targetProvider = known ? known.provider : isSlug && cfg.keys?.openrouter ? 'openrouter' : cfg.provider;
+        if (!cfg.keys?.[targetProvider]) {
+          push({ type: 'warning', message: `no API key configured for ${targetProvider}` });
+          return { handled: true };
+        }
+        try {
+          const next = loadConfig({
+            cwd: cfg.cwd,
+            overrides: {
+              DAVAI_PROVIDER: targetProvider,
+              DAVAI_MODEL: trimmed,
+              DAVAI_EFFORT: cfg.effort,
+            },
+          });
+          await refineModel(next.model, { apiKey: cfg.keys[targetProvider], baseURL: cfg.baseURL });
+          cfg.provider = targetProvider;
+          cfg.model = next.model;
+          const notices = applyModelLimits(cfg);
+          ledger.limit = cfg.contextLimit;
+          agent.provider = createProvider(cfg);
+          saveSettings(cfg.home, { provider: cfg.provider, model: trimmed, effort: cfg.effort });
+          for (const message of notices) push({ type: 'warning', message });
+          push({
+            type: 'notice',
+            message: `model ${glyphs.arrow} ${trimmed} (${cfg.provider}, ${formatTokens(cfg.contextLimit)} context)`,
+          });
+          refresh();
+        } catch (err) {
+          push({ type: 'error', message: `could not switch model: ${err.message}` });
+        }
+        return { handled: true };
+      }
+      session.modelSearch = trimmed;
       setPane('model');
+      return { handled: true };
+    }
+
+    case 'tps':
+    case 'throughput':
+    case 'speed':
+      setPane('tps');
       return { handled: true };
 
     case 'context':

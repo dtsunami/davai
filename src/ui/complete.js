@@ -7,6 +7,7 @@ import path from 'node:path';
 const COMMANDS = [
   '/help',
   '/model',
+  '/tps',
   '/context',
   '/artifacts',
   '/image',

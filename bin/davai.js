@@ -24,7 +24,7 @@ OPTIONS
   -y, --yes              auto-approve shell commands (headless only)
       --yolo             auto-approve shell commands in the REPL too (/yolo toggles)
   -m, --model <id>       override the model for this run
-      --provider <name>  anthropic | openai | gemini | grok
+      --provider <name>  anthropic | openai | gemini | grok | openrouter
       --effort <level>   low | medium | high | xhigh | max
   -C, --cwd <dir>        run against a different working directory
       --models [prov]    list models the provider actually serves

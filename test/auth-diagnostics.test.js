@@ -2,7 +2,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { describeAuth, maskKey, withAuthDiagnostics } from '../src/providers/index.js';
+import {
+  describeAuth,
+  describeSurface,
+  maskKey,
+  withAuthDiagnostics,
+} from '../src/providers/index.js';
 import { ProviderError } from '../src/providers/base.js';
 import { loadConfig } from '../src/config/env.js';
 
@@ -75,14 +80,86 @@ describe('describeAuth', () => {
   });
 });
 
+describe('describeSurface', () => {
+  it('names the setting that moves the request to the other API', () => {
+    const d = describeSurface(cfg({ openaiApi: 'chat' }), 'subq-snap-preview');
+    expect(d).toContain('DAVAI_OPENAI_API=chat');
+    expect(d).toContain('DAVAI_OPENAI_API=responses in $DAVAI_HOME/.env');
+  });
+
+  it('explains why a custom base URL ended up on chat completions', () => {
+    const d = describeSurface(
+      cfg({ openaiApi: 'chat', baseURL: 'https://api.subq.ai/v1' }),
+      'subq-snap-preview',
+    );
+    expect(d).toContain('https://api.subq.ai/v1/chat/completions');
+    expect(d).toMatch(/custom DAVAI_BASE_URL defaults to chat/);
+  });
+
+  it('points the other way when Responses is the one being refused', () => {
+    const d = describeSurface(cfg(), 'gpt-5-chat');
+    expect(d).toContain('DAVAI_OPENAI_API=responses');
+    expect(d).toContain('DAVAI_OPENAI_API=chat in $DAVAI_HOME/.env');
+  });
+
+  // Regression: the advice used to be unfalsifiable. Whichever surface was active it
+  // claimed the other one would fix things, so an operator on a server that refuses
+  // both just bounced between them. The escape hatch has to be in the message.
+  it('says what it means when flipping the surface changes nothing', () => {
+    for (const api of ['chat', 'responses']) {
+      const d = describeSurface(
+        cfg({ openaiApi: api, baseURL: 'https://api.subq.ai/v1' }),
+        'subq-snap-preview',
+      );
+      expect(d).toMatch(/if same/);
+      expect(d).toMatch(/the surface is not the problem/);
+      expect(d).toContain('subq-snap-preview');
+    }
+  });
+});
+
 describe('withAuthDiagnostics', () => {
-  const failing = (status) => ({
+  const failing = (status, message) => ({
     name: 'openai',
     model: 'm',
     // eslint-disable-next-line require-yield
     async *send() {
-      throw new ProviderError(`openai: failed ${status}`, { status, provider: 'openai' });
+      throw new ProviderError(message || `openai: failed ${status}`, {
+        status,
+        provider: 'openai',
+      });
     },
+  });
+
+  it('explains a 400 that may mean the wrong API surface', async () => {
+    const wrapped = withAuthDiagnostics(
+      failing(400, "openai: 400 Model 'subq-snap-preview' does not support completions requests."),
+      cfg({ openaiApi: 'chat', baseURL: 'https://api.subq.ai/v1' }),
+      'subq-snap-preview',
+    );
+    await expect(drain(wrapped.send({}))).rejects.toThrow(/DAVAI_OPENAI_API=responses/);
+  });
+
+  it('leaves an unrelated 400 alone', async () => {
+    const wrapped = withAuthDiagnostics(
+      failing(400, 'openai: 400 Invalid value for max_completion_tokens.'),
+      cfg({ openaiApi: 'chat' }),
+      'm',
+    );
+    await expect(drain(wrapped.send({}))).rejects.toThrow(
+      /^openai: 400 Invalid value for max_completion_tokens\.$/,
+    );
+  });
+
+  it('leaves a 400 from another provider alone', async () => {
+    const wrapped = withAuthDiagnostics(
+      failing(400, 'grok: 400 model does not support completions requests'),
+      cfg({ provider: 'grok' }),
+      'm',
+    );
+    await expect(drain(wrapped.send({}))).rejects.toThrow(
+      /^grok: 400 model does not support completions requests$/,
+    );
   });
 
   it('appends the resolved context to a 401', async () => {

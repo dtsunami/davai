@@ -138,15 +138,90 @@ export const MODELS = [
     inputPrice: 3.0,
     outputPrice: 15.0,
   },
+
+  // --- openrouter (seed; full catalog + pricing fetched dynamically via /api/v1/models) ---
+  {
+    id: 'anthropic/claude-sonnet-4.5',
+    provider: 'openrouter',
+    label: 'Claude Sonnet 4.5 (OpenRouter)',
+    context: 1_000_000,
+    maxOutput: 64_000,
+    vision: true,
+    effort: true,
+    thinking: true,
+    inputPrice: 3.0,
+    outputPrice: 15.0,
+  },
+  {
+    id: 'anthropic/claude-opus-4.5',
+    provider: 'openrouter',
+    label: 'Claude Opus 4.5 (OpenRouter)',
+    context: 200_000,
+    maxOutput: 64_000,
+    vision: true,
+    effort: true,
+    thinking: true,
+    inputPrice: 5.0,
+    outputPrice: 25.0,
+  },
+  {
+    id: 'openai/gpt-5.1',
+    provider: 'openrouter',
+    label: 'GPT-5.1 (OpenRouter)',
+    context: 400_000,
+    maxOutput: 128_000,
+    vision: true,
+    effort: true,
+    thinking: true,
+    inputPrice: 1.25,
+    outputPrice: 10.0,
+  },
+  {
+    id: 'google/gemini-2.5-pro',
+    provider: 'openrouter',
+    label: 'Gemini 2.5 Pro (OpenRouter)',
+    context: 1_000_000,
+    maxOutput: 64_000,
+    vision: true,
+    effort: true,
+    thinking: true,
+    inputPrice: 1.25,
+    outputPrice: 10.0,
+  },
+  {
+    id: 'deepseek/deepseek-r1',
+    provider: 'openrouter',
+    label: 'DeepSeek R1 (OpenRouter)',
+    context: 164_000,
+    maxOutput: 32_000,
+    vision: false,
+    effort: true,
+    thinking: true,
+    inputPrice: 0.55,
+    outputPrice: 2.19,
+  },
+  {
+    id: 'qwen/qwen3-coder',
+    provider: 'openrouter',
+    label: 'Qwen3 Coder (OpenRouter)',
+    context: 262_000,
+    maxOutput: 64_000,
+    vision: false,
+    effort: false,
+    thinking: false,
+    inputPrice: 0.3,
+    outputPrice: 1.2,
+  },
 ];
 
-export const PROVIDERS = ['anthropic', 'openai', 'gemini', 'grok'];
+export const PROVIDERS = ['anthropic', 'openai', 'gemini', 'grok', 'openrouter'];
 
 export const DEFAULT_MODEL = {
   anthropic: 'claude-opus-5-5',
   openai: 'gpt-5.1',
   gemini: 'gemini-3-pro-preview',
   grok: 'grok-4',
+  openrouter: 'anthropic/claude-sonnet-4.5',
 };
 
 /** Cheap model used for compaction summaries. */
@@ -155,6 +230,7 @@ export const SUMMARIZER_MODEL = {
   openai: 'gpt-5-mini',
   gemini: 'gemini-2.5-flash',
   grok: 'grok-4',
+  openrouter: 'google/gemini-2.5-flash',
 };
 
 export function findModel(id) {
@@ -215,7 +291,7 @@ export function resolveModel(provider, id) {
     context: 200_000,
     maxOutput: 32_000,
     vision: true,
-    effort: provider === 'anthropic' || provider === 'openai',
+    effort: provider === 'anthropic' || provider === 'openai' || provider === 'openrouter',
     thinking: provider !== 'grok',
     inputPrice: null,
     outputPrice: null,
@@ -224,14 +300,103 @@ export function resolveModel(provider, id) {
   };
 }
 
+/** In-memory cache of OpenRouter's model catalog so refineModel and /model share one fetch. */
+let openRouterCatalogCache = null;
+
+/**
+ * Parse a raw OpenRouter `/api/v1/models` entry into a Davai ModelSpec shape.
+ * @param {any} raw
+ * @returns {ModelSpec|null}
+ */
+export function parseOpenRouterModel(raw) {
+  if (!raw || typeof raw.id !== 'string') return null;
+  const promptPerTok = Number(raw.pricing?.prompt);
+  const compPerTok = Number(raw.pricing?.completion);
+  const inputPrice =
+    Number.isFinite(promptPerTok) && promptPerTok >= 0
+      ? Number((promptPerTok * 1e6).toFixed(4))
+      : null;
+  const outputPrice =
+    Number.isFinite(compPerTok) && compPerTok >= 0
+      ? Number((compPerTok * 1e6).toFixed(4))
+      : null;
+  const context = Number(raw.top_provider?.context_length || raw.context_length) || 128_000;
+  const maxOutput =
+    Number(raw.top_provider?.max_completion_tokens) || Math.min(64_000, Math.floor(context / 2));
+  const modalities = raw.architecture?.input_modalities || [];
+  const params = raw.supported_parameters || [];
+  const hasReasoning =
+    params.includes('reasoning') ||
+    params.includes('include_reasoning') ||
+    /claude-(3\.7|4|opus-4|sonnet-4)|gpt-5|o1|o3|o4|r1|thinking|qwq/i.test(raw.id);
+
+  return {
+    id: raw.id,
+    provider: 'openrouter',
+    label: raw.name || raw.id,
+    context,
+    maxOutput,
+    vision: Array.isArray(modalities)
+      ? modalities.includes('image')
+      : /vision|claude|gpt-4|gpt-5|gemini/i.test(raw.id),
+    effort: hasReasoning,
+    thinking: hasReasoning,
+    inputPrice,
+    outputPrice,
+    refined: true,
+  };
+}
+
+/**
+ * Fetch and parse OpenRouter's catalog (`GET /api/v1/models`).
+ * @param {{baseURL?: string, force?: boolean, fetchImpl?: typeof fetch}} [opts]
+ * @returns {Promise<ModelSpec[]>}
+ */
+export async function fetchOpenRouterCatalog({
+  baseURL = 'https://openrouter.ai/api/v1',
+  force = false,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  if (openRouterCatalogCache && !force && fetchImpl === globalThis.fetch) {
+    return openRouterCatalogCache;
+  }
+  const url = `${baseURL.replace(/\/+$/, '')}/models`;
+  const res = await fetchImpl(url, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`OpenRouter models HTTP ${res.status}`);
+  const body = await res.json();
+  const list = Array.isArray(body?.data) ? body.data : [];
+  const specs = list.map(parseOpenRouterModel).filter(Boolean);
+  if (fetchImpl === globalThis.fetch) openRouterCatalogCache = specs;
+  return specs;
+}
+
 /**
  * Ask the provider for a model's real limits and capabilities, and fold them into
- * the spec. Only Anthropic exposes this today; the others return null and keep the
- * conservative defaults.
+ * the spec. Anthropic and OpenRouter expose rich model metadata; the others keep
+ * the seed / conservative defaults.
  *
  * @returns {Promise<ModelSpec>} the same spec, mutated in place
  */
-export async function refineModel(spec, { apiKey }) {
+export async function refineModel(spec, { apiKey, baseURL, fetchImpl } = {}) {
+  if (spec.provider === 'openrouter') {
+    try {
+      const catalog = await fetchOpenRouterCatalog({
+        baseURL: baseURL || 'https://openrouter.ai/api/v1',
+        fetchImpl,
+      });
+      const match = catalog.find((m) => m.id === spec.id);
+      if (match) {
+        Object.assign(spec, match);
+        delete spec.unverified;
+      }
+    } catch {
+      /* offline or custom proxy without /models — keep conservative defaults */
+    }
+    return spec;
+  }
   if (spec.provider !== 'anthropic' || !apiKey) return spec;
   try {
     const { default: Anthropic } = await import('@anthropic-ai/sdk');

@@ -43,7 +43,7 @@ export async function createSession(opts = {}) {
 
   // The registry is a seed; ask the provider for this model's real limits before we
   // size the context window around them.
-  await refineModel(cfg.model, { apiKey });
+  await refineModel(cfg.model, { apiKey, baseURL: cfg.baseURL });
   // Re-derive from what was requested, now that the real limits are known. Overwriting
   // contextLimit with the model window here used to discard DAVAI_CONTEXT_LIMIT.
   const limitNotices = applyModelLimits(cfg);
