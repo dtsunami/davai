@@ -566,10 +566,15 @@ export class Agent extends EventEmitter {
     let attempt = 0;
     // Wall-clock timing, measured here in the harness rather than in the UI. This is the
     // number that goes into the session log, and a Pi repainting at 30fps should not be
-    // the instrument of record for it. Both reset per attempt: a retry that streamed
-    // nothing must not leave its (long) backoff wait behind as the turn's ttft.
-    const startedAt = Date.now();
+    // the instrument of record for it.
+    //
+    // Both figures describe the attempt that *succeeded*, not the turn as a whole. That is
+    // what the consumers need: tps is out / (duration - ttft), so folding a retry's backoff
+    // into the duration would deflate the rate and report the provider as slow when the
+    // delay was this side's own patience. The wait is not lost — the `retry` event and the
+    // `provider-retry` transcript entry carry it per attempt.
     let ttftMs;
+    let durationMs;
     for (; ; attempt++) {
       // Opened before the request: from here on, everything streamed reaches disk as it
       // arrives rather than at turn end (session/stream.js).
@@ -613,6 +618,7 @@ export class Agent extends EventEmitter {
         // Computed once the stream is over rather than per delta: nothing reads ttftMs
         // until the turn ends, and the first delta's arrival is all the state needed.
         ttftMs = firstDeltaAt === null ? null : firstDeltaAt - requestAt;
+        durationMs = Date.now() - requestAt;
         break;
       } catch (err) {
         // Close the stream record first: it holds the deltas themselves, and every path
@@ -655,7 +661,7 @@ export class Agent extends EventEmitter {
       toolCalls,
       attempts: attempt + 1,
       ttftMs,
-      durationMs: Date.now() - startedAt,
+      durationMs,
     };
   }
 
