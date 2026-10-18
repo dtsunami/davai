@@ -103,6 +103,27 @@ afterEach(() => {
 const flush = () => new Promise((r) => setTimeout(r, 60));
 
 /**
+ * Wait for `text` to reach the rendered output.
+ *
+ * App.jsx batches streaming deltas into frames every FRAME_MS (33), so anything asserted
+ * straight after a `text` or `thinking` emit depends on that timer having fired. A fixed
+ * sleep is a race against it: under the full parallel suite the event loop is contended
+ * enough that 60ms occasionally is not enough, which is what made these tests fail about
+ * one run in three while passing every time in isolation. Poll for the frame instead of
+ * guessing how long it takes to arrive.
+ */
+const waitForText = async (stdout, text, timeout = 2000) => {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (stdout.frames.join('').includes(text)) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out after ${timeout}ms waiting for ${JSON.stringify(text)}`);
+    }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
+
+/**
  * The most recent complete render. Ink writes control sequences as their own chunks, so
  * `frames.at(-1)` is often just an escape code; the status bar's model id anchors a frame
  * that actually holds the UI.
@@ -138,8 +159,7 @@ describe('App rendering', () => {
     await flush();
     session.agent.emit('turn-start');
     session.agent.emit('text', 'hello from the model');
-    await flush();
-    expect(stdout.frames.join('')).toContain('hello from the model');
+    await waitForText(stdout, 'hello from the model');
     app.unmount();
   });
 
@@ -375,11 +395,10 @@ describe('thinking panel', () => {
     await flush();
     session.agent.emit('turn-start');
     session.agent.emit('thinking', 'The slug helper lowercases but never collapses runs.');
-    await flush();
+    await waitForText(stdout, 'never collapses runs');
 
     const out = stdout.frames.join('');
     expect(out).toContain('thinking');
-    expect(out).toContain('never collapses runs');
     expect(out).toMatch(/[╭┌]/); // the box is drawn, not plain text
     app.unmount();
   });
@@ -389,10 +408,10 @@ describe('thinking panel', () => {
     await flush();
     session.agent.emit('turn-start');
     session.agent.emit('thinking', 'weighing two approaches');
-    await flush();
-    expect(stdout.frames.join('')).toContain('weighing two approaches');
+    await waitForText(stdout, 'weighing two approaches');
 
     session.agent.emit('text', 'Here is what I found.');
+    await waitForText(stdout, 'Here is what I found.');
     await flush();
     const last = lastRender(stdout);
     expect(last).toContain('Here is what I found.');
@@ -405,12 +424,12 @@ describe('thinking panel', () => {
     await flush();
     session.agent.emit('turn-start');
     session.agent.emit('thinking', 'internal deliberation');
-    await flush();
+    await waitForText(stdout, 'internal deliberation');
 
     // Everything written from here on is the commit of this turn.
     const before = stdout.frames.length;
     session.agent.emit('turn-end', { text: 'Done.' });
-    await flush();
+    await waitForText(stdout, 'Done.');
 
     const committed = stdout.frames.slice(before).join('');
     expect(committed).toContain('Done.');
