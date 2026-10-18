@@ -3,7 +3,7 @@
  * davai entry point. Parses argv, then either runs headless or starts the TUI.
  */
 import process from 'node:process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -236,7 +236,23 @@ async function main() {
 // Only when run as a program. Importing this file — which test/cli.test.js does, to get
 // at parseArgs — must not start a session: it happened to exit quietly under vitest
 // because argv carried no prompt, which is luck rather than a guarantee.
-const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+//
+// Older checks compared the raw paths and could fail when the executable was a symlink
+// (npm/yarn linking or global installs). Compare real paths when possible so both
+// direct invocation and symlinked installs behave the same.
+let isMain = false;
+if (process.argv[1]) {
+  try {
+    const scriptPath = path.resolve(process.argv[1]);
+    const modulePath = path.resolve(fileURLToPath(import.meta.url));
+    const realScript = realpathSync(scriptPath);
+    const realModule = realpathSync(modulePath);
+    isMain = realScript === realModule || scriptPath === modulePath;
+  } catch (e) {
+    // If realpathSync fails for any reason, fall back to the original conservative check.
+    isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+  }
+}
 
 if (isMain) {
   main()
