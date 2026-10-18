@@ -70,7 +70,11 @@ export function createWebServer({
 
     // The client bundle is public; everything else needs the token. Serving the shell
     // unauthenticated means a wrong token shows a login prompt rather than a dead socket.
-    const open = url.pathname === '/' || url.pathname.startsWith('/assets/');
+    const open =
+      url.pathname === '/' ||
+      url.pathname.startsWith('/assets/') ||
+      url.pathname === '/favicon.svg' ||
+      url.pathname === '/favicon.ico';
     if (!open && !tokenMatches(secret, given)) {
       res.writeHead(401, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'bad or missing token' }));
@@ -209,7 +213,13 @@ export function createWebServer({
         return;
       }
     } else {
-      const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/assets\//, '');
+      // /favicon.ico is what a browser asks for unprompted; both names serve the SVG.
+      const rel =
+        pathname === '/'
+          ? 'index.html'
+          : pathname === '/favicon.ico' || pathname === '/favicon.svg'
+            ? 'favicon.svg'
+            : pathname.replace(/^\/assets\//, '');
       file = path.join(CLIENT_DIR, rel);
       // The client directory is ours, but the path came off the wire.
       if (!file.startsWith(CLIENT_DIR)) {
