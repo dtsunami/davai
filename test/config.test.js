@@ -100,6 +100,52 @@ describe('loadConfig limits', () => {
   });
 });
 
+describe('loadConfig web sidecar', () => {
+  const load = (overrides) =>
+    loadConfig({
+      cwd: base,
+      overrides: { DAVAI_PROVIDER: 'anthropic', DAVAI_MODEL: 'claude-opus-5-5', ...overrides },
+    });
+
+  it('defaults to off, loopback, 7878', () => {
+    expect(load({}).web).toEqual({
+      enabled: false,
+      port: 7878,
+      host: '127.0.0.1',
+      token: undefined,
+    });
+  });
+
+  it('reads the DAVAI_WEB_* family', () => {
+    const cfg = load({
+      DAVAI_WEB: 'true',
+      DAVAI_WEB_PORT: '9000',
+      DAVAI_WEB_HOST: '0.0.0.0',
+      DAVAI_WEB_TOKEN: 'fixed-token',
+    });
+    expect(cfg.web).toEqual({
+      enabled: true,
+      port: 9000,
+      host: '0.0.0.0',
+      token: 'fixed-token',
+    });
+  });
+
+  it('allows port 0, which asks the OS for a free one', () => {
+    expect(load({ DAVAI_WEB_PORT: '0' }).web.port).toBe(0);
+  });
+
+  it('rejects a port that is not one', () => {
+    expect(() => load({ DAVAI_WEB_PORT: '70000' })).toThrow(/between 0 and 65535/);
+    expect(() => load({ DAVAI_WEB_PORT: 'http' })).toThrow(/DAVAI_WEB_PORT/);
+    expect(() => load({ DAVAI_WEB_PORT: '-1' })).toThrow(/DAVAI_WEB_PORT/);
+  });
+
+  it('treats an empty token as absent, so one is minted per run', () => {
+    expect(load({ DAVAI_WEB_TOKEN: '   ' }).web.token).toBeUndefined();
+  });
+});
+
 describe('loadConfig base URL', () => {
   const load = (overrides) =>
     loadConfig({

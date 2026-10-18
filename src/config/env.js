@@ -66,6 +66,17 @@ function positiveInt(v, name) {
   return n;
 }
 
+/** A TCP port. Separate from positiveInt because the range matters and 0 is legal. */
+function port(v, name) {
+  if (v === undefined || String(v).trim() === '') return undefined;
+  const n = Number(String(v).trim());
+  // 0 is "pick a free one", which is genuinely useful when two sessions share a host.
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(`${name} must be a port between 0 and 65535 (got "${v}").`);
+  }
+  return n;
+}
+
 export const DEFAULT_MAX_TOKENS = 32_000;
 
 /**
@@ -387,6 +398,17 @@ export function loadConfig(opts = {}) {
     // Auto-approve shell ops. Deliberately not a persisted setting (see settings.js):
     // it lives for one run, or for one `/yolo` toggle, and never outlives the session.
     yolo: bool(merged.DAVAI_YOLO, false),
+    // The web sidecar. `enabled` only says the operator wants it by default; the flags
+    // still win, and the bind is checked against yolo in server/auth.js regardless of
+    // which one asked for it.
+    web: {
+      enabled: bool(merged.DAVAI_WEB, false),
+      port: port(merged.DAVAI_WEB_PORT, 'DAVAI_WEB_PORT') ?? 7878,
+      host: (merged.DAVAI_WEB_HOST || '127.0.0.1').trim(),
+      // A fixed token makes a bookmark survive a restart. Absent, one is minted per run,
+      // which is the safer default and why this is opt-in.
+      token: merged.DAVAI_WEB_TOKEN?.trim() || undefined,
+    },
     keys,
     keyOrigins,
     baseURLOrigin,

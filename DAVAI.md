@@ -28,6 +28,9 @@ access.
 - Loopback by default, bearer token on every request. Remote access is a tunnel's job
   (`ssh -L`, Tailscale). Binding off-loopback with `--yolo` is refused: yolo makes the
   approval pane a no-op, so the combination is an unauthenticated remote shell.
+- Configurable from `.env` as `DAVAI_WEB`, `DAVAI_WEB_PORT`, `DAVAI_WEB_HOST` and
+  `DAVAI_WEB_TOKEN`; `--web` / `--web-host` override them. A fixed token is opt-in
+  because the safe default is a fresh one per run.
 - Approvals are brokered by the bus, so the REPL and any number of browsers race for the
   same request and the first answer wins. A late answer reports `stale`, not an error.
 - A view hook you omit defaults to a no-op. That is deliberate but sharp: a view that

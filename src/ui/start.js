@@ -21,7 +21,9 @@ export async function startTui({ input, cwd, overrides, resume, web }) {
 
   // Started before Ink renders, so a failed bind is a plain error rather than something
   // scribbled over a live frame.
-  const sidecar = web ? await startSidecar(session, web) : null;
+  // DAVAI_WEB=true starts it without a flag; --web starts it regardless of the setting.
+  const wantWeb = web || session.cfg.web?.enabled;
+  const sidecar = wantWeb ? await startSidecar(session, web || {}) : null;
 
   banner(session, sidecar);
 
@@ -95,12 +97,16 @@ async function startSidecar(session, web) {
     },
   });
 
+  // Flags over config over defaults. cfg.web carries the DAVAI_WEB* values; `web` is
+  // whatever the command line asked for, and an explicit flag always wins.
+  const conf = session.cfg.web || {};
   const server = await createWebServer({
     session,
     bus,
     submit,
-    port: web.port,
-    host: web.host,
+    port: web.port ?? conf.port ?? 7878,
+    host: web.host || conf.host || '127.0.0.1',
+    token: conf.token,
   }).listen();
 
   return {

@@ -28,7 +28,7 @@ OPTIONS
       --effort <level>   low | medium | high | xhigh | max
   -C, --cwd <dir>        run against a different working directory
       --web [port]       serve the session over http as well (default 7878, loopback)
-      --web-host <addr>  bind the sidecar elsewhere; needs a tunnel, refuses with --yolo
+      --web-host <addr>  bind the sidecar elsewhere; refuses to combine with --yolo
       --models [prov]    list models the provider actually serves
       --sessions         list recent sessions
       --resume [id]      rebuild context from a past session; id may be a prefix
@@ -88,8 +88,9 @@ function parseArgs(argv) {
         out.cwd = next();
         break;
       case '--web':
-        // An optional value, like --resume: `--web` alone takes the default port.
-        out.web = { port: /^\d+$/.test(argv[i + 1] || '') ? Number(next()) : 7878 };
+        // An optional value, like --resume. Without one, the port is left undefined so
+        // DAVAI_WEB_PORT can supply it; startTui falls back to 7878.
+        out.web = /^\d+$/.test(argv[i + 1] || '') ? { port: Number(next()) } : {};
         break;
       case '--web-host':
         out.webHost = next();
@@ -201,7 +202,10 @@ async function main() {
   }
 
   const { startTui } = await import('../src/ui/start.js');
-  const web = args.web ? { ...args.web, host: args.webHost || '127.0.0.1' } : null;
+  // Flags win over DAVAI_WEB*; `--web` with no port falls back to the configured one
+  // rather than hardcoding 7878 a second time. startTui resolves the rest from cfg,
+  // which is the only place that has read the .env files.
+  const web = args.web || args.webHost ? { ...(args.web || {}), host: args.webHost } : null;
   return startTui({ input, cwd: args.cwd, overrides: args.overrides, resume: args.resume, web });
 }
 

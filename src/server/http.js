@@ -11,6 +11,7 @@
  * cannot disagree about what happened.
  */
 import http from 'node:http';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,7 +50,14 @@ const TYPES = {
  * @param {string} [opts.host]
  * @param {string} [opts.token]
  */
-export function createWebServer({ session, bus, submit, port = 7878, host = '127.0.0.1', token }) {
+export function createWebServer({
+  session,
+  bus,
+  submit,
+  port = 7878,
+  host = '127.0.0.1',
+  token,
+}) {
   assertSafeBind({ host, yolo: Boolean(session.cfg?.yolo) });
   const secret = token || makeToken();
   /** @type {Set<import('node:http').ServerResponse>} */
@@ -262,7 +270,14 @@ export function createWebServer({ session, bus, submit, port = 7878, host = '127
       return typeof a === 'object' && a ? a.port : port;
     },
     url() {
-      const h = isLoopback(host) ? 'localhost' : host;
+      // 0.0.0.0 means "every interface", and pasting it into a browser reaches nothing.
+      // Print a LAN address instead, since the banner's URL is meant to be typed.
+      let h = host;
+      if (isLoopback(host)) h = 'localhost';
+      else if (host === '0.0.0.0' || host === '::') {
+        const nets = Object.values(os.networkInterfaces()).flat();
+        h = nets.find((i) => i && i.family === 'IPv4' && !i.internal)?.address || 'localhost';
+      }
       return `http://${h}:${this.port}/?token=${secret}`;
     },
     listen() {
