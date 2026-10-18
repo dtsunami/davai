@@ -336,6 +336,7 @@ export function App({ session, initialInput }) {
     // dereferences cfg.model when it runs rather than copying the flags when it is
     // created, so it already reads the live model. Listing them would only rebuild the
     // callback; nothing here can go stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [agent, busy, ledger, pastes, push, session, exit, log, startMeter],
   );
 

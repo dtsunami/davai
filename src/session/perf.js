@@ -13,7 +13,9 @@
 import { listSessions, readTranscript } from './log.js';
 
 /**
- * One row per completed assistant turn across recent sessions, oldest session first.
+ * One row per completed assistant turn across recent sessions, newest session first — the
+ * order `listSessions` returns. `rollup` re-sorts, so only a caller that wants a time
+ * series rather than a table needs to care.
  *
  * The model and provider come from the session's `meta.json`: a session that switched
  * models mid-run via `/model` attributes its earlier turns to the model it ended on. A
