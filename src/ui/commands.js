@@ -49,6 +49,28 @@ Input
   @path/to/file       tab-completes against the working directory
   multi-line paste    stored as [[paste#N]], expanded on submit`;
 
+/**
+ * The command table as data, for a view that offers completion.
+ *
+ * Parsed from HELP rather than maintained beside it: the web client and the REPL must
+ * not drift, and the surest way to guarantee that is to have one list. Only the
+ * Commands section is read — the Keys and Input sections below it describe bindings,
+ * not commands, and `shift+enter` is not something you can type at a prompt.
+ */
+export function commandList() {
+  const out = [];
+  for (const line of HELP.split('\n')) {
+    if (/^\S/.test(line) && out.length) break; // next section heading ends the table
+    const m = /^ {2}(\S.*?)\s{2,}(\S.*)$/.exec(line);
+    if (!m) continue;
+    const usage = m[1].trim();
+    const name = usage.split(/\s/)[0];
+    if (!name.startsWith('/') && name !== 'sh') continue;
+    out.push({ name, usage, desc: m[2].trim() });
+  }
+  return out;
+}
+
 function truncate(text, max) {
   return text.length > max ? `${text.slice(0, max - 1)}${glyphs.ellipsis}` : text;
 }
