@@ -27,8 +27,9 @@ OPTIONS
       --provider <name>  anthropic | openai | gemini | grok | openrouter
       --effort <level>   low | medium | high | xhigh | max
   -C, --cwd <dir>        run against a different working directory
-      --web [port]       serve the session over http as well (default 7878, loopback)
-      --web-host <addr>  bind the sidecar elsewhere; refuses to combine with --yolo
+      --web              also serve the session over http (default localhost:7878)
+      --port <n>         port for --web; 0 picks a free one
+      --host <addr>      bind address for --web; refuses to combine with --yolo
       --models [prov]    list models the provider actually serves
       --sessions         list recent sessions
       --resume [id]      rebuild context from a past session; id may be a prefix
@@ -41,7 +42,15 @@ CONFIG
   DAVAI_HOME defaults to ~/.davai
 `;
 
-function parseArgs(argv) {
+/**
+ * Argument parsing, exported for the tests.
+ *
+ * Bad input throws a `UsageError` rather than calling process.exit, so the behaviour can
+ * be asserted; main() catches it, prints, and exits 2.
+ */
+export class UsageError extends Error {}
+
+export function parseArgs(argv) {
   const out = { overrides: {}, words: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -88,13 +97,27 @@ function parseArgs(argv) {
         out.cwd = next();
         break;
       case '--web':
-        // An optional value, like --resume. Without one, the port is left undefined so
-        // DAVAI_WEB_PORT can supply it; startTui falls back to 7878.
-        out.web = /^\d+$/.test(argv[i + 1] || '') ? { port: Number(next()) } : {};
+        // Takes no value. The earlier `--web 9000` form would now leave 9000 in argv to
+        // be swept up as part of the prompt, so catch it and name the replacement rather
+        // than silently sending the model a request that begins "9000".
+        if (/^\d+$/.test(argv[i + 1] || '')) {
+          throw new UsageError(`--web no longer takes a port. Use: --web --port ${argv[i + 1]}`);
+        }
+        out.web = true;
+        break;
+      case '--port': {
+        const v = next();
+        if (!/^\d+$/.test(v || '') || Number(v) > 65535) {
+          throw new UsageError(`--port must be a number between 0 and 65535 (got "${v ?? ''}")`);
+        }
+        out.port = Number(v);
+        break;
+      }
+      case '--host':
+        out.host = next();
         break;
       case '--web-host':
-        out.webHost = next();
-        break;
+        throw new UsageError('--web-host is now --host');
       case '--models':
         out.listModels = true;
         if (argv[i + 1] && !argv[i + 1].startsWith('-')) out.overrides.DAVAI_PROVIDER = next();
@@ -111,9 +134,7 @@ function parseArgs(argv) {
         break;
       default:
         if (a.startsWith('-')) {
-          console.error(`unknown option: ${a}\n`);
-          console.error(HELP);
-          process.exit(2);
+          throw new UsageError(`unknown option: ${a}\n\n${HELP}`);
         }
         out.words.push(a);
     }
@@ -202,17 +223,33 @@ async function main() {
   }
 
   const { startTui } = await import('../src/ui/start.js');
-  // Flags win over DAVAI_WEB*; `--web` with no port falls back to the configured one
-  // rather than hardcoding 7878 a second time. startTui resolves the rest from cfg,
-  // which is the only place that has read the .env files.
-  const web = args.web || args.webHost ? { ...(args.web || {}), host: args.webHost } : null;
+  // --port or --host alone implies --web: asking for a port and not getting a server is
+  // not a thing anyone means. Undefined fields fall through to DAVAI_WEB_* and then to
+  // the defaults, resolved in startTui, which is the only place that has read the .env.
+  const web =
+    args.web || args.port !== undefined || args.host !== undefined
+      ? { port: args.port, host: args.host }
+      : null;
   return startTui({ input, cwd: args.cwd, overrides: args.overrides, resume: args.resume, web });
 }
 
-main()
-  .then((code) => process.exit(code ?? 0))
-  .catch((err) => {
-    process.stderr.write(`\n${err?.message || err}\n`);
-    if (process.env.DAVAI_DEBUG) process.stderr.write(`${err?.stack}\n`);
-    process.exit(1);
-  });
+// Only when run as a program. Importing this file — which test/cli.test.js does, to get
+// at parseArgs — must not start a session: it happened to exit quietly under vitest
+// because argv carried no prompt, which is luck rather than a guarantee.
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+
+if (isMain) {
+  main()
+    .then((code) => process.exit(code ?? 0))
+    .catch((err) => {
+      // Bad usage is the operator's typo, not a crash: print it plainly without a stack
+      // and exit 2, the same code the unknown-option path has always used.
+      if (err instanceof UsageError) {
+        process.stderr.write(`${err.message}\n`);
+        process.exit(2);
+      }
+      process.stderr.write(`\n${err?.message || err}\n`);
+      if (process.env.DAVAI_DEBUG) process.stderr.write(`${err?.stack}\n`);
+      process.exit(1);
+    });
+}

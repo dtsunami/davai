@@ -16,9 +16,9 @@ An agentic CLI REPL. See README.md for the full design.
 
 ## The web sidecar
 
-`davai --web [port]` serves the running session over HTTP alongside the REPL. The REPL
-remains the better driver; the browser adds plots, a scrollable transcript and remote
-access.
+`davai --web [--port N] [--host ADDR]` serves the running session over HTTP alongside the
+REPL. The REPL remains the better driver; the browser adds plots, a scrollable transcript
+and remote access.
 
 - SSE downstream (`GET /api/events`), POST upstream. The stream is append-only, so
   `Last-Event-ID` gives reconnect-and-replay for nothing — which is what makes it usable
