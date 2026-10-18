@@ -4,8 +4,8 @@
  * Deliberately keyboard-first. A browser chat box is a worse driver than the REPL —
  * no history recall, no completion, mouse-dependent — so this keeps enter-to-send,
  * shift+enter for a newline, up-arrow history, tab completion and the same escape
- * and ctrl bindings. What it adds is what a terminal cannot do: real plots, and a
- * transcript you can scroll on a phone.
+ * and ctrl bindings. What it adds is what a terminal cannot do: real plots, a
+ * filterable timeline, and a transcript you can scroll on a phone.
  *
  * No framework and no build step, matching the no-build-step rule in DAVAI.md.
  */
@@ -29,6 +29,8 @@ const state = {
   draft: '',
   session: null,
   commands: [],
+  filters: {},
+  turnNo: 0,
 };
 
 // --- transport ---
@@ -59,18 +61,20 @@ function connect() {
   es.addEventListener('hello', (e) => {
     const d = JSON.parse(e.data);
     state.session = d;
-    state.seq = d.seq || state.seq;
     renderHeader(d);
     // The ring had already dropped events we never saw: stitching would silently lose
     // transcript, so say so rather than pretend continuity.
     if (d.gap) pushEntry({ type: 'warning', message: 'reconnected with a gap — some output was missed' });
     if (d.state) {
       state.busy = d.state.busy;
-      setLive(d.state.live || '');
-      setThinking(d.state.thinking || '');
       setStatus(d.state.status);
       setBusy(d.state.busy);
+      // live/thinking are not seeded from the snapshot: everything after `seq` is
+      // replayed immediately below, and seeding would double the deltas we are about
+      // to receive. A reconnect inside a gap loses the head of the turn, which the
+      // gap warning already says.
     }
+    state.seq = d.seq || state.seq;
     for (const p of d.pending || []) showApproval(p);
   });
 
@@ -81,6 +85,9 @@ function connect() {
     });
   }
 }
+
+/** REPL pane name -> this client's tab. */
+const PANE_TAB = { context: 'ctx', tps: 'perf', model: 'models', artifacts: 'art' };
 
 const EVENTS = [
   'thinking', 'text', 'turn-start', 'turn-end', 'ops-parsed', 'ops-result',
@@ -97,6 +104,19 @@ const EVENTS = [
 
 // --- event handling ---
 
+/**
+ * Division of labour, and it matters:
+ *
+ *   `transcript` is the ONLY source of committed timeline entries. App.jsx mirrors every
+ *   push — the user's lines, assistant turns, ops, ops results, warnings, notices,
+ *   approvals, compactions — through the bus, so handling the agent events here as well
+ *   printed everything twice. The agent events drive live state only: the streaming
+ *   buffer, the status line, busy, and the perf meter.
+ *
+ *   The one entry this client commits itself is `thinking`, because the REPL discards
+ *   working notes when the answer starts and a scrollable timeline can afford to keep
+ *   them folded away.
+ */
 let live = '';
 let thinking = '';
 
@@ -106,86 +126,77 @@ function handle(type, d) {
       pushEntry(d);
       break;
     case 'pane':
-      // The REPL's pane names, mapped onto this client's tabs. 'model' and 'artifacts'
-      // have no tab yet, so they stay on chat rather than blanking the view.
-      if (d.pane === 'context') setTab('ctx');
-      else if (d.pane === 'tps') setTab('perf');
+      // The REPL's pane names, mapped onto this client's tabs. Every pane has one now,
+      // so /model or ctrl+a in the terminal moves an attached browser with it.
+      if (PANE_TAB[d.pane]) setTab(PANE_TAB[d.pane]);
       else if (d.pane === null) setTab('chat');
       break;
     case 'session-changed':
       refreshSession();
+      // A /model switch in the terminal moves the browser's catalog with it, so the
+      // '● running' marker does not sit on a model the session stopped using.
+      if (models.loaded) loadModels();
       break;
     case 'turn-start':
       live = ''; thinking = '';
       setLive(''); setThinking(''); setBusy(true); setStatus('thinking');
+      // stats.turns is only re-read when a run finishes, so it is stale between the
+      // steps of one run. Take whichever is further along.
+      state.turnNo = Math.max(state.turnNo + 1, (state.session?.stats?.turns || 0) + 1);
+      pushEntry({ type: 'turn-sep', n: state.turnNo });
+      startLiveMeter();
       break;
     case 'thinking':
-      thinking += d; setThinking(thinking);
+      thinking += d; setThinking(thinking); meterChars(d.length);
       break;
     case 'text':
-      // The answer has started, so the working notes have served their purpose.
-      if (thinking) { thinking = ''; setThinking(''); }
-      live += d; setLive(live);
+      // The answer has started, so the working notes have served their purpose — but
+      // they are worth keeping, folded, in a timeline you can scroll.
+      commitThinking();
+      live += d; setLive(live); meterChars(d.length);
       break;
     case 'turn-end':
-      if (d?.text?.trim()) pushEntry({ type: 'assistant', text: d.text });
-      live = ''; thinking = '';
-      setLive(''); setThinking(''); setStatus(null);
+      commitThinking();
+      live = '';
+      setLive(''); setStatus(null);
       break;
     case 'ops-parsed':
       setStatus(`running ${d.length} op${d.length > 1 ? 's' : ''}`);
-      pushEntry({ type: 'ops', ops: d });
       break;
     case 'ops-result':
       setStatus(null);
-      pushEntry({ type: 'ops-result', ...d });
       break;
     case 'done':
     case 'cancelled':
-      if (type === 'cancelled') {
-        if (live.trim()) pushEntry({ type: 'assistant', text: live });
-        pushEntry({ type: 'notice', message: 'cancelled' });
-      }
-      live = ''; thinking = '';
-      setLive(''); setThinking(''); setBusy(false); setStatus(null);
+      commitThinking();
+      live = '';
+      setLive(''); setBusy(false); setStatus(null);
+      stopLiveMeter();
       refreshSession();
+      refreshPerf();
       break;
     case 'error':
-      pushEntry({ type: 'error', message: d.message, detail: d.detail });
-      setBusy(false); setStatus(null);
-      break;
-    case 'warning':
-      pushEntry({ type: 'warning', message: d.message });
-      break;
-    case 'retry':
-      pushEntry({
-        type: 'warning',
-        message: `${d.message} — retrying in ${Math.round(d.waitMs / 1000)}s (${d.attempt}/${d.of})`,
-      });
-      break;
-    case 'nudge':
-    case 'repair':
-      pushEntry({ type: 'notice', message: d.error ? `malformed da_ops: ${d.error}` : 'no ops in that turn — asking it to continue' });
+      setBusy(false); setStatus(null); stopLiveMeter();
       break;
     case 'steer-queued':
       showQueue(d.queued);
       break;
     case 'steered':
       showQueue(0);
-      pushEntry({ type: 'notice', message: `steering applied (${d.applied})` });
       break;
     case 'compact-start':
       setStatus('compacting context');
       break;
     case 'compact-done':
       setStatus(null);
-      pushEntry({ type: 'notice', message: `compacted: ${d.before} → ${d.after} tokens` });
       break;
     case 'usage':
       renderStats(d);
       break;
     case 'artifact':
-      pushEntry({ type: 'notice', message: `artifact: ${d.label || d.name || 'saved'}` });
+      // The transcript entry carries the announcement; this keeps the tab in step so a
+      // new artifact is there when it is opened.
+      if (currentTab === 'art') loadArtifacts();
       break;
     case 'approval-request':
       showApproval(d);
@@ -198,55 +209,216 @@ function handle(type, d) {
   }
 }
 
-// --- transcript rendering ---
+function commitThinking() {
+  if (!thinking) return;
+  pushEntry({ type: 'thinking', text: thinking });
+  thinking = '';
+  setThinking('');
+}
+
+// --- timeline ---
+
+/** Entry type -> filter group. Five groups is as many as a chip row can carry usefully. */
+const KIND = {
+  user: 'msg',
+  assistant: 'msg',
+  thinking: 'think',
+  ops: 'ops',
+  'ops-result': 'ops',
+  notice: 'note',
+  info: 'note',
+  compact: 'note',
+  approval: 'note',
+  artifact: 'note',
+  warning: 'err',
+  error: 'err',
+  'turn-sep': 'sep',
+};
+const FILTERS = ['msg', 'think', 'ops', 'note', 'err'];
 
 const transcript = () => $('transcript');
+const scroller = () => $('scroll');
 
 function pushEntry(entry) {
-  const box = transcript();
+  if (!entry || !entry.type) return;
+  const box = scroller();
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-  box.appendChild(renderEntry(entry));
+  const node = renderEntry(entry);
+  if (!node) return;
+  node.dataset.kind = KIND[entry.type] || 'note';
+  node.title = new Date().toLocaleTimeString();
+  transcript().appendChild(node);
   // Only follow if they were already at the bottom; yanking the view while someone
   // reads scrollback is the most irritating thing a live log can do.
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
-function renderEntry(e) {
-  if (e.type === 'ops') {
-    const n = el('div', 'entry ops');
-    for (const op of e.ops) {
-      n.appendChild(el('div', 'op-line', `${op.op}: ${op.path || op.cmd || op.pattern || ''}`));
-    }
-    return n;
-  }
-  if (e.type === 'ops-result') {
-    const n = el('div', 'entry');
-    const out = e.outcome || {};
-    if (out.status === 'ok') {
-      for (const r of out.results || []) {
-        const d = r.result || {};
-        n.appendChild(el('div', 'op-ok', `${d.path || r.op} ${d.action || 'ok'}`));
-      }
-    } else {
-      for (const err of out.errors || []) {
-        n.appendChild(el('div', 'op-fail', `${err.op}: ${err.message}`));
-      }
-      n.appendChild(el('div', 'op-fail', 'nothing was applied'));
-    }
-    return n;
-  }
-  const n = el('div', `entry ${e.type}`);
-  n.textContent = e.text || e.message || '';
-  if (e.detail) n.appendChild(el('pre', null, e.detail));
-  return n;
+/** A <details> entry: native collapse, keyboard accessible, no state of our own. */
+function fold(cls, summary, open) {
+  const d = el('details', `entry ${cls}`);
+  d.open = Boolean(open);
+  d.appendChild(el('summary', null, summary));
+  return d;
 }
+
+function renderEntry(e) {
+  switch (e.type) {
+    case 'turn-sep': {
+      const n = el('div', 'entry sep');
+      n.appendChild(el('span', null, `turn ${e.n || ''}`.trim()));
+      return n;
+    }
+
+    case 'thinking': {
+      const chars = e.text.length;
+      const d = fold('think', `thinking · ${chars >= 1000 ? `${(chars / 1000).toFixed(1)}k` : chars} chars`, false);
+      d.appendChild(el('pre', null, e.text));
+      return d;
+    }
+
+    case 'ops': {
+      const ops = e.ops || [];
+      const head = `${ops.length} op${ops.length === 1 ? '' : 's'} · ${ops.map(opLabel).slice(0, 2).join(', ')}${ops.length > 2 ? ' …' : ''}`;
+      const d = fold('ops', head, ops.length <= 5);
+      for (const op of ops) d.appendChild(el('div', 'op-line', opLabel(op)));
+      return d;
+    }
+
+    case 'ops-result': {
+      const out = e.outcome || {};
+      const ok = out.status === 'ok';
+      const rows = ok ? (out.results || []).filter((r) => r.result && MUTATING.has(r.op)) : out.errors || [];
+      const head = ok
+        ? `✓ applied · ${rows.length || (out.results || []).length} result${rows.length === 1 ? '' : 's'}`
+        : `✗ ${rows.length} error${rows.length === 1 ? '' : 's'} — nothing was applied`;
+      const d = fold(`opsres ${ok ? 'ok' : 'fail'}`, head, !ok);
+      if (ok) {
+        for (const r of rows) d.appendChild(el('div', 'op-ok', summarize(r)));
+        if (!rows.length) d.appendChild(el('div', 'op-ok', 'read-only batch'));
+      } else {
+        for (const err of rows) d.appendChild(el('div', 'op-fail', `[${err.index}] ${err.op}: ${err.message}`));
+      }
+      return d;
+    }
+
+    case 'compact': {
+      const d = fold('note', `compacted · freed ~${e.freed || 0} tokens`, false);
+      for (const a of e.actions || []) d.appendChild(el('div', null, a));
+      return d;
+    }
+
+    case 'approval': {
+      const n = el('div', `entry ${e.allowed ? 'ok-line' : 'warning'}`);
+      n.textContent = `${e.allowed ? '✓' : '✗'} shell ${
+        e.allowed ? (e.auto ? 'auto-approved (yolo)' : 'approved') : 'denied'
+      }: ${e.edited || e.cmd || ''}`;
+      return n;
+    }
+
+    case 'artifact': {
+      const it = e.item || {};
+      const n = el('div', 'entry artifact');
+      n.appendChild(document.createTextNode(`artifact #${it.n} (${it.lang || '?'}, ${it.lines || 0} lines) `));
+      const b = el('button', 'chip', 'open');
+      b.onclick = () => setTab('art');
+      n.appendChild(b);
+      return n;
+    }
+
+    case 'error': {
+      if (!e.detail) {
+        const n = el('div', 'entry error');
+        n.textContent = e.message || 'error';
+        return n;
+      }
+      const d = fold('error', e.message || 'error', false);
+      d.appendChild(el('pre', null, e.detail));
+      return d;
+    }
+
+    case 'assistant': {
+      const n = el('div', 'entry assistant');
+      n.textContent = e.text || '';
+      if (e.cancelled) n.appendChild(el('div', 'warning', '⚠ cancelled mid-turn'));
+      return n;
+    }
+
+    case 'info': {
+      const n = el('div', 'entry info');
+      n.textContent = e.text || '';
+      return n;
+    }
+
+    default: {
+      const n = el('div', `entry ${e.type}`);
+      n.textContent = e.text || e.message || '';
+      return n;
+    }
+  }
+}
+
+const MUTATING = new Set(['write', 'replace', 'delete', 'move', 'shell']);
+
+function opLabel(op) {
+  switch (op.op) {
+    case 'shell': return `shell: ${op.cmd}`;
+    case 'move': return `move: ${op.from} → ${op.to}`;
+    case 'grep':
+    case 'glob': return `${op.op}: "${op.pattern}" in ${op.path}`;
+    case 'read': return `read: ${op.path}${op.lines ? ` [${op.lines[0]}-${op.lines[1]}]` : ''}`;
+    default: return `${op.op}: ${op.path || ''}`;
+  }
+}
+
+function summarize(r) {
+  const x = r.result || {};
+  switch (r.op) {
+    case 'write': return `${x.path} ${x.action} (${x.lines} lines)`;
+    case 'replace': return `${x.path} edited (${x.delta >= 0 ? '+' : ''}${x.delta} lines)`;
+    case 'delete': return `${x.path} deleted`;
+    case 'move': return `${x.from} → ${x.to}`;
+    case 'shell': return `$ ${x.cmd} (exit ${x.exitCode}, ${x.durationMs}ms)`;
+    default: return `${r.op} ${x.path || 'ok'}`;
+  }
+}
+
+// --- filters ---
+
+function loadFilters() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('davai-filters')) || {}; } catch { /* first run */ }
+  state.filters = Object.fromEntries(FILTERS.map((k) => [k, saved[k] !== false]));
+}
+
+function applyFilters() {
+  const t = transcript();
+  for (const k of FILTERS) {
+    t.classList.toggle(`hide-${k}`, !state.filters[k]);
+    const chip = $(`f-${k}`);
+    if (chip) chip.setAttribute('aria-pressed', String(Boolean(state.filters[k])));
+  }
+  // The live thinking box lives outside the transcript, so it needs telling separately.
+  $('thinking').classList.toggle('filtered', !state.filters.think);
+  try { localStorage.setItem('davai-filters', JSON.stringify(state.filters)); } catch { /* private mode */ }
+}
+
+function toggleFilter(kind) {
+  state.filters[kind] = !state.filters[kind];
+  applyFilters();
+}
+
+function setFoldAll(open) {
+  for (const d of transcript().querySelectorAll('details.entry')) d.open = open;
+}
+
+// --- live region ---
 
 function setLive(text) {
   const n = $('live');
   n.textContent = text;
   n.hidden = !text;
   if (text) {
-    const box = transcript().parentElement;
+    const box = scroller();
     if (box.scrollHeight - box.scrollTop - box.clientHeight < 120) box.scrollTop = box.scrollHeight;
   }
 }
@@ -266,7 +438,6 @@ function setStatus(text) {
 function setBusy(busy) {
   state.busy = busy;
   $('cancel').hidden = !busy;
-  $('send').disabled = busy && false; // still allowed: typing mid-turn steers
   $('input').placeholder = busy
     ? 'steer the running turn — enter sends'
     : 'message, or / for commands — enter sends, shift+enter newline';
@@ -288,7 +459,7 @@ function showQueue(n) {
 function renderHeader(d) {
   $('model').textContent = `${d.provider}/${d.model}`;
   $('cwd').textContent = d.cwd || '';
-  if (d.stats) renderStats({ total: d.stats.cost, ...d.stats });
+  if (d.stats) renderStats({ ...d.stats, total: d.stats.cost });
   if (d.yolo) $('model').style.color = 'var(--red)';
 }
 
@@ -304,7 +475,7 @@ async function refreshSession() {
     state.session = d;
     renderHeader(d);
     renderContext(d.context);
-    if (currentTab === 'perf') drawCharts();
+    if (currentTab === 'perf') drawPane();
   } catch { /* the stream reports connection trouble already */ }
 }
 
@@ -337,47 +508,482 @@ function renderContext(ctx) {
 
 const fmtTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n ?? 0));
 
-// --- perf view ---
+// --- models ---
+//
+// Aimed squarely at OpenRouter, which is the only provider whose list is worth browsing
+// rather than knowing: 300+ entries with real pricing, context windows and modality
+// flags. A terminal pane can only show fourteen rows at a time and filters by typing;
+// a browser can show the lot, sort by price, and filter on capability.
 
-let charts = [];
+const models = {
+  provider: null,     // the provider being browsed, which is not necessarily the live one
+  rows: [],
+  current: {},
+  providers: [],
+  efforts: [],
+  loaded: false,
+};
 
-async function drawCharts() {
-  const { turns } = await api('/api/perf');
-  for (const c of charts) c.destroy();
-  charts = [];
-  if (!turns.length) return;
-
-  const idx = turns.map((t) => t.turn);
-  const tps = turns.map((t) =>
-    t.durationMs && t.ttftMs != null && t.durationMs > t.ttftMs
-      ? t.tokens / ((t.durationMs - t.ttftMs) / 1000)
-      : 0,
-  );
-  const ttft = turns.map((t) => (t.ttftMs ?? 0) / 1000);
-  const ctxTok = turns.map((t) => t.contextTokens || 0);
-
-  const w = $('view-perf').clientWidth - 40;
-  const opts = (title, label, stroke) => ({
-    title,
-    width: w,
-    height: 180,
-    series: [
-      { label: 'turn' },
-      { label, stroke, width: 2, points: { show: turns.length < 40 } },
-    ],
-    axes: axes(),
-    legend: { show: false },
-  });
-
-  charts.push(new uPlot(opts('tokens/sec (streaming)', 'tok/s', '#98c379'), [idx, tps], $('chart-tps')));
-  charts.push(new uPlot(opts('time to first token (s)', 'ttft', '#e5c07b'), [idx, ttft], $('chart-ttft')));
-  charts.push(new uPlot(opts('context tokens', 'ctx', '#56b6c2'), [idx, ctxTok], $('chart-ctx')));
+async function loadModels({ provider, refresh = false } = {}) {
+  const p = provider || models.provider || state.session?.provider;
+  $('m-status').textContent = refresh ? 'refreshing catalog…' : 'loading…';
+  try {
+    const q = new URLSearchParams({ provider: p, ...(refresh ? { refresh: '1' } : {}) });
+    const d = await api(`/api/models?${q}`);
+    models.provider = d.provider;
+    models.rows = d.models || [];
+    models.current = d.current || {};
+    models.providers = d.providers || [];
+    models.efforts = d.efforts || [];
+    models.loaded = true;
+    // A catalog that failed still renders the seed list; the reason sits beside it.
+    $('m-status').textContent = d.error
+      ? `${d.models.length} from seed — catalog failed: ${d.error}`
+      : `${d.models.length} models · ${d.source}`;
+  } catch (e) {
+    $('m-status').textContent = `could not load models: ${e.message}`;
+    models.rows = [];
+  }
+  renderModels();
 }
 
-const axes = () => [
+function renderModels() {
+  const provs = $('m-providers');
+  provs.innerHTML = '';
+  for (const p of models.providers) {
+    const b = el('button', 'chip', p.name + (p.hasKey ? '' : ' (no key)'));
+    b.disabled = !p.hasKey;
+    // Pressed means "being browsed"; the live provider carries a dot as well, so that
+    // looking at openrouter while running anthropic is unambiguous.
+    b.setAttribute('aria-pressed', String(p.name === models.provider));
+    if (p.current) b.appendChild(el('span', 'live-dot', ' ●'));
+    b.onclick = () => loadModels({ provider: p.name });
+    provs.appendChild(b);
+  }
+
+  const eff = $('m-efforts');
+  eff.innerHTML = '';
+  if (models.current.effort) {
+    eff.appendChild(el('span', 'muted', 'effort '));
+    for (const e of models.efforts) {
+      const b = el('button', 'chip', e.id);
+      b.title = e.desc;
+      b.setAttribute('aria-pressed', String(e.id === models.current.effort));
+      b.onclick = () => switchModel({ effort: e.id });
+      eff.appendChild(b);
+    }
+  }
+
+  const q = $('m-search').value.trim().toLowerCase();
+  const wantVision = $('m-vision').checked;
+  const wantReason = $('m-reason').checked;
+  let rows = models.rows.filter((m) => {
+    if (wantVision && !m.vision) return false;
+    if (wantReason && !m.effort && !m.thinking) return false;
+    if (!q) return true;
+    return m.id.toLowerCase().includes(q) || (m.label || '').toLowerCase().includes(q);
+  });
+
+  const sort = $('m-sort').value;
+  if (sort === 'price') {
+    // Unpriced last rather than free: "price n/a" sorting to the top of a cheapest-first
+    // list is actively misleading on OpenRouter, where unpriced usually means unknown.
+    rows = [...rows].sort((a, b) => (a.inputPrice ?? Infinity) - (b.inputPrice ?? Infinity));
+  } else if (sort === 'context') {
+    rows = [...rows].sort((a, b) => (b.context || 0) - (a.context || 0));
+  } else {
+    rows = [...rows].sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  const list = $('m-list');
+  list.innerHTML = '';
+  for (const m of rows) list.appendChild(modelRow(m));
+
+  // A filter that matches nothing is still a usable way to name a model the catalog has
+  // not heard of — a brand-new slug, or a proxy serving something private.
+  if (!rows.length && q) {
+    const b = el('button', 'm-custom', `use "${$('m-search').value.trim()}" as a custom model id`);
+    b.onclick = () => switchModel({ model: $('m-search').value.trim() });
+    list.appendChild(b);
+  }
+}
+
+function modelRow(m) {
+  const live = models.provider === models.current.provider && m.id === models.current.model;
+  const row = el('div', `m-row${live ? ' live' : ''}`);
+
+  const main = el('div', 'm-main');
+  main.appendChild(el('span', 'm-id', m.id));
+  if (m.label && m.label !== m.id) main.appendChild(el('span', 'muted', m.label));
+  row.appendChild(main);
+
+  const meta = el('div', 'm-meta');
+  if (m.remoteOnly) {
+    meta.appendChild(el('span', 'muted', 'from provider — no local metadata'));
+  } else {
+    meta.appendChild(el('span', null, `${fmtTokens(m.context)} ctx`));
+    meta.appendChild(
+      el('span', m.inputPrice == null ? 'muted' : '',
+        m.inputPrice == null ? 'price n/a' : `$${m.inputPrice} / $${m.outputPrice} per Mtok`),
+    );
+    if (m.vision) meta.appendChild(el('span', 'tag', 'vision'));
+    if (m.effort || m.thinking) meta.appendChild(el('span', 'tag', 'reasoning'));
+    if (m.maxOutput) meta.appendChild(el('span', 'muted', `${fmtTokens(m.maxOutput)} out`));
+  }
+  row.appendChild(meta);
+
+  const act = el('div', 'm-act');
+  if (live) {
+    act.appendChild(el('span', 'live-tag', '● running'));
+  } else {
+    const b = el('button', 'chip', 'use');
+    b.onclick = () => switchModel({ model: m.id });
+    act.appendChild(b);
+  }
+  row.appendChild(act);
+  return row;
+}
+
+/**
+ * Switching is a POST, not a local mutation: the harness owns cfg, and the REPL has to
+ * see the change too. The confirmation comes back over the event stream as a transcript
+ * notice like any other.
+ */
+async function switchModel(want) {
+  $('m-status').textContent = 'switching…';
+  try {
+    await api('/api/model', { provider: models.provider, ...want });
+    await refreshSession();
+    await loadModels();
+  } catch (e) {
+    $('m-status').textContent = `could not switch: ${e.message}`;
+  }
+}
+
+// --- artifacts ---
+
+const arts = { items: [], open: new Set() };
+
+async function loadArtifacts() {
+  try {
+    const d = await api('/api/artifacts');
+    arts.items = d.items || [];
+  } catch { arts.items = []; }
+  renderArtifacts();
+}
+
+function renderArtifacts() {
+  const list = $('art-list');
+  list.innerHTML = '';
+  $('art-empty').hidden = arts.items.length > 0;
+  // Newest first: the one just emitted is the one being looked for.
+  for (const a of [...arts.items].reverse()) list.appendChild(artifactRow(a));
+}
+
+function artifactRow(a) {
+  const d = el('details', 'art');
+  d.open = arts.open.has(a.n);
+  d.addEventListener('toggle', () => {
+    if (d.open) { arts.open.add(a.n); loadArtifactBody(a, d); }
+    else arts.open.delete(a.n);
+  });
+
+  const s = el('summary');
+  s.appendChild(el('span', 'art-n', `#${a.n}`));
+  s.appendChild(el('span', 'art-lang', a.lang || 'text'));
+  s.appendChild(el('span', 'muted', `${a.lines} lines · ${fmtBytes(a.bytes)}`));
+  s.appendChild(el('span', 'art-prev', (a.preview || '').split('\n')[0] || ''));
+  d.appendChild(s);
+
+  const body = el('pre', 'art-body', '…');
+  d.appendChild(body);
+
+  const act = el('div', 'art-act');
+  // Download is the thing a browser can do and a terminal cannot: the REPL's clipboard
+  // copy runs on the machine davai is on, which is the wrong machine from a phone.
+  const dl = el('a', 'chip', 'download');
+  dl.href = `/api/artifact/${a.n}?download=1&token=${encodeURIComponent(state.token)}`;
+  dl.setAttribute('download', a.name || `artifact-${a.n}.txt`);
+  act.appendChild(dl);
+
+  const copy = el('button', 'chip', 'copy');
+  copy.onclick = async () => {
+    try {
+      const text = body.dataset.loaded ? body.textContent : (await api(`/api/artifact/${a.n}`)).text;
+      await navigator.clipboard.writeText(text);
+      copy.textContent = 'copied';
+      setTimeout(() => { copy.textContent = 'copy'; }, 1200);
+    } catch {
+      // Clipboard needs a secure context: plain http over a LAN is not one, and the
+      // download link is the honest fallback rather than a silent no-op.
+      copy.textContent = 'use download';
+    }
+  };
+  act.appendChild(copy);
+
+  const nameIn = el('input', 'art-path');
+  nameIn.value = a.name || `artifact-${a.n}.txt`;
+  nameIn.spellcheck = false;
+  act.appendChild(nameIn);
+
+  const save = el('button', 'chip', 'save to repo');
+  save.onclick = async () => {
+    save.disabled = true;
+    try {
+      const r = await api('/api/artifact/save', { n: a.n, path: nameIn.value.trim() });
+      save.textContent = `saved → ${r.path}`;
+    } catch (e) {
+      save.textContent = e.message;
+    }
+    setTimeout(() => { save.textContent = 'save to repo'; save.disabled = false; }, 2500);
+  };
+  act.appendChild(save);
+
+  d.appendChild(act);
+  if (d.open) loadArtifactBody(a, d);
+  return d;
+}
+
+async function loadArtifactBody(a, d) {
+  const body = d.querySelector('.art-body');
+  if (body.dataset.loaded) return;
+  try {
+    const full = await api(`/api/artifact/${a.n}`);
+    body.textContent = full.text;
+    body.dataset.loaded = '1';
+  } catch (e) {
+    body.textContent = `could not load: ${e.message}`;
+  }
+}
+
+const fmtBytes = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}kB` : `${n}B`);
+
+// --- perf: one dataset, three resolutions ---
+//
+// The chip in the header is a canvas sparkline of per-turn throughput, drawn by hand
+// because a 120px strip does not justify a chart library. Hovering it opens the same
+// series at readable size in an overlay; clicking it opens the dedicated pane, which is
+// the only place with room for the intra-turn bucket plot.
+
+const perf = {
+  turns: [],
+  /** Live estimate, char-derived: the provider's token count only arrives at turn end. */
+  liveTps: 0,
+  chars: 0,
+  timer: null,
+};
+
+async function refreshPerf() {
+  try {
+    const d = await api('/api/perf');
+    perf.turns = d.turns || [];
+  } catch { /* leave the last good series up */ }
+  drawSpark();
+  if (!$('perf-pop').hidden) drawPop();
+  if (currentTab === 'perf') drawPane();
+}
+
+function meterChars(n) { perf.chars += n; }
+
+function startLiveMeter() {
+  clearInterval(perf.timer);
+  perf.chars = 0;
+  perf.liveTps = 0;
+  perf.timer = setInterval(() => {
+    // ~4 chars per token. Approximate on purpose: the exact figure is reconciled against
+    // the provider's usage at turn end, and this only has to move the right way.
+    perf.liveTps = perf.chars / 4;
+    perf.chars = 0;
+    drawSpark();
+  }, 1000);
+}
+
+function stopLiveMeter() {
+  clearInterval(perf.timer);
+  perf.timer = null;
+  perf.liveTps = 0;
+  perf.chars = 0;
+  drawSpark();
+}
+
+const turnTps = (t) =>
+  t.durationMs && t.ttftMs != null && t.durationMs > t.ttftMs
+    ? t.tokens / ((t.durationMs - t.ttftMs) / 1000)
+    : 0;
+
+function sparkSeries() {
+  const hist = perf.turns.map(turnTps);
+  return state.busy ? [...hist, perf.liveTps] : hist;
+}
+
+function drawSpark() {
+  const c = $('spark');
+  if (!c) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth || 120;
+  const h = c.clientHeight || 18;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(h * dpr)) {
+    c.width = Math.round(w * dpr);
+    c.height = Math.round(h * dpr);
+  }
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const all = sparkSeries();
+  const data = all.slice(-40);
+  const now = data.length ? data[data.length - 1] : 0;
+  $('perf-now').textContent = data.length ? `${now.toFixed(0)} tok/s` : '—';
+  $('perf-now').className = state.busy ? 'hot-text' : 'muted';
+  if (data.length < 2) return;
+
+  const max = Math.max(...data, 1);
+  const step = w / (data.length - 1);
+  g.lineWidth = 1.5;
+  g.strokeStyle = state.busy ? '#98c379' : '#56b6c2';
+  g.beginPath();
+  data.forEach((v, i) => {
+    const x = i * step;
+    const y = h - 1 - (v / max) * (h - 2);
+    if (i) g.lineTo(x, y); else g.moveTo(x, y);
+  });
+  g.stroke();
+}
+
+/** Shared uPlot options. uPlot is optional: if it did not load, the panels stay empty. */
+const AXES = () => [
   { stroke: '#6b7487', grid: { stroke: '#1e2430' }, ticks: { stroke: '#1e2430' } },
   { stroke: '#6b7487', grid: { stroke: '#1e2430' }, ticks: { stroke: '#1e2430' } },
 ];
+
+function chartOpts({ title, width, height, series }) {
+  return {
+    title,
+    width,
+    height,
+    series: [{ label: 'x' }, ...series],
+    axes: AXES(),
+    legend: { show: series.length > 1 },
+    cursor: { y: false },
+  };
+}
+
+function hasPlot() { return typeof uPlot !== 'undefined'; }
+
+// --- perf: hover overlay ---
+
+let popCharts = [];
+
+function drawPop() {
+  for (const c of popCharts) c.destroy();
+  popCharts = [];
+  if (!hasPlot() || !perf.turns.length) return;
+  const idx = perf.turns.map((t) => t.turn);
+  const w = 340;
+  popCharts.push(
+    new uPlot(
+      chartOpts({ title: 'tok/s per turn', width: w, height: 110, series: [{ label: 'tok/s', stroke: '#98c379', width: 2 }] }),
+      [idx, perf.turns.map(turnTps)],
+      $('pop-tps'),
+    ),
+  );
+  popCharts.push(
+    new uPlot(
+      chartOpts({ title: 'ttft (s)', width: w, height: 110, series: [{ label: 'ttft', stroke: '#e5c07b', width: 2 }] }),
+      [idx, perf.turns.map((t) => (t.ttftMs ?? 0) / 1000)],
+      $('pop-ttft'),
+    ),
+  );
+}
+
+function openPop() {
+  if (currentTab === 'perf') return; // the full pane is already showing this
+  $('perf-pop').hidden = false;
+  drawPop();
+}
+
+function closePop() {
+  $('perf-pop').hidden = true;
+  for (const c of popCharts) c.destroy();
+  popCharts = [];
+}
+
+// --- perf: full pane ---
+
+let paneCharts = [];
+let paneDraw = 0;
+
+function drawPane() {
+  const token = ++paneDraw;
+  for (const c of paneCharts) c.destroy();
+  paneCharts = [];
+  const sel = $('perf-turn');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  for (const t of perf.turns) {
+    const o = el('option', null, `turn ${t.turn} · ${t.model || ''}`);
+    o.value = String(t.turn);
+    sel.appendChild(o);
+  }
+  if (prev && perf.turns.some((t) => String(t.turn) === prev)) sel.value = prev;
+  else if (perf.turns.length) sel.value = String(perf.turns[perf.turns.length - 1].turn);
+
+  if (!hasPlot()) {
+    $('perf-note').textContent = 'uplot is not installed — plots unavailable';
+    return;
+  }
+  $('perf-note').textContent = perf.turns.length ? '' : 'no completed turns yet';
+  if (!perf.turns.length || token !== paneDraw) return;
+
+  const w = Math.max(240, $('view-perf').clientWidth - 40);
+  const idx = perf.turns.map((t) => t.turn);
+
+  paneCharts.push(new uPlot(
+    chartOpts({ title: 'tokens/sec (streaming)', width: w, height: 190, series: [{ label: 'tok/s', stroke: '#98c379', width: 2, points: { show: perf.turns.length < 40 } }] }),
+    [idx, perf.turns.map(turnTps)], $('chart-tps'),
+  ));
+  paneCharts.push(new uPlot(
+    chartOpts({ title: 'time to first token (s)', width: w, height: 190, series: [{ label: 'ttft', stroke: '#e5c07b', width: 2, points: { show: perf.turns.length < 40 } }] }),
+    [idx, perf.turns.map((t) => (t.ttftMs ?? 0) / 1000)], $('chart-ttft'),
+  ));
+  paneCharts.push(new uPlot(
+    chartOpts({ title: 'context tokens', width: w, height: 190, series: [{ label: 'ctx', stroke: '#56b6c2', width: 2, points: { show: perf.turns.length < 40 } }] }),
+    [idx, perf.turns.map((t) => t.contextTokens || 0)], $('chart-ctx'),
+  ));
+
+  drawTurnDetail(w);
+}
+
+/**
+ * Second-by-second throughput inside one turn — the view that shows a stall during a
+ * large da_ops payload as a hole rather than averaging it away. Bucket tokens are the
+ * harness's pre-reconciliation estimate, which is why the title says so.
+ */
+function drawTurnDetail(w) {
+  const t = perf.turns.find((x) => String(x.turn) === $('perf-turn').value);
+  const b = t?.buckets || [];
+  if (b.length < 2) {
+    $('chart-turn').innerHTML = '';
+    return;
+  }
+  const step = (b[1].t - b[0].t) || 1000;
+  const per = 1000 / step;
+  const x = b.map((p) => (p.t - b[0].t) / 1000);
+  paneCharts.push(new uPlot(
+    chartOpts({
+      title: `turn ${t.turn} · estimated tok/s by second`,
+      width: w,
+      height: 190,
+      series: [
+        { label: 'total', stroke: '#98c379', width: 2 },
+        { label: 'thinking', stroke: '#c678dd', width: 1 },
+        { label: 'text', stroke: '#56b6c2', width: 1 },
+      ],
+    }),
+    [x, b.map((p) => p.tok * per), b.map((p) => (p.think || 0) * per), b.map((p) => (p.text || 0) * per)],
+    $('chart-turn'),
+  ));
+}
 
 // --- approvals ---
 
@@ -477,15 +1083,21 @@ function hideComplete() {
 
 // --- tabs ---
 
+const TABS = ['chat', 'perf', 'ctx', 'models', 'art'];
+
 let currentTab = 'chat';
 function setTab(name) {
   currentTab = name;
-  for (const t of ['chat', 'perf', 'ctx']) {
+  for (const t of TABS) {
     $(`view-${t}`).hidden = t !== name;
     $(`tab-${t}`).classList.toggle('active', t === name);
   }
-  if (name === 'perf') drawCharts();
+  if (name === 'perf') { closePop(); refreshPerf(); }
   if (name === 'ctx') refreshSession();
+  // The catalog is cached in-process on the server, so reopening is cheap; the first
+  // open is the only one that waits on the network.
+  if (name === 'models' && !models.loaded) loadModels();
+  if (name === 'art') loadArtifacts();
 }
 
 // --- wiring ---
@@ -549,9 +1161,39 @@ function bind() {
     if (e.key === 'Enter') { e.preventDefault(); answer(true); }
   });
 
-  $('tab-chat').onclick = () => setTab('chat');
-  $('tab-perf').onclick = () => setTab('perf');
-  $('tab-ctx').onclick = () => setTab('ctx');
+  for (const t of TABS) $(`tab-${t}`).onclick = () => setTab(t);
+
+  for (const id of ['m-search', 'm-vision', 'm-reason', 'm-sort']) {
+    $(id).addEventListener('input', renderModels);
+  }
+  $('m-search').addEventListener('keydown', (e) => {
+    // Enter on a filter that matched exactly one model picks it, like the REPL pane.
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const rows = $('m-list').querySelectorAll('.m-row');
+    if (rows.length === 1) rows[0].querySelector('button')?.click();
+  });
+  $('m-refresh').onclick = () => loadModels({ refresh: true });
+
+  for (const k of FILTERS) $(`f-${k}`).onclick = () => toggleFilter(k);
+  $('fold-all').onclick = () => setFoldAll(false);
+  $('unfold-all').onclick = () => setFoldAll(true);
+
+  // Hover explodes the chip into an overlay; click goes to the full-resolution pane.
+  // Touch has no hover, so the click path has to be the complete one.
+  const chip = $('perf-chip');
+  chip.addEventListener('mouseenter', openPop);
+  chip.addEventListener('focus', openPop);
+  chip.addEventListener('blur', closePop);
+  chip.addEventListener('click', () => { closePop(); setTab('perf'); });
+  const pop = $('perf-pop');
+  const maybeClose = (e) => {
+    if (!chip.contains(e.relatedTarget) && !pop.contains(e.relatedTarget)) closePop();
+  };
+  chip.addEventListener('mouseleave', maybeClose);
+  pop.addEventListener('mouseleave', maybeClose);
+
+  $('perf-turn').onchange = () => drawPane();
 
   // Global keys, matching the REPL where a browser allows it.
   document.addEventListener('keydown', (e) => {
@@ -561,6 +1203,7 @@ function bind() {
     }
     if (e.key === 'Escape') {
       if (completeItems.length) return hideComplete();
+      if (!$('perf-pop').hidden) return closePop();
       if (state.busy) api('/api/cancel', {}).catch(() => {});
       return;
     }
@@ -568,7 +1211,10 @@ function bind() {
     if (e.ctrlKey && e.key === 't') { e.preventDefault(); setTab(currentTab === 'perf' ? 'chat' : 'perf'); }
   });
 
-  window.addEventListener('resize', () => { if (currentTab === 'perf') drawCharts(); });
+  window.addEventListener('resize', () => {
+    drawSpark();
+    if (currentTab === 'perf') drawPane();
+  });
 }
 
 // --- boot ---
@@ -582,11 +1228,14 @@ async function start(token) {
   $('app').hidden = false;
   renderHeader(d);
   renderContext(d.context);
+  loadFilters();
+  applyFilters();
   try {
     state.commands = (await api('/api/commands')).commands || [];
   } catch { state.commands = []; }
   bind();
   connect();
+  refreshPerf();
   $('input').focus();
 }
 

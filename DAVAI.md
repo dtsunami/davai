@@ -33,6 +33,23 @@ and remote access.
   because the safe default is a fresh one per run.
 - Approvals are brokered by the bus, so the REPL and any number of browsers race for the
   same request and the first answer wins. A late answer reports `stale`, not an error.
+- The browser timeline is built from `transcript` alone. Every REPL push is mirrored through
+  the bus, so handling the agent's own `ops-parsed` / `warning` / `turn-end` as entries too
+  printed everything twice; those events now drive live state only. `test/webclient.test.js`
+  pins the entry types and the event subscriptions against App.jsx and `EVENTS`.
+- Entries the REPL's own dispatcher never sees are tagged `origin: 'web'`, and App.jsx
+  re-pushes those locally. Without it a prompt typed in a browser produced an answer in the
+  terminal with no visible question.
+- Models and artifacts are the same machinery in both views. `session/models.js` owns the
+  catalog merge and the switch; `ModelPane.jsx`, `/model` and `POST /api/model` all call
+  `applyModelChange`, which goes through `loadConfig` so a switch is validated by the same
+  path as startup. Poking `cfg.provider` directly is how `/model` and the pane drifted —
+  one moved the provider, the other did not.
+- Browsing a provider is not switching to it. Both panes keep a `browsing` provider
+  separate from the live one, and the switch commits only when a model is chosen.
+- The browser can do two things the terminal cannot: download an artifact (the REPL's
+  clipboard copy runs on davai's machine, which is the wrong one from a phone) and sort
+  300 OpenRouter models by price. Artifact bodies are fetched per-item, never in the list.
 - A view hook you omit defaults to a no-op. That is deliberate but sharp: a view that
   forgets `setPane` gets silence rather than an error. `test/dispatch.test.js` pins it.
 

@@ -18,6 +18,15 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { makeToken, tokenMatches, readToken, assertSafeBind, isLoopback } from './auth.js';
 import { commandList } from '../ui/commands.js';
+import {
+  EFFORTS,
+  EFFORT_HELP,
+  providerState,
+  loadCatalog,
+  serializeModel,
+  applyModelChange,
+} from '../session/models.js';
+import { suggestName } from '../context/artifacts.js';
 
 const require = createRequire(import.meta.url);
 
@@ -87,6 +96,15 @@ export function createWebServer({
     if (req.method === 'GET' && url.pathname === '/api/perf') return json(res, perf());
     if (req.method === 'GET' && url.pathname === '/api/commands') {
       return json(res, { commands: commandList() });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/models') return getModels(res, url);
+    if (req.method === 'POST' && url.pathname === '/api/model') return postModel(req, res);
+    if (req.method === 'GET' && url.pathname === '/api/artifacts') return json(res, artifacts());
+    if (req.method === 'GET' && url.pathname.startsWith('/api/artifact/')) {
+      return getArtifact(url, res);
+    }
+    if (req.method === 'POST' && url.pathname === '/api/artifact/save') {
+      return postArtifactSave(req, res);
     }
     if (req.method === 'POST' && url.pathname === '/api/submit') return postSubmit(req, res);
     if (req.method === 'POST' && url.pathname === '/api/approve') return postApprove(req, res);
@@ -178,6 +196,130 @@ export function createWebServer({
     };
   }
 
+  /**
+   * The model catalog for one provider, with the session's current selection alongside.
+   *
+   * `?refresh=1` forces a re-fetch; without it OpenRouter's 300-model catalog comes from
+   * the in-process cache, which is the difference between a pane that opens instantly and
+   * one that waits on a network round trip every time a tab is clicked.
+   *
+   * A catalog that failed to load is a 200 with `error` set, not a 5xx: the seed list is
+   * still worth rendering, and the browser shows the reason next to it.
+   */
+  async function getModels(res, url) {
+    const { cfg } = session;
+    const provider = url.searchParams.get('provider') || cfg.provider;
+    const refresh = url.searchParams.get('refresh') === '1';
+    try {
+      const { models, error, source } = await loadCatalog(cfg, { provider, force: refresh });
+      json(res, {
+        provider,
+        source,
+        error,
+        providers: providerState(cfg),
+        efforts: EFFORTS.map((id) => ({ id, desc: EFFORT_HELP[id] })),
+        current: {
+          provider: cfg.provider,
+          model: cfg.model.id,
+          effort: cfg.model.effort ? cfg.effort : null,
+          contextLimit: cfg.contextLimit,
+          maxTokens: cfg.maxTokens,
+        },
+        models: models.map(serializeModel),
+      });
+    } catch (e) {
+      json(res, { error: e.message, models: [], providers: providerState(cfg) }, 500);
+    }
+  }
+
+  /**
+   * Switch model, provider and/or effort. Goes through the same `applyModelChange` the
+   * REPL's pane uses, then publishes `session-changed` so the REPL re-reads a config the
+   * browser just mutated underneath it.
+   */
+  function postModel(req, res) {
+    body(req, async (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      try {
+        const r = await applyModelChange(session, {
+          provider: data?.provider,
+          model: data?.model,
+          effort: data?.effort,
+        });
+        for (const message of r.notices) {
+          bus.publish('transcript', { type: 'warning', message, origin: 'web' });
+        }
+        bus.publish('transcript', {
+          type: 'notice',
+          message: `model → ${r.model.id} (${r.provider}, effort ${r.effort})`,
+          origin: 'web',
+        });
+        bus.publish('session-changed', null);
+        json(res, { ok: true, provider: r.provider, model: r.model.id, effort: r.effort });
+      } catch (e) {
+        json(res, { error: e.message }, 400);
+      }
+    });
+  }
+
+  /** Metadata only. The bodies can be megabytes, and the list is rendered without them. */
+  function artifacts() {
+    const items = session.artifacts?.items || [];
+    return {
+      items: items.map((a) => ({
+        n: a.n,
+        lang: a.lang,
+        lines: a.lines,
+        bytes: a.bytes,
+        createdAt: a.createdAt,
+        name: suggestName(a),
+        preview: a.text.split('\n').slice(0, 3).join('\n').slice(0, 300),
+      })),
+    };
+  }
+
+  /**
+   * One artifact's body. `?download=1` sets Content-Disposition, which is the thing a
+   * browser can do that a terminal cannot — the REPL's clipboard copy runs on the machine
+   * davai is on, which is the wrong machine when you are reading this from a phone.
+   */
+  function getArtifact(url, res) {
+    const n = Number(url.pathname.slice('/api/artifact/'.length));
+    const item = session.artifacts?.get(n);
+    if (!item) return json(res, { error: `no artifact #${n}` }, 404);
+    if (url.searchParams.get('download') === '1') {
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        // The name is derived from the fence language, never from client input.
+        'content-disposition': `attachment; filename="${suggestName(item)}"`,
+      });
+      return res.end(item.text);
+    }
+    json(res, { n: item.n, lang: item.lang, lines: item.lines, text: item.text });
+  }
+
+  /** Save to disk through the sandbox and journal, exactly as the REPL's pane does. */
+  function postArtifactSave(req, res) {
+    body(req, (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      try {
+        const r = session.artifacts.save(Number(data?.n), String(data?.path || ''), {
+          sandbox: session.sandbox,
+          journal: session.journal,
+        });
+        bus.publish('transcript', {
+          type: 'notice',
+          message: `artifact #${data.n} → ${r.path}${r.overwrote ? ' (overwrote)' : ''}`,
+          origin: 'web',
+        });
+        json(res, { ok: true, ...r });
+      } catch (e) {
+        // A path outside the write jail lands here: the operator's mistake, not a crash.
+        json(res, { error: e.message }, 400);
+      }
+    });
+  }
+
   function postSubmit(req, res) {
     body(req, (err, data) => {
       if (err) return json(res, { error: err.message }, 400);
@@ -185,7 +327,11 @@ export function createWebServer({
       if (!text) return json(res, { error: 'empty' }, 400);
       // Not awaited: a turn runs for minutes and the answer arrives over the event
       // stream. The POST only reports that the request was accepted.
-      Promise.resolve(submit(text)).catch((e) => bus.publish('error', { message: e.message }));
+      // A transcript line, not an 'error' event: this is the dispatcher refusing, not the
+      // agent failing, and the transcript channel is the one both views already render.
+      Promise.resolve(submit(text)).catch((e) =>
+        bus.publish('transcript', { type: 'error', message: e.message, origin: 'web' }),
+      );
       json(res, { ok: true });
     });
   }

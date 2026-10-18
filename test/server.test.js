@@ -44,6 +44,14 @@ beforeEach(async () => {
       usage: 0.001,
       breakdown: () => [{ id: 0, type: 'system', label: 'system', tokens: 1000, pct: 100 }],
     },
+    artifacts: {
+      items: [
+        { n: 1, lang: 'python', text: 'print(1)\nprint(2)\n', lines: 3, bytes: 18, createdAt: 1 },
+      ],
+      get(n) { return this.items[Number(n) - 1]; },
+      save: (n, dest) => ({ path: dest, bytes: 18, overwrote: false }),
+    },
+    journal: {},
     throughput: {
       turns: [
         {
@@ -179,6 +187,89 @@ describe('routes', () => {
     expect(await post()).toEqual({ ok: true, stale: false });
     expect(answered).toEqual({ allow: true });
     expect(await post()).toEqual({ ok: false, stale: true });
+  });
+
+  it('serves the model catalog with the live selection alongside it', async () => {
+    const d = await (await fetch(url('/api/models'), { headers: auth() })).json();
+    expect(d.provider).toBe('anthropic');
+    expect(d.current).toMatchObject({ provider: 'anthropic', model: 'claude-opus-5' });
+    // Every provider is listed, including the ones with no key, so the browser can say
+    // "needs a key" rather than silently omitting them.
+    expect(d.providers.map((p) => p.name)).toContain('gemini');
+    expect(d.providers.find((p) => p.name === 'gemini').hasKey).toBe(false);
+    expect(d.models.length).toBeGreaterThan(0);
+    // Serialized, not raw: a 300-model payload has no business carrying internals.
+    expect(Object.keys(d.models[0]).sort()).toEqual([
+      'context', 'effort', 'id', 'inputPrice', 'label', 'maxOutput',
+      'outputPrice', 'remoteOnly', 'thinking', 'unverified', 'vision',
+    ]);
+  });
+
+  it('browses another provider without switching the session to it', async () => {
+    const d = await (await fetch(url('/api/models?provider=openrouter'), { headers: auth() })).json();
+    expect(d.provider).toBe('openrouter');
+    expect(d.current.provider).toBe('anthropic');
+    expect(session.cfg.provider).toBe('anthropic');
+  });
+
+  it('reports a bad model switch as a 400 and leaves the session alone', async () => {
+    const res = await fetch(url('/api/model'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ provider: 'gemini', model: 'gemini-3-pro-preview' }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/no API key/);
+    expect(session.cfg.provider).toBe('anthropic');
+  });
+
+  it('lists artifacts as metadata, without the bodies', async () => {
+    const d = await (await fetch(url('/api/artifacts'), { headers: auth() })).json();
+    expect(d.items).toHaveLength(1);
+    expect(d.items[0]).toMatchObject({ n: 1, lang: 'python', lines: 3, name: 'artifact-1.py' });
+    // The body can be megabytes and the list renders without it.
+    expect(d.items[0].text).toBeUndefined();
+    expect(d.items[0].preview).toContain('print(1)');
+  });
+
+  it('serves one artifact body, and as a download when asked', async () => {
+    const d = await (await fetch(url('/api/artifact/1'), { headers: auth() })).json();
+    expect(d.text).toBe('print(1)\nprint(2)\n');
+
+    const dl = await fetch(url('/api/artifact/1?download=1'), { headers: auth() });
+    expect(dl.headers.get('content-disposition')).toContain('artifact-1.py');
+    expect(await dl.text()).toBe('print(1)\nprint(2)\n');
+  });
+
+  it('404s an artifact that does not exist', async () => {
+    const res = await fetch(url('/api/artifact/99'), { headers: auth() });
+    expect(res.status).toBe(404);
+  });
+
+  it('saves an artifact and announces it on the transcript channel', async () => {
+    const seen = [];
+    bus.on('event', (ev) => seen.push(ev));
+    const res = await fetch(url('/api/artifact/save'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ n: 1, path: 'out.py' }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).path).toBe('out.py');
+    // Tagged origin:'web' so App.jsx mirrors it into the terminal rather than ignoring it.
+    const note = seen.find((e) => e.type === 'transcript');
+    expect(note.data).toMatchObject({ type: 'notice', origin: 'web' });
+  });
+
+  it('reports a rejected save as a 400, not a crash', async () => {
+    session.artifacts.save = () => { throw new Error('outside the write root'); };
+    const res = await fetch(url('/api/artifact/save'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ n: 1, path: '../../etc/passwd' }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/outside the write root/);
   });
 
   it('404s an unknown route', async () => {

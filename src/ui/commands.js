@@ -189,10 +189,9 @@ export async function handleCommand(text, deps) {
       }
       // `/model openrouter` switches provider and opens the pane; `/model provider/slug`
       // or `/model <known-id>` switches directly; otherwise treat `arg` as a filter query.
-      const { PROVIDERS, findModel, refineModel } = await import('../config/models.js');
-      const { loadConfig, applyModelLimits } = await import('../config/env.js');
-      const { createProvider } = await import('../providers/index.js');
-      const { saveSettings } = await import('../config/settings.js');
+      // The switch itself is session/models.js, shared with the pane and the browser.
+      const { PROVIDERS, findModel } = await import('../config/models.js');
+      const { applyModelChange } = await import('../session/models.js');
       const trimmed = arg.trim();
       if (PROVIDERS.includes(trimmed.toLowerCase())) {
         const nextProv = trimmed.toLowerCase();
@@ -200,38 +199,26 @@ export async function handleCommand(text, deps) {
           push({ type: 'warning', message: `no API key configured for ${nextProv}` });
           return { handled: true };
         }
-        cfg.provider = nextProv;
+        // Browsed, not switched: naming a provider alone says nothing about which of its
+        // models to run, and the pane's enter is what commits.
+        session.modelBrowse = nextProv;
         setPane('model');
         return { handled: true };
       }
       const isSlug = trimmed.includes('/');
       const known = findModel(trimmed);
       if (isSlug || known) {
-        const targetProvider = known ? known.provider : isSlug && cfg.keys?.openrouter ? 'openrouter' : cfg.provider;
-        if (!cfg.keys?.[targetProvider]) {
-          push({ type: 'warning', message: `no API key configured for ${targetProvider}` });
-          return { handled: true };
-        }
+        const targetProvider = known
+          ? known.provider
+          : isSlug && cfg.keys?.openrouter
+            ? 'openrouter'
+            : cfg.provider;
         try {
-          const next = loadConfig({
-            cwd: cfg.cwd,
-            overrides: {
-              DAVAI_PROVIDER: targetProvider,
-              DAVAI_MODEL: trimmed,
-              DAVAI_EFFORT: cfg.effort,
-            },
-          });
-          await refineModel(next.model, { apiKey: cfg.keys[targetProvider], baseURL: cfg.baseURL });
-          cfg.provider = targetProvider;
-          cfg.model = next.model;
-          const notices = applyModelLimits(cfg);
-          ledger.limit = cfg.contextLimit;
-          agent.provider = createProvider(cfg);
-          saveSettings(cfg.home, { provider: cfg.provider, model: trimmed, effort: cfg.effort });
-          for (const message of notices) push({ type: 'warning', message });
+          const r = await applyModelChange(session, { provider: targetProvider, model: trimmed });
+          for (const message of r.notices) push({ type: 'warning', message });
           push({
             type: 'notice',
-            message: `model ${glyphs.arrow} ${trimmed} (${cfg.provider}, ${formatTokens(cfg.contextLimit)} context)`,
+            message: `model ${glyphs.arrow} ${trimmed} (${r.provider}, ${formatTokens(r.contextLimit)} context)`,
           });
           refresh();
         } catch (err) {

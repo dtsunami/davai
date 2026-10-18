@@ -1,29 +1,29 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
+import { PROVIDERS } from '../config/models.js';
 import {
-  PROVIDERS,
-  modelsFor,
-  refineModel,
-  fetchOpenRouterCatalog,
-} from '../config/models.js';
-import { listRemoteModels, createProvider } from '../providers/index.js';
-import { saveSettings } from '../config/settings.js';
+  EFFORTS,
+  EFFORT_HELP,
+  loadCatalog,
+  applyModelChange,
+} from '../session/models.js';
 import { colors, glyphs, formatTokens } from './theme.js';
-
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
  * /model (req 15): shows what's available and lets you change it live.
  * Includes live search/filtering (`/` or just typing on OpenRouter) and rich metadata
  * from OpenRouter's model catalog (context window, prompt/completion pricing, vision).
+ *
+ * The catalog merge and the switch itself live in session/models.js, because the web
+ * sidecar does both too. What stays here is the keyboard and the layout.
  */
 export function ModelPane({ session, onClose, push }) {
-  const { cfg, ledger, agent } = session;
+  const { cfg } = session;
   const [tab, setTab] = useState('models'); // 'models' | 'settings'
   const [sel, setSel] = useState(0);
-  const [remote, setRemote] = useState(null); // array of strings or ModelSpecs
+  const [catalog, setCatalog] = useState(null); // ModelSpec[]
   const [loading, setLoading] = useState(false);
-  // Guards the auto-load below. `remote`/`loading` cannot: a rejected fetch leaves both
+  // Guards the auto-load below. `catalog`/`loading` cannot: a rejected fetch leaves both
   // in the state that re-triggers the effect.
   const catalogTried = useRef(false);
   const [searching, setSearching] = useState(false);
@@ -31,38 +31,32 @@ export function ModelPane({ session, onClose, push }) {
   useEffect(() => { delete session.modelSearch; }, [session]);
   const [, force] = useState(0);
 
-  // Auto-load the OpenRouter catalog when opening /model on openrouter so the user
-  // immediately gets the full searchable model list with pricing and context sizes.
-  // The ref, not `remote`/`loading`, is what stops it retrying: both of those are
-  // dependencies, so a rejected fetch — leaving remote null and loading false —
-  // re-ran the effect and refetched forever. A failure now reports and stops.
+  // Load the list on open — the full OpenRouter catalog with pricing and context sizes
+  // where there is one, the seed otherwise. The ref, not `catalog`/`loading`, is what
+  // stops it retrying: both of those are dependencies, so a rejected fetch — leaving
+  // catalog null and loading false — re-ran the effect and refetched forever. A failure
+  // now reports and stops.
   useEffect(() => {
-    if (cfg.provider !== 'openrouter' || remote || catalogTried.current) return;
+    if (catalogTried.current) return;
     catalogTried.current = true;
     setLoading(true);
-    fetchOpenRouterCatalog({ baseURL: cfg.baseURL })
-      .then((specs) => setRemote(specs))
-      .catch((err) =>
-        push({
-          type: 'warning',
-          message: `model catalog failed: ${err.message} ${glyphs.bullet} r to retry`,
-        }),
-      )
+    loadCatalog(cfg, { provider: browsing })
+      .then(({ models, error }) => {
+        setCatalog(models);
+        if (error) {
+          push({
+            type: 'warning',
+            message: `model catalog failed: ${error} ${glyphs.bullet} r to retry`,
+          });
+        }
+      })
       .finally(() => setLoading(false));
-  }, [cfg.provider, cfg.baseURL, remote, push]);
+    // `browsing` is read for the initial provider only — the ref makes this run once, and
+    // every later change goes through cycleProvider, which fetches for itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfg, push]);
 
-  const providerModels = modelsFor(cfg.provider);
-  const known = new Set(providerModels.map((m) => m.id));
-  const remoteRows = (remote || []).map((item) =>
-    typeof item === 'string' ? { id: item, remoteOnly: true } : item,
-  );
-  // If remote returned full specs (OpenRouter), merge them over the seed list.
-  const byId = new Map();
-  for (const m of providerModels) byId.set(m.id, m);
-  for (const r of remoteRows) {
-    if (!known.has(r.id) || !r.remoteOnly) byId.set(r.id, r);
-  }
-  const allModels = [...byId.values()];
+  const allModels = catalog || [];
   const q = query.trim().toLowerCase();
   const filteredModels = q
     ? allModels.filter(
@@ -78,70 +72,61 @@ export function ModelPane({ session, onClose, push }) {
     const i = rows.findIndex((r) => (tab === 'models' ? r.id === cfg.model.id : r === cfg.effort));
     setSel(i >= 0 ? i : 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, q, cfg.provider]);
+  }, [tab, q, browsing]);
 
-  const applyModel = async (id) => {
-    if (!id) return;
+  const change = async (want, describe) => {
     try {
-      const { loadConfig, applyModelLimits } = await import('../config/env.js');
-      const next = loadConfig({
-        cwd: cfg.cwd,
-        overrides: { DAVAI_PROVIDER: cfg.provider, DAVAI_MODEL: id, DAVAI_EFFORT: cfg.effort },
-      });
-      await refineModel(next.model, { apiKey: cfg.keys[cfg.provider], baseURL: cfg.baseURL });
-
-      cfg.model = next.model;
-      const notices = applyModelLimits(cfg);
-      ledger.limit = cfg.contextLimit;
-      agent.provider = createProvider(cfg);
-
-      saveSettings(cfg.home, { provider: cfg.provider, model: id, effort: cfg.effort });
-      for (const message of notices) push({ type: 'warning', message });
-      push({
-        type: 'notice',
-        message: `model ${glyphs.arrow} ${id} (${formatTokens(cfg.contextLimit)} context)`,
-      });
+      const r = await applyModelChange(session, want);
+      for (const message of r.notices) push({ type: 'warning', message });
+      push({ type: 'notice', message: describe(r) });
       onClose();
     } catch (err) {
-      push({ type: 'error', message: `could not switch model: ${err.message}` });
+      push({ type: 'error', message: `could not switch: ${err.message}` });
     }
   };
 
-  const applyEffort = (effort) => {
-    cfg.effort = effort;
-    agent.provider = createProvider(cfg);
-    saveSettings(cfg.home, { provider: cfg.provider, model: cfg.model.id, effort });
-    push({ type: 'notice', message: `effort ${glyphs.arrow} ${effort}` });
-    onClose();
-  };
+  const applyModel = (id) =>
+    id &&
+    change(
+      { provider: browsing, model: id },
+      (r) => `model ${glyphs.arrow} ${id} (${r.provider}, ${formatTokens(r.contextLimit)} context)`,
+    );
 
+  const applyEffort = (effort) => change({ effort }, () => `effort ${glyphs.arrow} ${effort}`);
+
+  // Browsing a provider is not switching to it: the model list is shown, and the switch
+  // happens when a model is chosen. Previously this wrote cfg.provider immediately, so
+  // arrowing past a provider and pressing esc left the session pointing at a provider
+  // whose model id it was not using.
+  const [browsing, setBrowsing] = useState(() => session.modelBrowse || cfg.provider);
+  useEffect(() => { delete session.modelBrowse; }, [session]);
   const cycleProvider = (dir) => {
-    const i = PROVIDERS.indexOf(cfg.provider);
+    const i = PROVIDERS.indexOf(browsing);
     const next = PROVIDERS[(i + dir + PROVIDERS.length) % PROVIDERS.length];
     if (!cfg.keys[next]) {
       push({ type: 'warning', message: `no API key configured for ${next}` });
       return;
     }
-    cfg.provider = next;
-    setRemote(null);
+    setBrowsing(next);
     setQuery('');
     setSearching(false);
-    // A different provider means a different catalog; switching back should retry.
-    catalogTried.current = false;
+    setLoading(true);
+    loadCatalog(cfg, { provider: next })
+      .then(({ models, error }) => {
+        setCatalog(models);
+        if (error) push({ type: 'warning', message: `model list failed: ${error}` });
+      })
+      .finally(() => setLoading(false));
     force((n) => n + 1);
   };
 
   const refreshModels = () => {
-    // An explicit refresh owns the fetch; mark it tried so the auto-load effect does
-    // not race a second one alongside it.
-    catalogTried.current = true;
     setLoading(true);
-    const p =
-      cfg.provider === 'openrouter'
-        ? fetchOpenRouterCatalog({ baseURL: cfg.baseURL, force: true })
-        : listRemoteModels(cfg);
-    p.then((res) => setRemote(res))
-      .catch((err) => push({ type: 'warning', message: `model list failed: ${err.message}` }))
+    loadCatalog(cfg, { provider: browsing, force: true })
+      .then(({ models, error }) => {
+        setCatalog(models);
+        if (error) push({ type: 'warning', message: `model list failed: ${error}` });
+      })
       .finally(() => setLoading(false));
   };
 
@@ -201,6 +186,10 @@ export function ModelPane({ session, onClose, push }) {
   );
   const visibleRows = tab === 'models' ? rows.slice(startIdx, startIdx + pageSize) : rows;
 
+  // The checkmark means "this is what the session is running", so it only applies while
+  // the list being browsed is the active provider's.
+  const isCurrent = (m) => browsing === cfg.provider && m.id === cfg.model.id;
+
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={colors.accent} paddingX={1}>
       <Box justifyContent="space-between">
@@ -209,8 +198,10 @@ export function ModelPane({ session, onClose, push }) {
             {tab === 'models' ? 'Models' : 'Settings'}
           </Text>
           <Text color={colors.dim}>{'  '}provider </Text>
-          <Text color={colors.accent}>{cfg.provider}</Text>
-          <Text color={colors.dim}> (←/→ change)</Text>
+          <Text color={browsing === cfg.provider ? colors.accent : colors.warn}>{browsing}</Text>
+          <Text color={colors.dim}>
+            {browsing === cfg.provider ? ' (←/→ change)' : ` (←/→ ${glyphs.bullet} enter to switch from ${cfg.provider})`}
+          </Text>
           {loading ? <Text color={colors.dim}>{'  '}loading catalog…</Text> : null}
         </Box>
         {tab === 'models' ? (
@@ -242,8 +233,8 @@ export function ModelPane({ session, onClose, push }) {
                   <Text color={i === sel ? colors.accent : undefined}>
                     {i === sel ? glyphs.prompt : ' '}{' '}
                   </Text>
-                  <Text color={m.id === cfg.model.id ? colors.ok : undefined}>
-                    {m.id === cfg.model.id ? glyphs.check : ' '}{' '}
+                  <Text color={isCurrent(m) ? colors.ok : undefined}>
+                    {isCurrent(m) ? glyphs.check : ' '}{' '}
                   </Text>
                   <Text color={i === sel ? colors.accent : undefined}>{m.id.padEnd(34)}</Text>
                   {m.remoteOnly ? (
@@ -290,10 +281,4 @@ export function ModelPane({ session, onClose, push }) {
   );
 }
 
-const EFFORT_HELP = {
-  low: 'fastest, cheapest — simple edits',
-  medium: 'balanced',
-  high: 'default — most coding work',
-  xhigh: 'harder problems, more tool calls',
-  max: 'correctness over cost',
-};
+

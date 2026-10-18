@@ -273,6 +273,29 @@ export function App({ session, initialInput }) {
     };
   }, [agent, flushLive, flushThinking, clearThinking, stopMeter, push, session, throughput]);
 
+  // Lines the web sidecar's own dispatcher produced. Its push goes to the bus, not to
+  // Ink, so without this a prompt typed in the browser scrolled past the terminal
+  // unrecorded — the answer appeared, the question never did. Entries are re-pushed
+  // locally rather than through `push`, which would publish them straight back.
+  //
+  // `pane` and `session-changed` come the same way: /context typed in a browser should
+  // open the REPL's pane too, and /model changes have to invalidate what it is showing.
+  useEffect(() => {
+    const bus = session.bus;
+    if (!bus) return undefined;
+    const onEvent = (ev) => {
+      if (ev.type === 'transcript' && ev.data?.origin === 'web') {
+        setHistory((h) => [...h, { key: nextKey++, ...ev.data }]);
+      } else if (ev.type === 'pane') {
+        setPane(ev.data?.pane ?? null);
+      } else if (ev.type === 'session-changed') {
+        setTick((t) => t + 1);
+      }
+    };
+    bus.on('event', onEvent);
+    return () => bus.off('event', onEvent);
+  }, [session]);
+
   // The body of this lives in session/dispatch.js so the web sidecar drives the session
   // through the same steering, command, paste and image handling rather than reimplementing
   // it. What stays here is the part that is genuinely Ink: panes, the approval pane, and

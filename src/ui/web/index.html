@@ -29,20 +29,50 @@
         <span class="muted" id="cwd"></span>
         <span class="spacer"></span>
         <span class="muted" id="stats"></span>
+        <button id="perf-chip" class="chip" title="throughput — hover for detail, click for the full pane">
+          <canvas id="spark" width="120" height="18"></canvas>
+          <span id="perf-now" class="muted">—</span>
+        </button>
         <button id="tab-chat" class="tab active">chat</button>
         <button id="tab-perf" class="tab">perf</button>
         <button id="tab-ctx" class="tab">context</button>
+        <button id="tab-models" class="tab">models</button>
+        <button id="tab-art" class="tab">artifacts</button>
       </header>
 
+      <div id="perf-pop" class="pop" hidden>
+        <div class="pop-head">recent turns <span class="muted">· click for the full pane</span></div>
+        <div id="pop-tps"></div>
+        <div id="pop-ttft"></div>
+      </div>
+
       <main>
-        <section id="view-chat" class="view">
-          <div id="transcript"></div>
-          <div id="thinking" class="thinking" hidden></div>
-          <div id="live" class="live" hidden></div>
-          <div id="status" class="status" hidden></div>
+        <section id="view-chat" class="view chat">
+          <div class="filters">
+            <button id="f-msg" class="chip" aria-pressed="true">messages</button>
+            <button id="f-think" class="chip" aria-pressed="true">thinking</button>
+            <button id="f-ops" class="chip" aria-pressed="true">ops</button>
+            <button id="f-note" class="chip" aria-pressed="true">notices</button>
+            <button id="f-err" class="chip" aria-pressed="true">errors</button>
+            <span class="spacer"></span>
+            <button id="fold-all" class="chip plain" title="collapse every folded block">fold</button>
+            <button id="unfold-all" class="chip plain" title="expand every folded block">unfold</button>
+          </div>
+          <div id="scroll" class="scroll">
+            <div id="transcript"></div>
+            <div id="thinking" class="thinking" hidden></div>
+            <div id="live" class="live" hidden></div>
+            <div id="status" class="status" hidden></div>
+          </div>
         </section>
 
         <section id="view-perf" class="view" hidden>
+          <div class="perf-head">
+            <label for="perf-turn">turn detail</label>
+            <select id="perf-turn"></select>
+            <span id="perf-note" class="muted"></span>
+          </div>
+          <div class="chart-wrap"><div id="chart-turn"></div></div>
           <div class="chart-wrap"><div id="chart-tps"></div></div>
           <div class="chart-wrap"><div id="chart-ttft"></div></div>
           <div class="chart-wrap"><div id="chart-ctx"></div></div>
@@ -51,6 +81,39 @@
         <section id="view-ctx" class="view" hidden>
           <div id="ctx-meter" class="meter"></div>
           <table id="ctx-table"></table>
+        </section>
+
+        <section id="view-models" class="view" hidden>
+          <div class="m-head">
+            <div id="m-providers" class="chips"></div>
+            <div class="m-controls">
+              <input
+                id="m-search"
+                type="search"
+                placeholder="filter by id or name — or type a custom id"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <label class="toggle"><input id="m-vision" type="checkbox" /> vision</label>
+              <label class="toggle"><input id="m-reason" type="checkbox" /> reasoning</label>
+              <select id="m-sort">
+                <option value="name">name</option>
+                <option value="price">cheapest</option>
+                <option value="context">largest context</option>
+              </select>
+              <button id="m-refresh" class="chip plain" title="re-fetch the provider catalog">refresh</button>
+            </div>
+            <div id="m-status" class="muted"></div>
+          </div>
+          <div id="m-efforts" class="efforts"></div>
+          <div id="m-list" class="m-list"></div>
+        </section>
+
+        <section id="view-art" class="view" hidden>
+          <div id="art-list" class="art-list"></div>
+          <div id="art-empty" class="muted" hidden>
+            No artifacts yet. Fenced code blocks the model emits (other than da_ops) land here.
+          </div>
         </section>
       </main>
 

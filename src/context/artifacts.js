@@ -53,6 +53,23 @@ export class Artifacts {
   }
 }
 
+/**
+ * File extensions by fence language. Shared rather than per-view: the browser's download
+ * filename and the REPL's suggested save path should not disagree about what a `python`
+ * block is called.
+ */
+export const EXT = {
+  javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts', jsx: 'jsx', tsx: 'tsx',
+  python: 'py', py: 'py', rust: 'rs', go: 'go', java: 'java', sh: 'sh', bash: 'sh',
+  json: 'json', yaml: 'yml', yml: 'yml', toml: 'toml', md: 'md', markdown: 'md',
+  html: 'html', css: 'css', sql: 'sql', text: 'txt',
+};
+
+/** @param {{n: number, lang?: string}} item */
+export function suggestName(item) {
+  return `artifact-${item.n}.${EXT[item.lang?.toLowerCase()] || 'txt'}`;
+}
+
 /** Clipboard with no dependency: one native helper per platform. */
 export function writeClipboard(text) {
   const [cmd, args] =

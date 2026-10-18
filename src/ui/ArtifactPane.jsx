@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { colors, glyphs } from './theme.js';
+import { suggestName } from '../context/artifacts.js';
 
 /**
  * Artifacts (req 7): every non-da_ops fenced block, copyable to the clipboard or
@@ -118,16 +119,6 @@ export function ArtifactPane({ artifacts, session, width, onClose, push }) {
   );
 }
 
-const EXT = {
-  javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts', jsx: 'jsx', tsx: 'tsx',
-  python: 'py', py: 'py', rust: 'rs', go: 'go', java: 'java', sh: 'sh', bash: 'sh',
-  json: 'json', yaml: 'yml', yml: 'yml', toml: 'toml', md: 'md', markdown: 'md',
-  html: 'html', css: 'css', sql: 'sql', text: 'txt',
-};
-
-function suggestName(a) {
-  return `artifact-${a.n}.${EXT[a.lang?.toLowerCase()] || 'txt'}`;
-}
 
 function firstLine(text, max) {
   const l = text.split('\n').find((x) => x.trim()) || '';

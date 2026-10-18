@@ -87,7 +87,9 @@ async function startSidecar(session, web) {
   const submit = createDispatcher({
     session,
     view: {
-      push: (entry) => bus.publish('transcript', entry),
+      // Tagged so the REPL can mirror it back into Ink: without that, a message typed
+      // in the browser never appears in the terminal transcript at all.
+      push: (entry) => bus.publish('transcript', { ...entry, origin: 'web' }),
       isBusy: () => bus.state.busy,
       // /context and /tps open a pane in the REPL; in a browser they switch tab. Without
       // this they were accepted and did nothing, which is worse than refusing them.
