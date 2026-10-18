@@ -13,8 +13,7 @@ import { ThinkingBox } from './ThinkingBox.jsx';
 import { renderMarkdown } from './markdown.js';
 import { colors, glyphs, formatMeter } from './theme.js';
 import { ThroughputTracker, renderSparkline } from './throughput.js';
-import { handleCommand } from './commands.js';
-import { extractImageRefs, loadImage } from '../context/images.js';
+import { createDispatcher } from '../session/dispatch.js';
 
 /** Throttle for streaming deltas: repaint at ~30fps, never per token. */
 const FRAME_MS = 33;
@@ -24,7 +23,7 @@ const METER_MS = 1000;
 let nextKey = 1;
 
 export function App({ session, initialInput }) {
-  const { agent, cfg, ledger, artifacts, pastes, log } = session;
+  const { agent, cfg, ledger, artifacts, log } = session;
   const { exit } = useApp();
   const { stdout } = useStdout();
 
@@ -60,9 +59,17 @@ export function App({ session, initialInput }) {
   }
   const throughput = throughputRef.current;
 
-  const push = useCallback((entry) => {
-    setHistory((h) => [...h, { key: nextKey++, ...entry }]);
-  }, []);
+  const push = useCallback(
+    (entry) => {
+      setHistory((h) => [...h, { key: nextKey++, ...entry }]);
+      // Mirror to the web sidecar when one is attached. Entries pushed here are the ones
+      // the agent's own events do not carry — the user's own lines, command output, the
+      // local notices — so without this a browser sees the model's half of the
+      // conversation and none of the operator's.
+      session.bus?.publish('transcript', entry);
+    },
+    [session],
+  );
 
   const flushLive = useCallback(() => {
     if (frameRef.current) return;
@@ -230,50 +237,58 @@ export function App({ session, initialInput }) {
           : `no ops in that turn — asking it to continue (${attempt})`,
       });
 
-    agent.on('thinking', onThinking);
-    agent.on('text', onText);
-    agent.on('turn-start', onTurnStart);
-    agent.on('turn-end', onTurnEnd);
-    agent.on('ops-parsed', onOpsParsed);
-    agent.on('ops-result', onOpsResult);
-    agent.on('artifact', onArtifact);
-    agent.on('usage', onUsage);
-    agent.on('error', onError);
-    agent.on('warning', onWarning);
-    agent.on('done', onDone);
-    agent.on('cancelled', onCancelled);
-    agent.on('compact-start', onCompactStart);
-    agent.on('compact-done', onCompactDone);
-    agent.on('approval-request', onApproval);
-    agent.on('repair', onRepair);
-    agent.on('nudge', onNudge);
-    agent.on('retry', onRetry);
-    agent.on('steer-queued', onSteerQueued);
-    agent.on('steered', onSteered);
+    // Registered from a map so the cleanup can remove exactly these. It used to call
+    // agent.removeAllListeners(), which also tore off whatever the harness had attached —
+    // the session bus that feeds the web sidecar lives there, and a remount would have
+    // silently cut it off from the agent.
+    const handlers = {
+      thinking: onThinking,
+      text: onText,
+      'turn-start': onTurnStart,
+      'turn-end': onTurnEnd,
+      'ops-parsed': onOpsParsed,
+      'ops-result': onOpsResult,
+      artifact: onArtifact,
+      usage: onUsage,
+      error: onError,
+      warning: onWarning,
+      done: onDone,
+      cancelled: onCancelled,
+      'compact-start': onCompactStart,
+      'compact-done': onCompactDone,
+      'approval-request': onApproval,
+      repair: onRepair,
+      nudge: onNudge,
+      retry: onRetry,
+      'steer-queued': onSteerQueued,
+      steered: onSteered,
+    };
+    for (const [name, fn] of Object.entries(handlers)) agent.on(name, fn);
 
     return () => {
-      agent.removeAllListeners();
+      for (const [name, fn] of Object.entries(handlers)) agent.off(name, fn);
       clearTimeout(frameRef.current);
       clearTimeout(thinkFrameRef.current);
       clearInterval(meterTimerRef.current);
     };
   }, [agent, flushLive, flushThinking, clearThinking, stopMeter, push, session, throughput]);
 
-  const submit = useCallback(
-    async (raw) => {
-      const text = raw.trim();
-      if (!text) return;
+  // The body of this lives in session/dispatch.js so the web sidecar drives the session
+  // through the same steering, command, paste and image handling rather than reimplementing
+  // it. What stays here is the part that is genuinely Ink: panes, the approval pane, and
+  // the spinner's meter.
+  //
+  // `busy` is read through a ref rather than closed over. The dispatcher is built once and
+  // would otherwise capture the first render's value and steer into a turn that had already
+  // finished.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
 
-      // Typed while a run is in flight: steer it rather than queueing a second request.
-      // Commands still run immediately — /context while it works is the point of them.
-      if (busy && !text.startsWith('/') && agent.steer(text)) {
-        session.history?.add(text);
-        push({ type: 'user', text });
-        return;
-      }
-
-      const cmd = await handleCommand(text, {
-        session,
+  const dispatchRef = useRef(null);
+  if (!dispatchRef.current) {
+    dispatchRef.current = createDispatcher({
+      session,
+      view: {
         push,
         setPane,
         exit: () => {
@@ -286,59 +301,13 @@ export function App({ session, initialInput }) {
           new Promise((resolve) =>
             setApproval({ op, ...extra, operator: true, respond: resolve }),
           ),
-      });
-      if (cmd.handled) return;
+        onRunStart: () => startMeter(),
+        isBusy: () => busyRef.current,
+      },
+    });
+  }
 
-      // Recorded after the command check, so /history holds prompts and not commands.
-      const prompt = cmd.input ?? text;
-      session.history?.add(prompt);
-
-      const { text: expanded, referenced } = pastes.expand(prompt);
-      for (const p of referenced) {
-        ledger.add({
-          type: 'paste',
-          label: `paste#${p.n} (${p.lines} lines)`,
-          role: 'user',
-          text: `[paste#${p.n}]\n${p.text}`,
-        });
-      }
-
-      // @path references to images become their own segments (req 9).
-      const { text: withoutImages, images } = extractImageRefs(expanded, session.sandbox);
-      for (const ref of images) {
-        if (!cfg.model.vision) {
-          push({
-            type: 'warning',
-            message: `${cfg.model.id} has no vision support — ${ref} was not attached`,
-          });
-          continue;
-        }
-        try {
-          const img = loadImage(ref, session.sandbox);
-          ledger.add({
-            type: 'paste',
-            label: `image ${img.name} (${Math.round(img.bytes / 1024)}kB)`,
-            role: 'user',
-            image: img,
-          });
-          push({ type: 'notice', message: `attached ${img.name} (~${img.tokens} tokens)` });
-        } catch (err) {
-          push({ type: 'warning', message: err.message });
-        }
-      }
-
-      push({ type: 'user', text: withoutImages });
-      startMeter();
-      await agent.run(withoutImages);
-    },
-    // exhaustive-deps wants cfg.model.id and cfg.model.vision here and they are
-    // deliberately absent. /model mutates the same cfg object in place, and this callback
-    // dereferences cfg.model when it runs rather than copying the flags when it is
-    // created, so it already reads the live model. Listing them would only rebuild the
-    // callback; nothing here can go stale.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [agent, busy, ledger, pastes, push, session, exit, log, startMeter],
-  );
+  const submit = useCallback((raw) => dispatchRef.current(raw), []);
 
   // Run an initial request passed on the command line.
   const ranInitial = useRef(false);

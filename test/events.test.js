@@ -19,9 +19,26 @@ function emittedInSource() {
   return names;
 }
 
-/** Event names a front end subscribes to. */
+/**
+ * Event names a front end subscribes to.
+ *
+ * Two forms count. `agent.on('name', fn)` is the direct one. App.jsx instead builds a
+ * handler map and registers it in a loop, so that its cleanup can remove exactly its own
+ * listeners — it used to call removeAllListeners(), which would also tear off the session
+ * bus feeding the web sidecar. The map's keys are the subscription, so they count too.
+ */
 function consumedIn(rel) {
-  return new Set(matchAll(read(rel), /agent\.on\('([a-z-]+)'/g));
+  const text = read(rel);
+  const names = new Set(matchAll(text, /agent\.on\('([a-z-]+)'/g));
+
+  // The handler map: `const handlers = { ... };` followed by a loop over its entries.
+  const block = /const handlers = \{([\s\S]*?)\n {4}\};/.exec(text);
+  if (block && /agent\.on\(name, fn\)/.test(text)) {
+    // Keys are quoted only when hyphenated, so both spellings have to be read.
+    for (const name of matchAll(block[1], /^\s*'([a-z-]+)':/gm)) names.add(name);
+    for (const name of matchAll(block[1], /^\s*([a-z]+):/gm)) names.add(name);
+  }
+  return names;
 }
 
 /**

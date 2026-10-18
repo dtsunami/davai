@@ -111,6 +111,16 @@ export class Agent extends EventEmitter {
     this.strictEvents = Boolean(deps.cfg?.strictEvents);
   }
 
+  /**
+   * Listeners that only relay an event rather than consume it, marked with `.passive`.
+   * The session bus sets this: it forwards everything to the web sidecar, and without the
+   * discount it would single-handedly retire every event in the table.
+   * @param {string} name
+   */
+  passiveListeners(name) {
+    return this.listeners(name).filter((fn) => fn?.passive).length;
+  }
+
   /** Event names that fired with nothing listening — the half-wired ones. */
   pendingEvents() {
     return Object.entries(this.unretiredEvents)
@@ -131,7 +141,11 @@ export class Agent extends EventEmitter {
       this.unknownEvents[name] = (this.unknownEvents[name] || 0) + 1;
     }
 
-    if (this.listenerCount(name) === 0) {
+    // The session bus subscribes to every forwarded event so the web sidecar can see
+    // them, which would otherwise retire all of them and leave this diagnostic blind to
+    // the thing it exists to catch: an event no *view* consumes. Passive listeners mark
+    // themselves, and an event they are alone in hearing still counts as unretired.
+    if (this.listenerCount(name) - this.passiveListeners(name) === 0) {
       const first = !this.unretiredEvents[name];
       this.unretiredEvents[name] = (this.unretiredEvents[name] || 0) + 1;
       if (first) {
