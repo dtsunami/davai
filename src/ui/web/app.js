@@ -202,7 +202,7 @@ function handle(type, d) {
       showApproval(d);
       break;
     case 'approval-resolved':
-      if (state.pendingApproval?.id === d.id) hideApproval();
+      hideApproval(d.id);
       break;
     default:
       break;
@@ -987,7 +987,25 @@ function drawTurnDetail(w) {
 
 // --- approvals ---
 
+/**
+ * One overlay, but the agent can have more than one request outstanding and a reconnect
+ * replays every open one. Queue the rest rather than overwriting: a request that is shown
+ * and then clobbered is never answered, and the agent waits on it forever.
+ */
+const approvalQueue = [];
+
 function showApproval(req) {
+  if (!req?.id) return;
+  if (state.pendingApproval?.id === req.id) return;
+  if (approvalQueue.some((r) => r.id === req.id)) return;
+  if (state.pendingApproval) {
+    approvalQueue.push(req);
+    return;
+  }
+  renderApproval(req);
+}
+
+function renderApproval(req) {
   state.pendingApproval = req;
   $('approval-cmd').textContent = req.op?.cmd || '(unknown command)';
   const secret = $('approval-secret');
@@ -997,8 +1015,20 @@ function showApproval(req) {
   (req.sudo ? secret : $('approve-yes')).focus();
 }
 
-function hideApproval() {
+/**
+ * @param {string} [id] resolve this specific request; omitted means whatever is on screen.
+ *   `approval-resolved` can name one still in the queue, and promoting a dead request to
+ *   the screen is the other way the buttons end up doing nothing.
+ */
+function hideApproval(id) {
+  if (id) {
+    const i = approvalQueue.findIndex((r) => r.id === id);
+    if (i !== -1) approvalQueue.splice(i, 1);
+    if (state.pendingApproval && state.pendingApproval.id !== id) return;
+  }
   state.pendingApproval = null;
+  const next = approvalQueue.shift();
+  if (next) return renderApproval(next);
   $('approval').hidden = true;
   $('input').focus();
 }

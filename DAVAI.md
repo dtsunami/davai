@@ -52,6 +52,18 @@ and remote access.
   300 OpenRouter models by price. Artifact bodies are fetched per-item, never in the list.
 - A view hook you omit defaults to a no-op. That is deliberate but sharp: a view that
   forgets `setPane` gets silence rather than an error. `test/dispatch.test.js` pins it.
+- The browser hides things with the `hidden` property, and `[hidden] { display: none }`
+  from the UA stylesheet loses to any author rule that sets display. app.css sets display
+  on `#app`, `.gate`, `.view.chat` and `.approval`, so the approval overlay sat over the
+  chat from page load with no request behind it and buttons that read a null
+  `pendingApproval` — the symptom was an overlay that would not dismiss. app.css now
+  carries `[hidden] { display: none !important }` and `test/webclient.test.js` pins it.
+- One approval overlay, many possible requests. `showApproval` queues rather than
+  overwrites: a replayed or concurrent request that clobbers the visible one is never
+  answered, and the agent blocks on a `respond` nobody will call.
+- Slash completion is derived from `commandList()`, not kept beside it. The hand-written
+  copy in `complete.js` is why `/stream` and `/prompts` reached the help text, the
+  dispatcher and the browser but could not be tab-completed in the REPL.
 
 ## Testing
 
@@ -62,3 +74,9 @@ tests bind an ephemeral port and speak real HTTP and SSE against a fake agent.
 `test/events.test.js` greps the front ends for their subscriptions, so an event that is
 emitted and never consumed fails the build. If you change how listeners are registered,
 teach `consumedIn()` the new shape.
+
+`test/webclient.test.js` reads the browser client as text, since it has no module boundary
+to import: event subscriptions, entry types, pane-to-tab mapping, `$('...')` ids and the
+`[hidden]` rule are all checked against `index.html` and `app.css`. Every one of those
+fails silently in a browser, which is why they are pinned here rather than left to a
+manual look.

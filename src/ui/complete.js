@@ -3,25 +3,27 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { commandList } from './commands.js';
 
+/**
+ * Aliases the switch in commands.js accepts but HELP does not list. They are worth
+ * completing and not worth documenting twice.
+ */
+const ALIASES = ['/perf', '/throughput', '/speed', '/quit', '/q', '/?'];
+
+/**
+ * Derived from the same table the help text and the web client use, rather than kept
+ * alongside it. A hand-maintained copy is why /stream and /prompts shipped without
+ * completion: they were added to HELP and nowhere else.
+ */
 const COMMANDS = [
-  '/help',
-  '/model',
-  '/tps',
-  '/perf',
-  '/context',
-  '/artifacts',
-  '/image',
-  '/sessions',
-  '/config',
-  '/compact',
-  '/clear',
-  '/yolo',
-  '/events',
-  '/history',
-  '/replay',
-  '/exit',
-];
+  ...new Set([
+    ...commandList()
+      .map((c) => c.name)
+      .filter((n) => n.startsWith('/')),
+    ...ALIASES,
+  ]),
+].sort();
 
 /**
  * @param {string} value

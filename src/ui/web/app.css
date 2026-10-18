@@ -15,6 +15,14 @@
 
 * { box-sizing: border-box; }
 
+/* The UA stylesheet's `[hidden] { display: none }` loses to any author rule that sets
+   display, and this file sets it on #app, .gate, .view.chat and .approval — all four of
+   which the client toggles through the `hidden` property. The approval overlay is
+   `display: flex`, so it was painted over the chat from the moment the page loaded,
+   with no pending request behind it: the buttons read state.pendingApproval, found
+   null and did nothing. Make the attribute win everywhere. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;

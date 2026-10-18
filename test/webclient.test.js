@@ -131,3 +131,29 @@ describe('the ids the client reaches for exist in the page', () => {
     expect(missing, 'referenced by the client, absent from index.html').toEqual([]);
   });
 });
+
+describe('the hidden attribute actually hides', () => {
+  /**
+   * The client shows and hides panes, overlays and the gate by setting `.hidden`. The UA
+   * stylesheet's `[hidden] { display: none }` is weaker than any author rule that sets
+   * display, and app.css sets it on #app, .gate, .view.chat and .approval. The approval
+   * overlay was therefore painted over the chat on every page load, with no pending
+   * request behind it, and its buttons — which read state.pendingApproval — did nothing.
+   */
+  it('overrides the author display rules', () => {
+    expect(css, 'app.css needs a [hidden] rule that beats its own display rules').toMatch(
+      /\[hidden\][^{]*\{[^}]*display:\s*none\s*!important/,
+    );
+  });
+
+  it('toggles hidden on elements that exist and are styled, not on bare ids', () => {
+    // Every `$('x').hidden = ...` target must be a real element; a typo here is silent.
+    const toggled = new Set(
+      [...client.matchAll(/\$\('([a-z0-9-]+)'\)\.hidden\s*=/g)].map((m) => m[1]),
+    );
+    expect(toggled.size).toBeGreaterThan(0);
+    for (const id of toggled) {
+      expect(html, `${id} is toggled but not in the page`).toContain(`id="${id}"`);
+    }
+  });
+});
