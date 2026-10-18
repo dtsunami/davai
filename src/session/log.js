@@ -87,10 +87,16 @@ export class SessionLog {
     else this.totals.cost += cost;
     if (estimated) this.totals.costEstimated = true;
     this.totals.turns++;
+    // Rewritten per turn, not only at close. A session killed with ctrl+c, a crash or a
+    // `kill -9` left meta.json reporting the totals it had at construction — zero — which
+    // is what a crash forensics read gets and all `--sessions` had to show. The file is a
+    // few hundred bytes once per turn.
+    this.#writeMeta();
   }
 
   addOps(n) {
     this.totals.ops += n;
+    this.#writeMeta();
   }
 
   close(reason = 'exit') {
