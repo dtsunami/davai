@@ -27,6 +27,8 @@ OPTIONS
       --provider <name>  anthropic | openai | gemini | grok | openrouter
       --effort <level>   low | medium | high | xhigh | max
   -C, --cwd <dir>        run against a different working directory
+      --web [port]       serve the session over http as well (default 7878, loopback)
+      --web-host <addr>  bind the sidecar elsewhere; needs a tunnel, refuses with --yolo
       --models [prov]    list models the provider actually serves
       --sessions         list recent sessions
       --resume [id]      rebuild context from a past session; id may be a prefix
@@ -84,6 +86,13 @@ function parseArgs(argv) {
       case '-C':
       case '--cwd':
         out.cwd = next();
+        break;
+      case '--web':
+        // An optional value, like --resume: `--web` alone takes the default port.
+        out.web = { port: /^\d+$/.test(argv[i + 1] || '') ? Number(next()) : 7878 };
+        break;
+      case '--web-host':
+        out.webHost = next();
         break;
       case '--models':
         out.listModels = true;
@@ -192,7 +201,8 @@ async function main() {
   }
 
   const { startTui } = await import('../src/ui/start.js');
-  return startTui({ input, cwd: args.cwd, overrides: args.overrides, resume: args.resume });
+  const web = args.web ? { ...args.web, host: args.webHost || '127.0.0.1' } : null;
+  return startTui({ input, cwd: args.cwd, overrides: args.overrides, resume: args.resume, web });
 }
 
 main()

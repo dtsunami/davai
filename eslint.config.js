@@ -40,6 +40,16 @@ export default [
   },
 
   {
+    // The web sidecar's client. The only browser code in the tree: it runs in a page,
+    // not in node, and uPlot arrives as a global script tag rather than an import so
+    // that serving it needs no build step.
+    files: ['src/ui/web/**/*.js'],
+    languageOptions: {
+      globals: { ...globals.browser, uPlot: 'readonly' },
+    },
+  },
+
+  {
     files: ['**/*.jsx'],
     plugins: { 'react-hooks': reactHooks },
     rules: {

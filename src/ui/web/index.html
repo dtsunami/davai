@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>davai</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+    <link rel="stylesheet" href="/assets/uplot.css" />
+  </head>
+  <body>
+    <div id="gate" class="gate">
+      <form id="gate-form">
+        <h1>davai</h1>
+        <p>Paste the session token from the terminal banner.</p>
+        <input id="gate-token" type="password" placeholder="token" autocomplete="off" spellcheck="false" />
+        <button type="submit">connect</button>
+        <p id="gate-error" class="error"></p>
+      </form>
+    </div>
+
+    <div id="app" hidden>
+      <header>
+        <span class="dot" id="conn" title="disconnected"></span>
+        <strong id="model">—</strong>
+        <span class="muted" id="cwd"></span>
+        <span class="spacer"></span>
+        <span class="muted" id="stats"></span>
+        <button id="tab-chat" class="tab active">chat</button>
+        <button id="tab-perf" class="tab">perf</button>
+        <button id="tab-ctx" class="tab">context</button>
+      </header>
+
+      <main>
+        <section id="view-chat" class="view">
+          <div id="transcript"></div>
+          <div id="thinking" class="thinking" hidden></div>
+          <div id="live" class="live" hidden></div>
+          <div id="status" class="status" hidden></div>
+        </section>
+
+        <section id="view-perf" class="view" hidden>
+          <div class="chart-wrap"><div id="chart-tps"></div></div>
+          <div class="chart-wrap"><div id="chart-ttft"></div></div>
+          <div class="chart-wrap"><div id="chart-ctx"></div></div>
+        </section>
+
+        <section id="view-ctx" class="view" hidden>
+          <div id="ctx-meter" class="meter"></div>
+          <table id="ctx-table"></table>
+        </section>
+      </main>
+
+      <div id="approval" class="approval" hidden>
+        <div class="approval-body">
+          <p class="approval-label">shell command wants to run</p>
+          <pre id="approval-cmd"></pre>
+          <input id="approval-secret" type="password" placeholder="sudo password" hidden />
+          <div class="approval-actions">
+            <button id="approve-yes" class="ok">approve</button>
+            <button id="approve-no" class="no">deny</button>
+          </div>
+        </div>
+      </div>
+
+      <footer>
+        <div id="queue" class="queue" hidden></div>
+        <div class="composer">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="message, or / for commands — enter sends, shift+enter newline"
+            autocomplete="off"
+            spellcheck="false"
+          ></textarea>
+          <button id="send">send</button>
+          <button id="cancel" class="no" hidden>esc</button>
+        </div>
+        <div id="complete" class="complete" hidden></div>
+      </footer>
+    </div>
+
+    <script src="/assets/uplot.js"></script>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

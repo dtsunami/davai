@@ -6,7 +6,7 @@ import { createSession } from '../session/bootstrap.js';
 import { prepareTerminal, glyphs, formatTokens } from './theme.js';
 import { registerJsx } from './jsx-register.js';
 
-export async function startTui({ input, cwd, overrides, resume }) {
+export async function startTui({ input, cwd, overrides, resume, web }) {
   registerJsx();
   prepareTerminal();
 
@@ -19,7 +19,11 @@ export async function startTui({ input, cwd, overrides, resume }) {
   const session = await createSession({ cwd, overrides, resume });
   const { log } = session;
 
-  banner(session);
+  // Started before Ink renders, so a failed bind is a plain error rather than something
+  // scribbled over a live frame.
+  const sidecar = web ? await startSidecar(session, web) : null;
+
+  banner(session, sidecar);
 
   const instance = render(React.createElement(App, { session, initialInput: input }), {
     exitOnCtrlC: false,
@@ -35,6 +39,7 @@ export async function startTui({ input, cwd, overrides, resume }) {
     await instance.waitUntilExit();
   } finally {
     process.off('SIGTERM', onSignal);
+    if (sidecar) await sidecar.stop();
     if (!log.meta.endedAt) log.close('exit');
   }
 
@@ -57,7 +62,57 @@ export async function startTui({ input, cwd, overrides, resume }) {
   return 0;
 }
 
-function banner(session) {
+/**
+ * Bring up the web sidecar alongside the REPL.
+ *
+ * The bus attaches to the agent, not to the TUI: both views are subscribers, and the
+ * harness stays the single writer. The dispatcher is the same one App.jsx builds, so a
+ * message typed in the browser takes the identical path through steering, commands,
+ * pastes and image refs.
+ */
+async function startSidecar(session, web) {
+  const [{ SessionBus }, { createWebServer }, { createDispatcher }] = await Promise.all([
+    import('../session/bus.js'),
+    import('../server/http.js'),
+    import('../session/dispatch.js'),
+  ]);
+
+  const bus = new SessionBus({ agent: session.agent, cfg: session.cfg });
+  session.bus = bus;
+
+  // A browser has no approval pane of its own until the request reaches it, and no
+  // spinner to start; the bus carries both outward.
+  const submit = createDispatcher({
+    session,
+    view: {
+      push: (entry) => bus.publish('transcript', entry),
+      isBusy: () => bus.state.busy,
+      // /context and /tps open a pane in the REPL; in a browser they switch tab. Without
+      // this they were accepted and did nothing, which is worse than refusing them.
+      setPane: (name) => bus.publish('pane', { pane: name }),
+      // The model pane mutates cfg in place, so the browser needs to re-read it.
+      refresh: () => bus.publish('session-changed', null),
+    },
+  });
+
+  const server = await createWebServer({
+    session,
+    bus,
+    submit,
+    port: web.port,
+    host: web.host,
+  }).listen();
+
+  return {
+    url: server.url(),
+    async stop() {
+      await server.close();
+      bus.detach();
+    },
+  };
+}
+
+function banner(session, sidecar) {
   const { cfg, sandbox } = session;
   const w = (s) => process.stdout.write(s + '\n');
   const dim = (s) => `\u001b[2m${s}\u001b[0m`;
@@ -92,6 +147,11 @@ function banner(session) {
     const [first, ...rest] = message.split('\n');
     w(`\u001b[33m  ${glyphs.warn} ${first}\u001b[0m`);
     for (const line of rest) w(`  ${line}`);
+  }
+  if (sidecar) {
+    // Printed with the token in it: this is the thing you paste into a phone, and the
+    // alternative is making the operator assemble a URL from two lines of banner.
+    w(dim(`  web ${glyphs.arrow} ${sidecar.url}`));
   }
   w(dim('  /help for commands · ctrl+g context · ctrl+a artifacts · esc cancel'));
   w('');
