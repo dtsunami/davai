@@ -11,9 +11,12 @@ import { planBatch } from './planner.js';
 import { opRead, opList, opGrep, opGlob } from './readers.js';
 import { opWrite, opReplace, opDelete, opMove } from './writers.js';
 import { runShell } from './shell.js';
+import { verifyWritten } from './verify.js';
 
 const READERS = { read: opRead, list: opList, grep: opGrep, glob: opGlob };
 const WRITERS = { write: opWrite, replace: opReplace, delete: opDelete, move: opMove };
+/** Ops that leave file content behind; delete and move only take it away. */
+const VERIFIABLE = new Set(['write', 'replace']);
 
 /**
  * @typedef {object} BatchOutcome
@@ -51,6 +54,14 @@ export async function executeBatch(ops, ctx) {
       } else {
         const { entry, result } = WRITERS[op.op](op, ctx);
         applied.push(entry);
+        if (VERIFIABLE.has(op.op)) {
+          const abs = ctx.sandbox.resolveForWrite(op.path);
+          const bad = verifyWritten(abs, { created: result.action === 'created' });
+          // Thrown, not returned: the catch below already rolls the whole batch back and
+          // names the op, which is the right outcome for a file that is now definitely
+          // broken. The entry is in `applied` before this runs, so the undo covers it.
+          if (bad) throw new Error(`${ctx.sandbox.rel(abs)} — ${bad}`);
+        }
         results.push({ index: i, op: op.op, ok: true, result });
       }
     } catch (err) {
