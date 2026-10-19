@@ -99,6 +99,11 @@ export class SessionBus extends EventEmitter {
       original(decision);
     };
     req.respond = wrapped;
+    // Stamped onto the request itself, not just the published payload. The TUI holds the
+    // raw object and has no other way to tell whether the `approval-resolved` it just saw
+    // is the request on its screen — without an id it cannot clear a pane a browser
+    // answered, and while that pane is up useInput swallows every key.
+    req.id = id;
     this.pending.set(id, { id, op: req.op, extra: req, respond: wrapped });
     // `op` is plain data; `respond` is deliberately not in the payload.
     this.publish('approval-request', {

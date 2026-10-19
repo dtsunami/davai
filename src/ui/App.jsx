@@ -143,10 +143,11 @@ export function App({ session, initialInput }) {
         contextLimit: session.cfg.contextLimit ?? null,
       });
     };
-    const onTurnEnd = ({ text, ttftMs, durationMs }) => {
+    const onTurnEnd = ({ text, ttftMs, durationMs, effort }) => {
       // Hand the harness's measurements over before the turn closes, so what is on screen
-      // and what is in the session log are the same numbers.
-      throughput.applyTiming({ ttftMs, durationMs });
+      // and what is in the session log are the same numbers. `effort` is included because
+      // a demoted turn did not run at the level startTurn recorded.
+      throughput.applyTiming({ ttftMs, durationMs, effort });
       throughput.endTurn();
       clearTimeout(frameRef.current);
       frameRef.current = null;
@@ -298,6 +299,33 @@ export function App({ session, initialInput }) {
         setPane(ev.data?.pane ?? null);
       } else if (ev.type === 'session-changed') {
         setTick((t) => t + 1);
+      } else if (ev.type === 'approval-resolved') {
+        // A browser (or a second tab) answered the request this pane is showing. The bus
+        // already ran the agent's callback, so there is nothing left to respond to — but
+        // the pane is modal and useInput returns early while it is open, so leaving it up
+        // freezes the terminal on a question that has already been answered. Clear it and
+        // record who decided what.
+        setApproval((cur) => {
+          if (!cur || (ev.data?.id && cur.id !== ev.data.id)) return cur;
+          // The bus runs this synchronously from our own respond() as well, before
+          // onRespond has had a chance to clear the pane. Without the flag the local
+          // path records the decision twice, once here and once below.
+          if (cur.answeredLocally) return cur;
+          if (!cur.operator) {
+            setHistory((h) => [
+              ...h,
+              {
+                key: nextKey++,
+                type: 'approval',
+                cmd: cur.op?.cmd,
+                allowed: Boolean(ev.data?.decision?.allow),
+                edited: ev.data?.decision?.cmd,
+                remote: true,
+              },
+            ]);
+          }
+          return null;
+        });
       }
     };
     bus.on('event', onEvent);
@@ -422,6 +450,9 @@ export function App({ session, initialInput }) {
         <ApprovalPane
           request={approval}
           onRespond={(decision) => {
+            // Set before respond(): the bus publishes approval-resolved synchronously
+            // from inside it, and the listener above must know this answer was ours.
+            approval.answeredLocally = true;
             approval.respond(decision);
             // An operator `sh` only asked for the sudo password; there was no approval to record.
             if (!approval.operator) {
@@ -568,8 +599,16 @@ function HistoryItem({ item }) {
           <Text color={item.allowed ? colors.ok : colors.warn}>
             {'  '}
             {item.allowed ? glyphs.check : glyphs.cross} shell{' '}
-            {item.allowed ? (item.auto ? 'auto-approved (yolo)' : 'approved') : 'denied'}:{' '}
-            {item.edited || item.cmd}
+            {item.allowed
+              ? item.auto
+                ? 'auto-approved (yolo)'
+                : item.remote
+                  ? 'approved in the browser'
+                  : 'approved'
+              : item.remote
+                ? 'denied in the browser'
+                : 'denied'}
+            : {item.edited || item.cmd}
           </Text>
         </Box>
       );

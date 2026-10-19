@@ -31,6 +31,17 @@ export function ModelPane({ session, onClose, push }) {
   useEffect(() => { delete session.modelSearch; }, [session]);
   const [, force] = useState(0);
 
+  // Browsing a provider is not switching to it: the model list is shown, and the switch
+  // happens when a model is chosen. Previously this wrote cfg.provider immediately, so
+  // arrowing past a provider and pressing esc left the session pointing at a provider
+  // whose model id it was not using.
+  // Declared here, above every hook that reads it: the catalog effect below passes it as
+  // the initial provider and the selection effect lists it as a dependency, and both run
+  // during the same render that evaluates this line. Further down it was a TDZ crash on
+  // open, not a stale value.
+  const [browsing, setBrowsing] = useState(() => session.modelBrowse || cfg.provider);
+  useEffect(() => { delete session.modelBrowse; }, [session]);
+
   // Load the list on open — the full OpenRouter catalog with pricing and context sizes
   // where there is one, the seed otherwise. The ref, not `catalog`/`loading`, is what
   // stops it retrying: both of those are dependencies, so a rejected fetch — leaving
@@ -103,12 +114,6 @@ export function ModelPane({ session, onClose, push }) {
 
   const applyEffort = (effort) => change({ effort }, () => `effort ${glyphs.arrow} ${effort}`);
 
-  // Browsing a provider is not switching to it: the model list is shown, and the switch
-  // happens when a model is chosen. Previously this wrote cfg.provider immediately, so
-  // arrowing past a provider and pressing esc left the session pointing at a provider
-  // whose model id it was not using.
-  const [browsing, setBrowsing] = useState(() => session.modelBrowse || cfg.provider);
-  useEffect(() => { delete session.modelBrowse; }, [session]);
   const cycleProvider = (dir) => {
     const i = PROVIDERS.indexOf(browsing);
     const next = PROVIDERS[(i + dir + PROVIDERS.length) % PROVIDERS.length];

@@ -183,6 +183,10 @@ details.entry.error > summary { color: var(--red); }
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 .pop-head { color: var(--fg); margin-bottom: 6px; }
+/* A canvas has intrinsic pixel dimensions and will not shrink to its container the way
+   an image does, so the overlay has to be allowed to scroll rather than overflow the
+   viewport on a narrow screen. */
+.pop { max-width: calc(100vw - 16px); overflow-x: auto; }
 
 .perf-acc {
   background: var(--panel);
@@ -202,7 +206,13 @@ details.entry.error > summary { color: var(--red); }
   margin-bottom: 6px;
 }
 .perf-timeline { height: 14px; margin-top: 6px; margin-bottom: 0; }
-.perf-seg { height: 100%; min-width: 1px; }
+/* `min-width: 1px` with `flex-shrink: 1` is a contradiction the browser resolves by
+   shrinking below the minimum, so a long session's segments were sliced thinner than a
+   pixel and the tail of the timeline disappeared off the right edge. Refusing to shrink
+   makes the strip scroll instead of silently truncating; the server also caps how many
+   phases it sends, so this stays a readable number of segments. */
+.perf-seg { height: 100%; min-width: 2px; flex: 0 0 auto; }
+.perf-timeline { overflow-x: auto; overflow-y: hidden; }
 .perf-seg.model { background: var(--green); }
 .perf-seg.ops { background: var(--mag); }
 .perf-seg.user-typing { background: var(--cyan); }

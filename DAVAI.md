@@ -33,6 +33,14 @@ and remote access.
   because the safe default is a fresh one per run.
 - Approvals are brokered by the bus, so the REPL and any number of browsers race for the
   same request and the first answer wins. A late answer reports `stale`, not an error.
+  The loser has to be *told*: the bus stamps `id` onto the request object itself and
+  publishes `approval-resolved`, and App.jsx clears its pane on that. Winning the race
+  silently is not enough — the REPL's pane is modal, `useInput` returns early while it is
+  open and the Composer is unmounted, so an approval answered in a browser left the
+  terminal frozen on a question that had already been decided, with no key able to
+  dismiss it. The TUI marks its own answers `answeredLocally` first, because the bus
+  publishes the event synchronously from inside `respond` and the decision would
+  otherwise be recorded twice.
 - The browser timeline is built from `transcript` alone. Every REPL push is mirrored through
   the bus, so handling the agent's own `ops-parsed` / `warning` / `turn-end` as entries too
   printed everything twice; those events now drive live state only. `test/webclient.test.js`
@@ -64,6 +72,41 @@ and remote access.
 - Slash completion is derived from `commandList()`, not kept beside it. The hand-written
   copy in `complete.js` is why `/stream` and `/prompts` reached the help text, the
   dispatcher and the browser but could not be tab-completed in the REPL.
+
+## Perf plots
+
+The same measurements in three resolutions: a hand-drawn canvas sparkline in the header,
+a hover overlay, and the full pane. uPlot is served from `node_modules` as a global
+script tag, so there is still no build step; if it is missing the panels stay empty
+rather than the page dying.
+
+- **Raw buckets travel with their `scale`.** A turn's buckets are the harness's
+  character-derived estimate, rescaled at turn end against the provider's reported
+  `usage.out`. `/api/perf` sends `tokens` already reconciled, so a bucket curve drawn
+  without `scale` disagrees with both the token count printed beside it and the
+  terminal's plot of the same turn.
+- **Effort is corrected at turn end, not captured at turn start.** An empty max_tokens
+  turn is retried a notch lower, so the level a turn *ran* at is only known when it
+  finishes. `turn-end` carries it and `applyTiming` applies it; otherwise the tooltip and
+  the session log disagree about one turn.
+- **The accumulator extrapolates, but only a little.** `renderSessionAccumulator` adds
+  the time since the last sample to the live bucket so the clock ticks between polls.
+  Uncapped, that let a stale sample invent history — hovering the chip after ten idle
+  minutes charged all ten to `modelMs` if a turn happened to be running. It is clamped,
+  and `openPop` refetches rather than drawing from whatever was last fetched.
+- **Phases are a bounded ring whose totals stay exact.** A long session accumulates
+  thousands; no view can draw them and re-sending them every poll grows the payload
+  without bound. Evicted phases are banked into `evictedTotals`, so trimming the strip
+  never shortens the session. The server caps what it sends separately and reports
+  `phasesTotal`.
+- **Charts are reconciled, not rebuilt.** `upsertChart` keyed by slot, `setData` for new
+  numbers, `setSize` for a reflow. Destroying four canvases per poll was slow and threw
+  away the cursor and legend, so a tooltip being read vanished every two seconds. Only
+  the turn-detail plot has a per-turn key, because uPlot fixes a title at construction.
+- **Streaming text paints per frame, not per token.** `setLive` / `setThinking` buffer
+  onto an animation frame; `flushPaint` forces it wherever ordering matters
+  (`commitThinking`, `turn-end`), since a pending frame would otherwise redraw notes that
+  have already been committed to the transcript. Same reasoning as `FRAME_MS` in App.jsx.
 
 ## Configuration precedence
 

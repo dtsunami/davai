@@ -237,6 +237,88 @@ describe('App rendering', () => {
   });
 });
 
+describe('an approval answered in the browser clears the terminal pane', () => {
+  /**
+   * The pane is modal: App.jsx's useInput returns early while it is open and the
+   * Composer is unmounted. The bus brokers the decision, so when a browser answers
+   * first the agent proceeds — but nothing told the TUI, which sat on an answered
+   * question with every keystroke swallowed. The only way out was to answer it again.
+   */
+  it('dismisses the pane and records who decided', async () => {
+    const { SessionBus } = await import('../src/session/bus.js');
+    const bus = new SessionBus({ agent: session.agent, cfg: session.cfg });
+    session.bus = bus;
+
+    const stdout = fakeStdout();
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin: fakeStdin(),
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    let decision = null;
+    session.agent.emit('approval-request', {
+      op: { op: 'shell', cmd: 'npm test' },
+      index: 0,
+      respond: (d) => { decision = d; },
+    });
+    await flush();
+    expect(stdout.frames.join('')).toContain('needs approval');
+
+    // The browser answers through the bus, exactly as POST /api/approve does.
+    const id = bus.snapshot().pending[0].id;
+    expect(bus.resolveApproval(id, { allow: true })).toBe(true);
+    await flush();
+
+    expect(decision).toEqual({ allow: true });
+    const out = stdout.frames.join('');
+    expect(out).toContain('approved in the browser');
+    // The pane is gone: the last frame no longer asks the question.
+    expect(stdout.frames.at(-1)).not.toContain('cannot be undone');
+
+    bus.detach();
+    app.unmount();
+  });
+
+  it('does not double-record when the terminal answers it', async () => {
+    const { SessionBus } = await import('../src/session/bus.js');
+    const bus = new SessionBus({ agent: session.agent, cfg: session.cfg });
+    session.bus = bus;
+
+    const stdin = fakeStdin();
+    const stdout = fakeStdout();
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    session.agent.emit('approval-request', {
+      op: { op: 'shell', cmd: 'npm test' },
+      index: 0,
+      respond: () => {},
+    });
+    await flush();
+
+    stdin.write('y');
+    await flush();
+
+    const out = stdout.frames.at(-1) || '';
+    // Answered locally, so the bus's own approval-resolved must not add a second line.
+    expect(out).not.toContain('approved in the browser');
+    const frames = stdout.frames.join('');
+    const approvals = frames.split('shell approved').length - 1;
+    expect(approvals).toBeGreaterThan(0);
+
+    bus.detach();
+    app.unmount();
+  });
+});
+
 describe('formatMeter', () => {
   it('shows sub-minute elapsed time to a tenth', async () => {
     const { formatMeter } = await import('../src/ui/theme.js');

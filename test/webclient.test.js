@@ -169,3 +169,83 @@ describe('perf charts do not treat turn numbers or elapsed seconds as epoch time
     expect(block[0]).toMatch(/scales:\s*\{\s*x:\s*\{\s*time:\s*false\s*\}\s*\}/);
   });
 });
+
+describe('the intra-turn plot is drawn on the same scale as the figures beside it', () => {
+  /**
+   * Buckets are the harness's pre-reconciliation estimate; the provider's usage rescales
+   * the turn by `scale` at turn end. `tokens` in the payload is already scaled, so a
+   * bucket curve drawn without it disagrees with both the token count printed next to it
+   * and the terminal's plot of the very same turn.
+   */
+  it('applies the turn scale to the bucket series', () => {
+    const block = /function drawTurnDetail\([\s\S]*?\n\}/.exec(client);
+    expect(block, 'drawTurnDetail missing in app.js').toBeTruthy();
+    expect(block[0], 'bucket rate ignores t.scale').toMatch(/t\.scale/);
+  });
+
+  it('is sent the scale by the server', () => {
+    const http = read('server/http.js');
+    const block = /function perf\(\)[\s\S]*?\n {2}\}/.exec(http);
+    expect(block, 'perf() missing in http.js').toBeTruthy();
+    expect(block[0], 'buckets are serialised without the scale to interpret them')
+      .toMatch(/scale:/);
+  });
+});
+
+describe('the accumulator cannot invent time between polls', () => {
+  /**
+   * renderSessionAccumulator extrapolates from the last sample to keep the clock moving.
+   * Unbounded, a stale sample charges the whole gap to one bucket: hovering the chip
+   * after ten idle minutes put all ten into modelMs if a turn happened to be running.
+   */
+  it('caps the extrapolation window', () => {
+    const block = /function renderSessionAccumulator\([\s\S]*?\n {2}const totals/.exec(client);
+    expect(block, 'renderSessionAccumulator missing in app.js').toBeTruthy();
+    expect(block[0], 'extraMs is not clamped').toMatch(/Math\.min\(\s*MAX_EXTRAPOLATE_MS/);
+  });
+
+  it('refetches when the hover overlay opens', () => {
+    const block = /function openPop\([\s\S]*?\n\}/.exec(client);
+    expect(block, 'openPop missing in app.js').toBeTruthy();
+    expect(block[0], 'the overlay draws from whatever was last fetched').toMatch(/refreshPerf\(\)/);
+  });
+});
+
+describe('the perf pane reuses its charts instead of rebuilding them', () => {
+  /**
+   * Destroying and re-constructing four canvases on every poll is both slow and visibly
+   * disruptive: it discards the cursor and the legend, so a tooltip being read vanished
+   * every couple of seconds.
+   */
+  it('reconciles through setData/setSize rather than new uPlot per refresh', () => {
+    const block = /function upsertChart\([\s\S]*?\n\}/.exec(client);
+    expect(block, 'upsertChart missing in app.js').toBeTruthy();
+    expect(block[0]).toMatch(/setData/);
+    expect(block[0]).toMatch(/setSize/);
+  });
+
+  it('reflows on resize without rebuilding', () => {
+    const block = /function resizePaneCharts\([\s\S]*?\n\}/.exec(client);
+    expect(block, 'resizePaneCharts missing in app.js').toBeTruthy();
+    expect(block[0]).toMatch(/setSize/);
+    expect(block[0], 'a rebuild on every resize event is the thing this replaces')
+      .not.toMatch(/new uPlot/);
+  });
+});
+
+describe('streaming deltas are painted per frame, not per token', () => {
+  it('coalesces the live region onto an animation frame', () => {
+    expect(client).toMatch(/function schedulePaint\(\)/);
+    const block = /function setLive\([\s\S]*?\n\}/.exec(client);
+    expect(block[0], 'setLive writes to the DOM synchronously on every delta')
+      .toMatch(/pendingPaint/);
+  });
+
+  it('can force a flush where ordering matters', () => {
+    // commitThinking moves the block into the transcript; a pending frame would redraw
+    // the notes we just committed and show them twice.
+    expect(client).toMatch(/function flushPaint\(\)/);
+    const block = /function commitThinking\([\s\S]*?\n\}/.exec(client);
+    expect(block[0]).toMatch(/flushPaint\(\)/);
+  });
+});

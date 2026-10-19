@@ -42,6 +42,13 @@ const VENDOR = {
   '/assets/uplot.css': 'uplot/dist/uPlot.min.css',
 };
 
+/**
+ * How many session phases the perf payload carries. The accumulator's totals are exact
+ * regardless; this bounds only the drawn timeline, which has one pixel per segment at
+ * best.
+ */
+const MAX_PHASES_OUT = 400;
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIR = path.join(HERE, '..', 'ui', 'web');
 
@@ -192,8 +199,18 @@ export function createWebServer({
   function perf() {
     const t = session.throughput;
     if (!t) return { turns: [], session: null };
+    const summary = typeof t.sessionSummary === 'function' ? t.sessionSummary() : null;
     return {
-      session: typeof t.sessionSummary === 'function' ? t.sessionSummary() : null,
+      session: summary
+        ? {
+            ...summary,
+            // Totals stay exact; only the drawn strip is trimmed. A browser cannot render
+            // four thousand segments into a 600px bar, and re-sending the whole array
+            // every poll makes the payload grow with session length for no gain.
+            phases: (summary.phases || []).slice(-MAX_PHASES_OUT),
+            phasesTotal: (summary.phases || []).length,
+          }
+        : null,
       turns: t.turns.map((x) => ({
         turn: x.turn,
         model: x.model,
@@ -207,6 +224,11 @@ export function createWebServer({
         durationMs: x.durationMs,
         tokens: Math.round(x.actualTokens ?? x.rawTokens * (x.scale || 1)),
         contextTokens: x.contextTokens,
+        // Buckets are the pre-reconciliation estimate and `scale` is what turns them into
+        // the same figure as `tokens`. Sending the buckets without it is how the web
+        // turn-detail curve came to disagree with both the terminal's plot and the token
+        // count printed beside it.
+        scale: x.scale || 1,
         buckets: x.buckets.map((b) => ({ t: b.t, tok: b.tok, think: b.thinkTok, text: b.textTok })),
       })),
     };

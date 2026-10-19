@@ -135,6 +135,24 @@ describe('approvals', () => {
     expect(bus.snapshot().pending).toHaveLength(0);
   });
 
+  it('stamps the id onto the request so the TUI can match a remote answer', () => {
+    // App.jsx holds the raw request object, not the published payload. Without an id on
+    // it there is no way to tell whether an `approval-resolved` refers to the pane
+    // currently on screen — and that pane is modal, so a browser approval left the
+    // terminal frozen on an answered question with its input swallowed.
+    const req = { op: { cmd: 'ls' }, respond: () => {} };
+    agent.emit('approval-request', req);
+    const ev = bus.since(0).events.find((e) => e.type === 'approval-request');
+    expect(req.id).toBe(ev.data.id);
+  });
+
+  it('announces the decision so another view can clear its pane', () => {
+    agent.emit('approval-request', { op: { cmd: 'ls' }, respond: () => {} });
+    bus.resolveApproval('ap1', { allow: true });
+    const ev = bus.since(0).events.find((e) => e.type === 'approval-resolved');
+    expect(ev.data).toMatchObject({ id: 'ap1', decision: { allow: true } });
+  });
+
   it('carries a sudo flag and a secret', () => {
     let answered = null;
     agent.emit('approval-request', { op: { cmd: 'sudo apt update' }, sudo: true, respond: (d) => { answered = d; } });

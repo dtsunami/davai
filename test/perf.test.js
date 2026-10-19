@@ -157,6 +157,51 @@ describe('tracker carries what the history needs', () => {
   });
 });
 
+describe('phase ring', () => {
+  it('bounds the timeline without losing time from the totals', () => {
+    const t0 = 1_000_000;
+    // A tiny ring so the eviction path is exercised in a few steps.
+    const tracker = new ThroughputTracker({ startedAt: t0, maxPhases: 4 });
+
+    // Ten complete model+ops cycles, 1s each, back to back from t0.
+    let now = t0;
+    for (let i = 1; i <= 10; i++) {
+      tracker.startTurn({ turn: i, now });
+      tracker.endTurn(now + 1000);
+      tracker.startOps({ ops: 1, now: now + 1000 });
+      tracker.endOps(now + 2000);
+      now += 2000;
+    }
+
+    const s = tracker.sessionSummary(now);
+    expect(tracker.phases.length).toBeLessThanOrEqual(4);
+    expect(s.phasesEvicted).toBeGreaterThan(0);
+    // The strip is trimmed; the clock is not. 10s of model + 10s of ops, no idle.
+    expect(s.totals.modelMs).toBe(10_000);
+    expect(s.totals.opsMs).toBe(10_000);
+    expect(s.elapsedMs).toBe(20_000);
+  });
+});
+
+describe('effort reconciliation', () => {
+  it('records the effort the turn actually ran at, not the one it started with', () => {
+    // startTurn captures the session's configured effort. A turn whose whole budget went
+    // to reasoning is retried a notch lower, and turn-end carries the real level — so
+    // without this the plot tooltip and the session log disagree about the same turn.
+    const tracker = new ThroughputTracker({ startedAt: 0 });
+    tracker.startTurn({ turn: 1, effort: 'high', now: 0 });
+    tracker.applyTiming({ ttftMs: 100, durationMs: 1000, effort: 'medium' });
+    expect(tracker.turns[0].effort).toBe('medium');
+  });
+
+  it('leaves effort alone when turn-end does not mention it', () => {
+    const tracker = new ThroughputTracker({ startedAt: 0 });
+    tracker.startTurn({ turn: 1, effort: 'high', now: 0 });
+    tracker.applyTiming({ ttftMs: 100, durationMs: 1000 });
+    expect(tracker.turns[0].effort).toBe('high');
+  });
+});
+
 describe('context trend', () => {
   it('bins log-spaced when the range is wide', () => {
     const trend = buildContextTrend([

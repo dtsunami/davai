@@ -181,7 +181,10 @@ function handle(type, d) {
     case 'turn-end':
       commitThinking();
       live = '';
-      setLive(''); setStatus(null);
+      // The committed assistant entry arrives separately over `transcript`; clearing the
+      // live region on this frame rather than the next avoids the turn's last tokens
+      // flickering below their own finished copy.
+      setLive(''); setStatus(null); flushPaint();
       break;
     case 'ops-parsed':
       setStatus(`running ${d.length} op${d.length > 1 ? 's' : ''}`);
@@ -193,7 +196,7 @@ function handle(type, d) {
     case 'cancelled':
       commitThinking();
       live = '';
-      setLive(''); setBusy(false); setStatus(null);
+      setLive(''); setBusy(false); setStatus(null); flushPaint();
       stopLiveMeter();
       refreshSession();
       refreshPerf();
@@ -237,6 +240,10 @@ function commitThinking() {
   pushEntry({ type: 'thinking', text: thinking });
   thinking = '';
   setThinking('');
+  // The block just moved into the transcript, so the live region must be empty on this
+  // frame rather than the next one — otherwise a pending paint redraws the notes we have
+  // already committed and they appear twice until the following delta.
+  flushPaint();
 }
 
 // --- timeline ---
@@ -435,21 +442,77 @@ function setFoldAll(open) {
 }
 
 // --- live region ---
+//
+// Deltas arrive faster than a screen refreshes — a fast model is several hundred events
+// a second — and each one of these writes forces layout and a paint of a growing block.
+// Painting per token is strictly wasted work: coalesce onto an animation frame so the
+// cost is one reflow per displayed frame no matter how fast the tokens land. The REPL
+// does the same thing with FRAME_MS in App.jsx, for the same reason.
+
+const pendingPaint = { live: null, thinking: null };
+let paintFrame = null;
+
+function schedulePaint() {
+  if (paintFrame) return;
+  paintFrame = requestAnimationFrame(() => {
+    paintFrame = null;
+    if (pendingPaint.live !== null) {
+      const text = pendingPaint.live;
+      pendingPaint.live = null;
+      const n = $('live');
+      n.textContent = text;
+      n.hidden = !text;
+      if (text) {
+        // Measure before the write has a chance to move it, and only follow if they were
+        // already at the bottom; yanking the view while someone reads scrollback is the
+        // most irritating thing a live log can do.
+        const box = scroller();
+        if (box.scrollHeight - box.scrollTop - box.clientHeight < 120) {
+          box.scrollTop = box.scrollHeight;
+        }
+      }
+    }
+    if (pendingPaint.thinking !== null) {
+      const text = pendingPaint.thinking;
+      pendingPaint.thinking = null;
+      const n = $('thinking');
+      n.textContent = text;
+      n.hidden = !text;
+    }
+  });
+}
 
 function setLive(text) {
-  const n = $('live');
-  n.textContent = text;
-  n.hidden = !text;
-  if (text) {
-    const box = scroller();
-    if (box.scrollHeight - box.scrollTop - box.clientHeight < 120) box.scrollTop = box.scrollHeight;
-  }
+  pendingPaint.live = text;
+  schedulePaint();
 }
 
 function setThinking(text) {
-  const n = $('thinking');
-  n.textContent = text;
-  n.hidden = !text;
+  pendingPaint.thinking = text;
+  schedulePaint();
+}
+
+/**
+ * Force any coalesced text out now. Needed wherever the next statement depends on the
+ * DOM being current — committing the thinking block, or ending a turn — because a frame
+ * that has not fired yet would otherwise overwrite what came after it.
+ */
+function flushPaint() {
+  if (!paintFrame) return;
+  cancelAnimationFrame(paintFrame);
+  paintFrame = null;
+  if (pendingPaint.live !== null) {
+    const n = $('live');
+    n.textContent = pendingPaint.live;
+    n.hidden = !pendingPaint.live;
+    pendingPaint.live = null;
+  }
+  if (pendingPaint.thinking !== null) {
+    const n = $('thinking');
+    n.textContent = pendingPaint.thinking;
+    n.hidden = !pendingPaint.thinking;
+    pendingPaint.thinking = null;
+  }
 }
 
 function setStatus(text) {
@@ -1070,6 +1133,13 @@ const fmtBytes = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}kB` : `${n}B`);
 // series at readable size in an overlay; clicking it opens the dedicated pane, which is
 // the only place with room for the intra-turn bucket plot.
 
+/**
+ * How far the accumulator may extrapolate past its last sample. It exists to keep the
+ * clock moving between polls, not to invent history: a sample older than this means the
+ * poll stalled, and the next refresh corrects it.
+ */
+const MAX_EXTRAPOLATE_MS = 6000;
+
 const perf = {
   turns: [],
   session: null,
@@ -1078,6 +1148,7 @@ const perf = {
   chars: 0,
   timer: null,
   paneTimer: null,
+  paneTick: 0,
   lastTypingPost: 0,
 };
 
@@ -1102,6 +1173,30 @@ async function refreshPerf() {
   drawSpark();
   if (!$('perf-pop').hidden) drawPop();
   if (currentTab === 'perf') drawPane();
+}
+
+/**
+ * The perf tab's heartbeat.
+ *
+ * Two cadences, deliberately split. The accumulator is redrawn locally every second so
+ * the session clock ticks smoothly; the network poll is slower and only as frequent as
+ * the data can actually change — a completed turn needs a turn to finish. Polling at the
+ * redraw rate was spending a request a second to re-render numbers that had not moved.
+ */
+function startPaneTick() {
+  stopPaneTick();
+  perf.paneTick = 0;
+  perf.paneTimer = setInterval(() => {
+    renderSessionAccumulator();
+    perf.paneTick++;
+    const every = state.busy ? 2 : 5;
+    if (perf.paneTick % every === 0) refreshPerf();
+  }, 1000);
+}
+
+function stopPaneTick() {
+  clearInterval(perf.paneTimer);
+  perf.paneTimer = null;
 }
 
 function meterChars(n) { perf.chars += n; }
@@ -1232,8 +1327,11 @@ function chartOpts({ title, width, height, xLabel = 'turn', xValue, xAxisFmt, se
           hooks: {
             setCursor: [
               (u) => {
+                // Passed through even when null — that is the cursor leaving the plot,
+                // and the readout has to clear rather than keep showing the last point
+                // as though it were still selected.
                 const idx = u.cursor.idx;
-                if (idx != null && idx >= 0) onHover(idx);
+                onHover(idx == null || idx < 0 ? -1 : idx);
               },
             ],
           },
@@ -1258,7 +1356,10 @@ function turnAxisFmt(v) {
 function renderSessionAccumulator() {
   const s = perf.session;
   if (!s) return;
-  const extraMs = Math.max(0, Date.now() - (s.fetchedAt || Date.now()));
+  // Capped: this extrapolates one sample forward to keep the clock moving between polls,
+  // and a stale sample must not be able to invent minutes. Anything longer than a couple
+  // of poll intervals means the data is old, and the next refresh will correct it.
+  const extraMs = Math.min(MAX_EXTRAPOLATE_MS, Math.max(0, Date.now() - (s.fetchedAt || Date.now())));
   const totals = { ...(s.totals || { modelMs: 0, opsMs: 0, userTypingMs: 0, userIdleMs: 0 }) };
   let liveState = s.state || (state.busy ? 'model' : 'user-idle');
   if (state.busy) {
@@ -1348,7 +1449,9 @@ function drawPop() {
   if (perf.session) renderSessionAccumulator();
   if (!hasPlot() || !perf.turns.length) return;
   const idx = perf.turns.map((t) => t.turn);
-  const w = 340;
+  // The overlay is `left:8px; right:8px` on a phone, and a canvas does not shrink to fit
+  // its box the way an image would — a fixed 340 overflowed the panel below ~360px.
+  const w = Math.max(220, Math.min(340, document.documentElement.clientWidth - 32));
   popCharts.push(
     new uPlot(
       chartOpts({
@@ -1382,7 +1485,12 @@ function drawPop() {
 function openPop() {
   if (currentTab === 'perf') return; // the full pane is already showing this
   $('perf-pop').hidden = false;
+  // Draw from what we have so the overlay appears on the same frame as the hover, then
+  // refresh. Without the refetch the accumulator extrapolates from whenever perf was
+  // last fetched — which outside the perf tab is the last `done` event, so hovering
+  // after ten idle minutes charged all ten to whichever bucket was live.
   drawPop();
+  refreshPerf();
 }
 
 function closePop() {
@@ -1393,92 +1501,163 @@ function closePop() {
 
 // --- perf: full pane ---
 
-let paneCharts = [];
-let paneDraw = 0;
+/**
+ * Live uPlot instances, keyed by slot.
+ *
+ * Reconciled rather than rebuilt. Destroying and re-constructing four canvases on every
+ * poll is what made this pane feel heavy, and it also threw away the cursor, the legend
+ * readout and any in-progress hover on each refresh — so the tooltip you were reading
+ * vanished under you every two seconds. An instance is torn down only when its identity
+ * changes (a different turn in the detail plot); a size change goes through setSize and
+ * new numbers go through setData.
+ *
+ * @type {Map<string, {u: object, w: number, h: number, cols: number}>}
+ */
+const paneCharts = new Map();
+
+function paneWidth() {
+  return Math.max(240, $('view-perf').clientWidth - 40);
+}
+
+/**
+ * Create, resize or refill one chart. `key` is its identity: change it and the old
+ * instance is discarded, keep it and the existing canvas is reused.
+ */
+function upsertChart(key, target, opts, data) {
+  const prev = paneCharts.get(key);
+  if (prev && prev.cols === data.length) {
+    if (prev.w !== opts.width || prev.h !== opts.height) {
+      prev.w = opts.width;
+      prev.h = opts.height;
+      prev.u.setSize({ width: opts.width, height: opts.height });
+    }
+    prev.u.setData(data);
+    return;
+  }
+  if (prev) prev.u.destroy();
+  target.innerHTML = '';
+  paneCharts.set(key, {
+    u: new uPlot(opts, data, target),
+    w: opts.width,
+    h: opts.height,
+    cols: data.length,
+  });
+}
+
+/** Drop every chart whose key is not in `keep` — e.g. the detail plot for an old turn. */
+function reapCharts(keep) {
+  for (const [key, c] of paneCharts) {
+    if (keep.has(key)) continue;
+    c.u.destroy();
+    paneCharts.delete(key);
+  }
+}
+
+function destroyPaneCharts() {
+  for (const c of paneCharts.values()) c.u.destroy();
+  paneCharts.clear();
+}
+
+/**
+ * Width-only reflow. setSize re-lays-out an existing canvas, which is far cheaper than a
+ * rebuild and is what makes dragging a window edge smooth rather than stuttery.
+ */
+function resizePaneCharts() {
+  if (currentTab !== 'perf' || !paneCharts.size) return;
+  const w = paneWidth();
+  for (const c of paneCharts.values()) {
+    // Guarded: setSize can itself change the scrollbar and therefore the width, and
+    // without this the observer and the resize feed each other.
+    if (c.w === w) continue;
+    c.w = w;
+    c.u.setSize({ width: w, height: c.h });
+  }
+}
 
 function showPointMeta(idx) {
   const t = perf.turns[idx];
-  if (!t) return;
+  if (!t) {
+    // The cursor left the plot area. Leaving the last hovered turn up reads as the
+    // current selection, which it is not.
+    $('perf-point-meta').textContent = '';
+    return;
+  }
   $('perf-point-meta').textContent =
     `${describeTurnConfig(t)} · ${turnTps(t).toFixed(1)} tok/s · ttft ${((t.ttftMs ?? 0) / 1000).toFixed(2)}s · ${t.tokens || 0} out tok`;
 }
 
 function drawPane() {
-  const token = ++paneDraw;
-  for (const c of paneCharts) c.destroy();
-  paneCharts = [];
   renderSessionAccumulator();
 
+  // The <select> is rebuilt only when the turn list actually changed. Replacing its
+  // options on every poll closed the dropdown in the operator's face if they happened to
+  // have it open, and reset the keyboard selection.
   const sel = $('perf-turn');
-  const prev = sel.value;
-  sel.innerHTML = '';
-  for (const t of perf.turns) {
-    const label = [
-      `turn ${t.turn}`,
-      [t.provider, t.model].filter(Boolean).join('/'),
-      t.effort ? `effort ${t.effort}` : null,
-    ].filter(Boolean).join(' · ');
-    const o = el('option', null, label);
-    o.value = String(t.turn);
-    sel.appendChild(o);
+  const want = perf.turns.map((t) => String(t.turn)).join(',');
+  if (sel.dataset.turns !== want) {
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const t of perf.turns) {
+      const label = [
+        `turn ${t.turn}`,
+        [t.provider, t.model].filter(Boolean).join('/'),
+        t.effort ? `effort ${t.effort}` : null,
+      ].filter(Boolean).join(' · ');
+      const o = el('option', null, label);
+      o.value = String(t.turn);
+      sel.appendChild(o);
+    }
+    sel.dataset.turns = want;
+    if (prev && perf.turns.some((t) => String(t.turn) === prev)) sel.value = prev;
+    else if (perf.turns.length) sel.value = String(perf.turns[perf.turns.length - 1].turn);
   }
-  if (prev && perf.turns.some((t) => String(t.turn) === prev)) sel.value = prev;
-  else if (perf.turns.length) sel.value = String(perf.turns[perf.turns.length - 1].turn);
 
   const selectedTurn = perf.turns.find((x) => String(x.turn) === sel.value) || perf.turns.at(-1);
   $('perf-turn-meta').textContent = selectedTurn ? describeTurnConfig(selectedTurn) : '';
-  if (selectedTurn) {
-    showPointMeta(perf.turns.indexOf(selectedTurn));
-  } else {
-    $('perf-point-meta').textContent = '';
-  }
 
   if (!hasPlot()) {
     $('perf-note').textContent = 'uplot is not installed — plots unavailable';
     return;
   }
   $('perf-note').textContent = perf.turns.length ? '' : 'no completed turns yet';
-  if (!perf.turns.length || token !== paneDraw) return;
+  if (!perf.turns.length) {
+    destroyPaneCharts();
+    return;
+  }
 
-  const w = Math.max(240, $('view-perf').clientWidth - 40);
+  const w = paneWidth();
   const idx = perf.turns.map((t) => t.turn);
+  const points = { show: perf.turns.length < 40 };
 
-  paneCharts.push(new uPlot(
-    chartOpts({
-      title: 'tokens/sec (streaming) — hover point for model/provider/settings',
-      width: w,
-      height: 190,
-      xValue: turnXValue,
-      xAxisFmt: turnAxisFmt,
-      onHover: showPointMeta,
-      series: [{ label: 'tok/s', stroke: '#98c379', width: 2, points: { show: perf.turns.length < 40 } }],
-    }),
-    [idx, perf.turns.map(turnTps)], $('chart-tps'),
-  ));
-  paneCharts.push(new uPlot(
-    chartOpts({
-      title: 'time to first token (s)',
-      width: w,
-      height: 190,
-      xValue: turnXValue,
-      xAxisFmt: turnAxisFmt,
-      onHover: showPointMeta,
-      series: [{ label: 'ttft', stroke: '#e5c07b', width: 2, points: { show: perf.turns.length < 40 } }],
-    }),
-    [idx, perf.turns.map((t) => (t.ttftMs ?? 0) / 1000)], $('chart-ttft'),
-  ));
-  paneCharts.push(new uPlot(
-    chartOpts({
-      title: 'context tokens',
-      width: w,
-      height: 190,
-      xValue: turnXValue,
-      xAxisFmt: turnAxisFmt,
-      onHover: showPointMeta,
-      series: [{ label: 'ctx', stroke: '#56b6c2', width: 2, points: { show: perf.turns.length < 40 } }],
-    }),
-    [idx, perf.turns.map((t) => t.contextTokens || 0)], $('chart-ctx'),
-  ));
+  upsertChart('tps', $('chart-tps'), chartOpts({
+    title: 'tokens/sec (streaming) — hover point for model/provider/settings',
+    width: w,
+    height: 190,
+    xValue: turnXValue,
+    xAxisFmt: turnAxisFmt,
+    onHover: showPointMeta,
+    series: [{ label: 'tok/s', stroke: '#98c379', width: 2, points }],
+  }), [idx, perf.turns.map(turnTps)]);
+
+  upsertChart('ttft', $('chart-ttft'), chartOpts({
+    title: 'time to first token (s)',
+    width: w,
+    height: 190,
+    xValue: turnXValue,
+    xAxisFmt: turnAxisFmt,
+    onHover: showPointMeta,
+    series: [{ label: 'ttft', stroke: '#e5c07b', width: 2, points }],
+  }), [idx, perf.turns.map((t) => (t.ttftMs ?? 0) / 1000)]);
+
+  upsertChart('ctx', $('chart-ctx'), chartOpts({
+    title: 'context tokens',
+    width: w,
+    height: 190,
+    xValue: turnXValue,
+    xAxisFmt: turnAxisFmt,
+    onHover: showPointMeta,
+    series: [{ label: 'ctx', stroke: '#56b6c2', width: 2, points }],
+  }), [idx, perf.turns.map((t) => t.contextTokens || 0)]);
 
   drawTurnDetail(w);
 }
@@ -1491,30 +1670,36 @@ function drawPane() {
 function drawTurnDetail(w) {
   const t = perf.turns.find((x) => String(x.turn) === $('perf-turn').value);
   const b = t?.buckets || [];
+  const keep = new Set(['tps', 'ttft', 'ctx']);
   if (b.length < 2) {
+    reapCharts(keep);
     $('chart-turn').innerHTML = '';
     return;
   }
+  // Buckets are the harness's pre-reconciliation estimate; `scale` is what the provider's
+  // reported usage rescaled the turn by. Both are needed for this curve's area to match
+  // the token count shown beside it and the terminal's own plot of the same turn.
   const step = (b[1].t - b[0].t) || 1000;
-  const per = 1000 / step;
+  const per = (1000 / step) * (t.scale || 1);
   const x = b.map((p) => (p.t - b[0].t) / 1000);
-  paneCharts.push(new uPlot(
-    chartOpts({
-      title: `${describeTurnConfig(t)} · estimated tok/s by second`,
-      width: w,
-      height: 190,
-      xLabel: 'elapsed (s)',
-      xValue: (_u, v) => (v == null ? '—' : `${Number(v).toFixed(1)}s`),
-      xAxisFmt: (v) => `${v}s`,
-      series: [
-        { label: 'total', stroke: '#98c379', width: 2 },
-        { label: 'thinking', stroke: '#c678dd', width: 1 },
-        { label: 'text', stroke: '#56b6c2', width: 1 },
-      ],
-    }),
-    [x, b.map((p) => p.tok * per), b.map((p) => (p.think || 0) * per), b.map((p) => (p.text || 0) * per)],
-    $('chart-turn'),
-  ));
+  // Keyed by turn: the title carries the turn's settings and uPlot fixes a title at
+  // construction, so a different turn has to be a different instance.
+  const key = `turn-${t.turn}`;
+  keep.add(key);
+  reapCharts(keep);
+  upsertChart(key, $('chart-turn'), chartOpts({
+    title: `${describeTurnConfig(t)} · estimated tok/s by second`,
+    width: w,
+    height: 190,
+    xLabel: 'elapsed (s)',
+    xValue: (_u, v) => (v == null ? '—' : `${Number(v).toFixed(1)}s`),
+    xAxisFmt: (v) => `${v}s`,
+    series: [
+      { label: 'total', stroke: '#98c379', width: 2 },
+      { label: 'thinking', stroke: '#c678dd', width: 1 },
+      { label: 'text', stroke: '#56b6c2', width: 1 },
+    ],
+  }), [x, b.map((p) => p.tok * per), b.map((p) => (p.think || 0) * per), b.map((p) => (p.text || 0) * per)]);
 }
 
 // --- approvals ---
@@ -1654,22 +1839,21 @@ function setTab(name) {
     $(`view-${t}`).hidden = t !== name;
     $(`tab-${t}`).classList.toggle('active', t === name);
   }
-  clearInterval(perf.paneTimer);
-  perf.paneTimer = null;
+  stopPaneTick();
   if (name === 'perf') {
     closePop();
+    // Draw immediately from the data already in hand so the tab paints on the click,
+    // then refresh in the background. Awaiting the fetch first showed an empty pane for
+    // a round trip, which on a phone over cellular is very visible.
+    drawPane();
     refreshPerf();
-    // Tick the session accumulator while the perf tab is open so user-idle / user-typing
-    // and model durations advance live and reflect REPL keystrokes.
-    perf.paneTimer = setInterval(() => {
-      api('/api/perf')
-        .then((d) => {
-          perf.turns = d.turns || perf.turns;
-          perf.session = d.session ? { ...d.session, fetchedAt: Date.now() } : perf.session;
-          renderSessionAccumulator();
-        })
-        .catch(() => renderSessionAccumulator());
-    }, 2000);
+    // The accumulator ticks every second so the session clock moves; the network poll
+    // inside is slower. See startPaneTick.
+    startPaneTick();
+  } else {
+    // Charts of a hidden pane cannot be measured and will not be seen. Dropping them
+    // keeps four canvases and their listeners out of memory while the tab is away.
+    destroyPaneCharts();
   }
   if (name === 'ctx') refreshSession();
   // The catalog is cached in-process on the server, so reopening is cheap; the first
@@ -1796,10 +1980,25 @@ function bind() {
     if (e.ctrlKey && e.key === 't') { e.preventDefault(); setTab(currentTab === 'perf' ? 'chat' : 'perf'); }
   });
 
-  window.addEventListener('resize', () => {
-    drawSpark();
-    if (currentTab === 'perf') drawPane();
-  });
+  // Resize is a reflow, not a rebuild: setSize keeps the data and the cursor. Coalesced
+  // onto an animation frame because a window drag fires this continuously, and four
+  // chart rebuilds per event is what made dragging the edge stutter.
+  let resizeFrame = null;
+  const onResize = () => {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = null;
+      drawSpark();
+      resizePaneCharts();
+      if (!$('perf-pop').hidden) drawPop();
+    });
+  };
+  window.addEventListener('resize', onResize);
+  // Catches the cases a window resize does not: the on-screen keyboard opening, a phone
+  // rotating, or the scrollbar appearing as the transcript grows.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(onResize).observe($('view-perf'));
+  }
 }
 
 // --- boot ---

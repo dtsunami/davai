@@ -171,6 +171,44 @@ describe('routes', () => {
     expect(d.session).toMatchObject({ state: 'user-idle', elapsedMs: 3000 });
   });
 
+  it('sends the scale needed to read the raw buckets', () => {
+    // `tokens` is reconciled against the provider's usage but `buckets` are the estimate.
+    // Without `scale` the client cannot draw the two on one axis.
+    session.throughput.turns[0].scale = 1.5;
+    session.throughput.turns[0].rawTokens = 200;
+    session.throughput.turns[0].actualTokens = null;
+    return fetch(url('/api/perf'), { headers: auth() })
+      .then((r) => r.json())
+      .then((d) => {
+        expect(d.turns[0].scale).toBe(1.5);
+        expect(d.turns[0].tokens).toBe(300); // 200 raw * 1.5
+      });
+  });
+
+  it('caps the phase timeline without distorting the totals', () => {
+    const phases = [];
+    for (let i = 0; i < 1200; i++) {
+      phases.push({ kind: 'model', startedAt: i * 10, endedAt: i * 10 + 5 });
+    }
+    session.throughput.sessionSummary = () => ({
+      startedAt: 0,
+      now: 12_000,
+      elapsedMs: 12_000,
+      state: 'model',
+      totals: { modelMs: 6000, opsMs: 0, userTypingMs: 0, userIdleMs: 6000 },
+      phases,
+    });
+    return fetch(url('/api/perf'), { headers: auth() })
+      .then((r) => r.json())
+      .then((d) => {
+        expect(d.session.phases.length).toBeLessThan(phases.length);
+        expect(d.session.phasesTotal).toBe(1200);
+        // Trimming the strip must not change what the accumulator reports.
+        expect(d.session.totals.modelMs).toBe(6000);
+        expect(d.session.elapsedMs).toBe(12_000);
+      });
+  });
+
   it('serves the command table so the web client cannot drift from the REPL', async () => {
     const d = await (await fetch(url('/api/commands'), { headers: auth() })).json();
     const names = d.commands.map((c) => c.name);

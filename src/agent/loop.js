@@ -527,7 +527,16 @@ export class Agent extends EventEmitter {
         });
       }
 
-      this.emit('turn-end', { text, usage, ttftMs, durationMs });
+      // `effort` is the level this turn actually ran at, which an effort demotion may
+      // have lowered since turn-start. The throughput tracker captured the pre-demotion
+      // value, so it is corrected here rather than left to disagree with the session log.
+      this.emit('turn-end', {
+        text,
+        usage,
+        ttftMs,
+        durationMs,
+        effort: this.cfg?.model?.effort ? effort : null,
+      });
       // Thinking is logged but never replayed: resume reads only `text` (session/resume.js).
       this.log.event('assistant', {
         text,

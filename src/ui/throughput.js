@@ -16,6 +16,12 @@ import { glyphs } from './theme.js';
 
 const BUCKET_MS = 1000;
 const TYPING_TIMEOUT_MS = 5000;
+/**
+ * Phase ring size. Roughly two or three phases per agent step, so this is a few hundred
+ * steps of drawable timeline; older phases are folded into `evictedTotals` so the
+ * accumulator stays exact while the array stops growing without bound.
+ */
+const MAX_PHASES = 2000;
 const SPARK_CHARS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const ASCII_SPARK = ['.', ':', '-', '=', '+', '*', '#', '@'];
 
@@ -26,11 +32,13 @@ export class ThroughputTracker {
   constructor({
     bucketMs = BUCKET_MS,
     maxBuckets = 600,
+    maxPhases = MAX_PHASES,
     startedAt = Date.now(),
     typingTimeoutMs = TYPING_TIMEOUT_MS,
   } = {}) {
     this.bucketMs = bucketMs;
     this.maxBuckets = maxBuckets;
+    this.maxPhases = maxPhases;
     this.startedAt = startedAt;
     this.typingTimeoutMs = typingTimeoutMs;
     /**
@@ -68,11 +76,36 @@ export class ThroughputTracker {
      * @type {Array<{kind: 'model'|'ops'|'user-typing'|'user-idle', startedAt: number, endedAt: number, turn?: number, model?: string, provider?: string, effort?: string|null, ops?: number}>}
      */
     this.phases = [];
+    /**
+     * Time from phases that have aged out of the ring. The timeline is a bounded tail —
+     * a long session accumulates a few thousand phases and no view can draw them — but
+     * the totals have to stay exact, so an evicted phase's duration is banked here
+     * instead of vanishing from the accumulator.
+     */
+    this.evictedTotals = { modelMs: 0, opsMs: 0, userTypingMs: 0, userIdleMs: 0 };
+    this.phasesEvicted = 0;
     this.activeOps = null;
     this.waitStartedAt = startedAt;
     this.typingStartedAt = null;
     this.lastKeystrokeAt = null;
     this.keystrokes = 0;
+  }
+
+  /**
+   * Commit one phase, evicting the oldest into `evictedTotals` once the ring is full.
+   * @param {{kind: string, startedAt: number, endedAt: number}} phase
+   */
+  #pushPhase(phase) {
+    this.phases.push(phase);
+    while (this.phases.length > this.maxPhases) {
+      const old = this.phases.shift();
+      this.phasesEvicted++;
+      const dur = Math.max(0, (old.endedAt || 0) - (old.startedAt || 0));
+      if (old.kind === 'model') this.evictedTotals.modelMs += dur;
+      else if (old.kind === 'ops') this.evictedTotals.opsMs += dur;
+      else if (old.kind === 'user-typing') this.evictedTotals.userTypingMs += dur;
+      else if (old.kind === 'user-idle') this.evictedTotals.userIdleMs += dur;
+    }
   }
 
   /**
@@ -83,7 +116,7 @@ export class ThroughputTracker {
     if (this.typingStartedAt != null && this.lastKeystrokeAt != null) {
       const typingEnd = Math.min(now, this.lastKeystrokeAt + this.typingTimeoutMs);
       if (typingEnd > this.typingStartedAt) {
-        this.phases.push({
+        this.#pushPhase({
           kind: 'user-typing',
           startedAt: this.typingStartedAt,
           endedAt: typingEnd,
@@ -94,7 +127,7 @@ export class ThroughputTracker {
       this.lastKeystrokeAt = null;
     }
     if (this.waitStartedAt != null && now > this.waitStartedAt) {
-      this.phases.push({
+      this.#pushPhase({
         kind: 'user-idle',
         startedAt: this.waitStartedAt,
         endedAt: now,
@@ -125,7 +158,7 @@ export class ThroughputTracker {
     if (this.typingStartedAt != null && this.lastKeystrokeAt != null) {
       const typingEnd = Math.min(now, this.lastKeystrokeAt + this.typingTimeoutMs);
       if (typingEnd > this.typingStartedAt) {
-        this.phases.push({
+        this.#pushPhase({
           kind: 'user-typing',
           startedAt: this.typingStartedAt,
           endedAt: typingEnd,
@@ -135,7 +168,7 @@ export class ThroughputTracker {
     }
 
     if (now > this.waitStartedAt) {
-      this.phases.push({
+      this.#pushPhase({
         kind: 'user-idle',
         startedAt: this.waitStartedAt,
         endedAt: now,
@@ -160,7 +193,7 @@ export class ThroughputTracker {
   endOps(now = Date.now()) {
     if (!this.activeOps) return;
     const endedAt = Math.max(this.activeOps.startedAt, now);
-    this.phases.push({
+    this.#pushPhase({
       kind: 'ops',
       startedAt: this.activeOps.startedAt,
       endedAt,
@@ -299,13 +332,19 @@ export class ThroughputTracker {
    * The tracker's delta-arrival timestamps are good enough to drive a live display, but
    * these are the numbers that went into the session log, and the display should not
    * disagree with the record.
-   * @param {{ttftMs?: number|null, durationMs?: number|null}} [timing]
+   * `effort` is corrected here too. startTurn() records the level the session was
+   * configured for; a turn whose whole budget went to reasoning is retried a notch lower,
+   * and the log records the level it actually ran at. Without this the plot's tooltip and
+   * the session log disagree about the same turn.
+   *
+   * @param {{ttftMs?: number|null, durationMs?: number|null, effort?: string|null}} [timing]
    */
-  applyTiming({ ttftMs = null, durationMs = null } = {}) {
+  applyTiming({ ttftMs = null, durationMs = null, effort } = {}) {
     const t = this.active || this.turns.at(-1);
     if (!t) return;
     if (ttftMs != null) t.ttftMs = ttftMs;
     if (durationMs != null) t.durationMs = durationMs;
+    if (effort !== undefined) t.effort = effort;
   }
 
   endTurn(now = Date.now()) {
@@ -314,7 +353,7 @@ export class ThroughputTracker {
     const t = this.active;
     const endedAt = Math.max(t.startedAt, now);
     t.endedAt = endedAt;
-    this.phases.push({
+    this.#pushPhase({
       kind: 'model',
       startedAt: t.startedAt,
       endedAt,
@@ -387,12 +426,9 @@ export class ThroughputTracker {
       }
     }
 
-    const totals = {
-      modelMs: 0,
-      opsMs: 0,
-      userTypingMs: 0,
-      userIdleMs: 0,
-    };
+    // Seeded from what the phase ring has already discarded, so trimming the timeline
+    // never silently shortens the session.
+    const totals = { ...this.evictedTotals };
     for (const p of phases) {
       const dur = Math.max(0, (p.endedAt || now) - (p.startedAt || now));
       if (p.kind === 'model') totals.modelMs += dur;
@@ -415,6 +451,7 @@ export class ThroughputTracker {
       keystrokes: this.keystrokes,
       totals,
       phases,
+      phasesEvicted: this.phasesEvicted,
     };
   }
 
