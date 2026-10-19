@@ -263,6 +263,24 @@ details.entry.error > summary { color: var(--red); }
   min-width: 220px;
 }
 .k-note { font-size: 12px; margin: 8px 0 0; }
+/* A block's variables, shown under its row when expanded. Monospace because these are
+   lines from a file, and lining them up is most of what makes them readable. */
+.e-vars {
+  grid-column: 1 / -1;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: var(--bg);
+  border-radius: 3px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--dim);
+}
+.e-vars .off { opacity: 0.55; }
+/* One-hot rows: several assignments of one name in a block, exactly one in effect. */
+.e-opt { display: flex; align-items: center; gap: 8px; padding: 1px 0; }
+.e-opt .off { opacity: 0.55; }
+.e-opt.on { color: var(--fg); }
 .warn { color: var(--yellow); }
 
 .m-list { display: flex; flex-direction: column; gap: 4px; }

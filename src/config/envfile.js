@@ -33,8 +33,70 @@ export function readEnv(file) {
   }
 }
 
-function format(prefix, name, value) {
-  return `${prefix}${name}=${BARE.test(value) ? value : JSON.stringify(value)}`;
+/**
+ * Render one assignment. Exported because config/profiles.js writes assignments into
+ * provider blocks and has to quote them exactly as this does, or a value would mean
+ * different things depending on which door it came through.
+ */
+export function formatAssignment(name, value, prefix = '') {
+  const str = String(value);
+  return `${prefix}${name}=${BARE.test(str) ? str : JSON.stringify(str)}`;
+}
+
+/** Split file text into lines, dropping the empty element a trailing newline leaves. */
+export function toLines(text) {
+  const lines = text.length ? text.split('\n') : [];
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+/** The inverse of toLines: the file ends with exactly one newline, or is empty. */
+export function joinLines(lines) {
+  const out = lines.join('\n');
+  return out.length ? `${out}\n` : '';
+}
+
+/** A .env as raw text. A missing file is empty, not an error. */
+export function readEnvText(file) {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Write a .env atomically: temp file, then rename, so an interrupted write cannot leave
+ * a truncated file holding every key on the machine. Mode 0600 for the same reason.
+ */
+export function writeEnvText(file, text) {
+  const tmp = `${file}.davai-tmp`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(tmp, text, { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  // rename preserves the temp file's mode on create, but not on replace.
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    // A .env on a filesystem without modes (a mount, a container overlay) is still
+    // better written than refused.
+  }
+}
+
+/**
+ * Read-modify-write a .env through a pure text transform. Provider blocks are edited
+ * this way: config/profiles.js does text in, text out and never touches the filesystem,
+ * so the atomic write and the 0600 live in exactly one place.
+ *
+ * @param {string} file
+ * @param {(text: string) => string} transform
+ * @returns {{file: string, changed: boolean, text: string}}
+ */
+export function editEnvFile(file, transform) {
+  const before = readEnvText(file);
+  const after = transform(before);
+  if (after !== before) writeEnvText(file, after);
+  return { file, changed: after !== before, text: after };
 }
 
 /**
@@ -56,15 +118,7 @@ export function setEnvVars(file, updates) {
   const names = Object.keys(updates);
   if (!names.length) return { set: [], removed: [], file };
 
-  let text = '';
-  try {
-    text = fs.readFileSync(file, 'utf8');
-  } catch {
-    text = '';
-  }
-  const lines = text.length ? text.split('\n') : [];
-  // A trailing newline leaves an empty final element; drop it and re-add it on write.
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const lines = toLines(readEnvText(file));
 
   /** @type {Map<string, number[]>} every line index assigning each name */
   const seen = new Map();
@@ -94,25 +148,14 @@ export function setEnvVars(file, updates) {
     }
     const str = String(value);
     if (last === undefined) {
-      lines.push(format('', name, str));
+      lines.push(formatAssignment(name, str));
     } else {
-      lines[last] = format(ASSIGN.exec(lines[last])[1], name, str);
+      lines[last] = formatAssignment(name, str, ASSIGN.exec(lines[last])[1]);
     }
     set.push(name);
   }
 
-  const out = lines.filter((_, i) => !drop.has(i)).join('\n');
-  const tmp = `${file}.davai-tmp`;
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(tmp, out.length ? `${out}\n` : '', { mode: 0o600 });
-  fs.renameSync(tmp, file);
-  // rename preserves the temp file's mode on create, but not on replace.
-  try {
-    fs.chmodSync(file, 0o600);
-  } catch {
-    // A .env on a filesystem without modes (a mount, a container overlay) is still
-    // better written than refused.
-  }
+  writeEnvText(file, joinLines(lines.filter((_, i) => !drop.has(i))));
 
   return { set, removed, file };
 }

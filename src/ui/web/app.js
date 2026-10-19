@@ -95,7 +95,16 @@ function connect() {
  * test/webclient.test.js checks every setPane() name in commands.js is mapped, which
  * is what catches a pane that silently leaves an attached browser sitting on chat.
  */
-const PANE_TAB = { context: 'ctx', tps: 'perf', model: 'models', artifacts: 'art', keys: 'models' };
+// `keys` and `env` are panels inside the models tab rather than tabs of their own, so
+// both map to 'models'; the branch in the pane handler also expands the right panel.
+const PANE_TAB = {
+  context: 'ctx',
+  tps: 'perf',
+  model: 'models',
+  artifacts: 'art',
+  keys: 'models',
+  env: 'models',
+};
 
 const EVENTS = [
   'thinking', 'text', 'turn-start', 'turn-end', 'ops-parsed', 'ops-result',
@@ -141,6 +150,7 @@ function handle(type, d) {
       // tab, so /keys in the terminal opens that tab with the panel expanded. Routing
       // it through setTab('keys') would look for a #view-keys that does not exist.
       if (d.pane === 'keys') { setTab('models'); toggleKeys(true); }
+      else if (d.pane === 'env') { setTab('models'); toggleEnv(true); }
       else if (PANE_TAB[d.pane]) setTab(PANE_TAB[d.pane]);
       else if (d.pane === null) setTab('chat');
       break;
@@ -806,6 +816,155 @@ function toggleKeys(open) {
   else renderKeys();
 }
 
+// --- .env provider blocks ---
+//
+// Several endpoint-and-key sets in one .env, one live at a time. The server does the
+// editing; this renders the blocks and sends the name of the one to switch to. Values
+// arrive with secrets already masked — session/profiles.js masks before the state
+// leaves the process, so an unmasked key is never on this connection.
+
+const envb = { file: '', blocks: [], active: [], preamble: [], open: false, expanded: null };
+
+async function loadEnv() {
+  try {
+    const d = await api('/api/env');
+    Object.assign(envb, { file: d.file, blocks: d.blocks || [], active: d.active || [], preamble: d.preamble || [] });
+  } catch (e) {
+    envb.blocks = [];
+    $('m-status').textContent = `could not read .env: ${e.message}`;
+  }
+  renderEnv();
+}
+
+function renderEnv() {
+  $('envblocks').hidden = !envb.open;
+  $('e-file').textContent = envb.file || '';
+  const list = $('e-list');
+  list.innerHTML = '';
+
+  if (!envb.blocks.length) {
+    list.appendChild(
+      el('div', 'muted', 'No #---# blocks in this .env — add one to keep several providers side by side.'),
+    );
+    return;
+  }
+
+  for (const b of envb.blocks) {
+    const row = el('div', `k-row${b.enabled ? ' live' : ''}`);
+
+    const name = el('div', 'k-name');
+    name.appendChild(el('span', null, b.name));
+    if (b.enabled) name.appendChild(el('span', 'live-tag', ' ● live'));
+    row.appendChild(name);
+
+    const meta = el('div', 'k-meta');
+    const what = [b.provider, b.baseURL].filter(Boolean).join(' → ');
+    // The remark on the header line: "#---# mistral sucks" is a note, not part of the name.
+    if (b.note) meta.appendChild(el('span', 'muted', b.note));
+    meta.appendChild(el('span', null, what || b.vars.map((v) => v.name).join(', ')));
+    if (!b.closed) meta.appendChild(el('span', 'muted', 'open-ended (no #-end-provider-#)'));
+    // Duplicates are candidates, not clutter: say how many and let "show" offer the pick.
+    const opts = b.vars.filter((v) => v.choices.length);
+    if (opts.length) {
+      meta.appendChild(
+        el('span', 'muted', opts.map((v) => `${v.name}: ${v.choices.length} options`).join(' · ')),
+      );
+    }
+    row.appendChild(meta);
+
+    const act = el('div', 'k-act');
+    const show = el('button', 'chip plain', envb.expanded === b.name ? 'hide' : 'show');
+    show.onclick = () => {
+      envb.expanded = envb.expanded === b.name ? null : b.name;
+      renderEnv();
+    };
+    act.appendChild(show);
+    if (!b.enabled) {
+      const use = el('button', 'chip', 'make live');
+      use.onclick = () => switchEnv(b.name);
+      act.appendChild(use);
+    }
+    row.appendChild(act);
+
+    if (envb.expanded === b.name) {
+      const box = el('div', 'e-vars');
+      for (const v of b.vars) {
+        if (!v.choices.length) {
+          const line = el('div', v.enabled ? null : 'off');
+          line.textContent = `${v.enabled ? ' ' : '#'}${v.name}=${v.value}`;
+          box.appendChild(line);
+          continue;
+        }
+        // One-hot: several assignments of the same name, exactly one effective.
+        box.appendChild(el('div', 'muted', `${v.name} — ${v.choices.length} options, one live`));
+        for (const c of v.choices) {
+          const opt = el('div', `e-opt${c.chosen ? ' on' : ''}`);
+          const pick = el('button', 'chip plain', c.chosen ? '●' : '○');
+          pick.title = c.chosen ? 'in effect' : 'use this value';
+          pick.onclick = () => chooseEnvVar(b.name, v.name, c.line);
+          opt.appendChild(pick);
+          opt.appendChild(el('span', c.chosen ? null : 'off', c.value));
+          box.appendChild(opt);
+        }
+      }
+      row.appendChild(box);
+    }
+    list.appendChild(row);
+  }
+
+  if (envb.active.length > 1) {
+    list.appendChild(
+      el('div', 'warn', `${envb.active.join(' and ')} are both live — the last in the file wins. Pick one.`),
+    );
+  }
+  if (envb.preamble.length) {
+    list.appendChild(el('div', 'muted', `always applied: ${envb.preamble.join(', ')}`));
+  }
+}
+
+async function switchEnv(block) {
+  $('m-status').textContent = block ? `switching to ${block}…` : 'disabling all blocks…';
+  try {
+    const d = await api('/api/env', { block });
+    Object.assign(envb, { blocks: d.blocks || [], active: d.active || [], preamble: d.preamble || [] });
+    $('m-status').textContent = d.block
+      ? `${d.block} is live — ${d.provider} → ${d.model}`
+      : `all blocks disabled — ${d.provider} → ${d.model}`;
+    renderEnv();
+    // The provider may have moved, so the catalog on screen is for the old one.
+    await loadModels({ provider: d.provider });
+  } catch (e) {
+    $('m-status').textContent = `not switched: ${e.message}`;
+    // The server rolls the file back on failure; re-read rather than trust local state.
+    loadEnv();
+  }
+}
+
+/**
+ * Pick one of several assignments of the same name inside a block, and make that block
+ * live. Same request as a switch, with `var` and the line of the chosen assignment.
+ */
+async function chooseEnvVar(block, name, line) {
+  $('m-status').textContent = `${block}: ${name}…`;
+  try {
+    const d = await api('/api/env', { block, var: name, line });
+    Object.assign(envb, { blocks: d.blocks || [], active: d.active || [], preamble: d.preamble || [] });
+    $('m-status').textContent = `${d.block} — ${d.name}=${d.value} — ${d.provider} → ${d.model}`;
+    renderEnv();
+    await loadModels({ provider: d.provider });
+  } catch (e) {
+    $('m-status').textContent = `not changed: ${e.message}`;
+    // The server rolls the file back on failure; re-read rather than trust local state.
+    loadEnv();
+  }
+}
+
+function toggleEnv(open) {
+  envb.open = open ?? !envb.open;
+  if (envb.open) loadEnv();
+  else renderEnv();
+}
+
 // --- artifacts ---
 
 const arts = { items: [], open: new Set() };
@@ -1352,6 +1511,9 @@ function bind() {
   $('m-refresh').onclick = () => loadModels({ refresh: true });
   $('m-keys').onclick = () => toggleKeys();
   $('k-close').onclick = () => toggleKeys(false);
+  $('m-env').onclick = () => toggleEnv();
+  $('e-close').onclick = () => toggleEnv(false);
+  $('e-off').onclick = () => switchEnv(null);
 
   for (const k of FILTERS) $(`f-${k}`).onclick = () => toggleFilter(k);
   $('fold-all').onclick = () => setFoldAll(false);

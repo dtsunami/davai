@@ -466,6 +466,12 @@ export function loadConfig(opts = {}) {
     // layer won, and a live switch reads it to warn that a .env will beat what it
     // just persisted.
     varOrigins: origins,
+    // The layers this config was built from, kept so it can be rebuilt. A provider
+    // block switch rewrites the .env and has to re-run loadConfig with the same floor
+    // and the same explicit overrides; without these it would silently drop the CLI
+    // flags the session was started with.
+    defaults: opts.defaults || {},
+    overrides: opts.overrides || {},
     envFiles,
     warnings,
   };

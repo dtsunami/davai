@@ -105,12 +105,21 @@ function validateKey(provider, key) {
  * The key is verified before it is persisted when `verify` is on, so a typo fails here
  * with "that key was rejected" rather than three turns later in the middle of a task.
  *
+ * `block` parks the key inside a provider block instead of writing it at the top level.
+ * Without it the assignment lands after the last block, where it outranks every block in
+ * the file — so saving a key for a provider you are not running would quietly override
+ * the one you are.
+ *
  * @param {object} session
- * @param {{provider: string, key: string, persist?: boolean, verify?: boolean}} opts
+ * @param {{provider: string, key: string, persist?: boolean, verify?: boolean,
+ *   block?: string}} opts
  * @returns {Promise<{provider: string, masked: string, persisted: boolean,
- *   varName: string, file: string|null, warnings: string[]}>}
+ *   varName: string, file: string|null, block: string|null, warnings: string[]}>}
  */
-export async function setProviderKey(session, { provider, key, persist = false, verify = true }) {
+export async function setProviderKey(
+  session,
+  { provider, key, persist = false, verify = true, block = null },
+) {
   const { cfg } = session;
   const name = String(provider || '').trim().toLowerCase();
   if (!PROVIDERS.includes(name)) {
@@ -136,7 +145,12 @@ export async function setProviderKey(session, { provider, key, persist = false, 
   let file = null;
   if (persist) {
     const target = envFilePath(cfg.home);
-    setEnvVars(target, { [keyVarFor(name)]: value });
+    if (block) {
+      const { setProfileVar } = await import('./profiles.js');
+      await setProfileVar(session, { block, name: keyVarFor(name), value });
+    } else {
+      setEnvVars(target, { [keyVarFor(name)]: value });
+    }
     file = target;
     const shadowing = (KEY_VARS[name] || []).filter(
       (v) => v !== keyVarFor(name) && process.env[v],

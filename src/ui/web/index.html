@@ -106,6 +106,7 @@
                 <input id="m-persist" type="checkbox" /> remember
               </label>
               <button id="m-keys" class="chip plain" title="add or replace provider API keys">keys</button>
+              <button id="m-env" class="chip plain" title="switch between provider blocks in .env">.env</button>
             </div>
             <div id="m-status" class="muted"></div>
           </div>
@@ -129,6 +130,27 @@
               Keys are sent to davai over this connection and never broadcast back — the
               transcript shows only a masked description. Saving writes
               $DAVAI_HOME/.env on the machine davai runs on.
+            </p>
+          </div>
+
+          <!--
+            Provider blocks, same shape and the same reasoning as the keys panel above:
+            "which endpoint am I pointed at" is part of picking a model, not a separate
+            destination. Collapsed by default.
+          -->
+          <div id="envblocks" class="keys" hidden>
+            <div class="keys-head">
+              <strong>.env provider blocks</strong>
+              <span class="muted" id="e-file"></span>
+              <span class="spacer"></span>
+              <button id="e-off" class="chip plain" title="disable every block, leaving only the settings above them">disable all</button>
+              <button id="e-close" class="chip plain">close</button>
+            </div>
+            <div id="e-list" class="k-list"></div>
+            <p class="muted k-note">
+              Switching comments out the old block and uncomments the new one. Nothing is
+              deleted, so switching back restores the file exactly. Settings above the
+              first <code>#---#</code> always apply.
             </p>
           </div>
 

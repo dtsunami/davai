@@ -6,6 +6,7 @@ import { StatusBar } from './StatusBar.jsx';
 import { ContextPane } from './ContextPane.jsx';
 import { ModelPane } from './ModelPane.jsx';
 import { KeyPane } from './KeyPane.jsx';
+import { EnvPane } from './EnvPane.jsx';
 import { ArtifactPane } from './ArtifactPane.jsx';
 import { ApprovalPane } from './ApprovalPane.jsx';
 import { ThroughputPane } from './ThroughputPane.jsx';
@@ -33,7 +34,7 @@ export function App({ session, initialInput }) {
   const [live, setLive] = useState('');
   const [thinking, setThinking] = useState('');
   const [status, setStatus] = useState(null);
-  // 'context' | 'model' | 'keys' | 'artifacts' | 'tps'
+  // 'context' | 'model' | 'keys' | 'env' | 'artifacts' | 'tps'
   const [pane, setPane] = useState(null);
   const [approval, setApproval] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -439,6 +440,9 @@ export function App({ session, initialInput }) {
       ) : null}
       {pane === 'keys' ? (
         <KeyPane session={session} onClose={() => setPane(null)} push={push} />
+      ) : null}
+      {pane === 'env' ? (
+        <EnvPane session={session} onClose={() => setPane(null)} push={push} />
       ) : null}
       {pane === 'artifacts' ? (
         <ArtifactPane

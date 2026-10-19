@@ -83,6 +83,49 @@ an override, so it wins for the session it was made in.
   lose to a hand-written `.env` belongs in the first. `cfg.varOrigins` records which
   layer supplied each variable.
 
+## Provider blocks in a .env
+
+Several endpoint-and-key sets in one file, one live at a time. `/env` lists them, `/env
+<name>` switches, the pane and the browser's *.env* panel do the same thing with a
+keypress. `config/profiles.js` is the text layer, `session/profiles.js` the session one —
+the same split as `session/keys.js` and `KeyPane.jsx`.
+
+```
+#---# mistral
+DAVAI_PROVIDER=openai
+DAVAI_BASE_URL=https://api.mistral.ai/v1
+DAVAI_OPENAI_API_KEY=sk-...
+#-end-provider-#
+```
+
+- A block ends at the next `#---#`, at `#-end-provider-#`, or at end of file. Everything
+  above the first sentinel is the preamble and applies whichever block is live; blocks
+  come after it, so a block's assignment beats the preamble's by dotenv's own last-wins
+  rule rather than by a new precedence rule.
+- **Inactive blocks are ordinary comments.** This is the whole design. A block-aware
+  reader would mean a `.env` that dotenv, `set -a; . ./.env`, Docker and every other tool
+  parse differently from davai — a sentinel that looks like it gates something but does
+  not, with the last duplicate quietly in effect. Switching only comments and uncomments,
+  so nothing is ever deleted and switching back restores the file byte for byte.
+  `test/profiles.test.js` pins the round-trip and the no-line-lost property.
+- `##` marks prose davai will never uncomment; a single `#` before an assignment means a
+  disabled setting. Without the distinction, enabling a block would resurrect the comment
+  explaining why a value was abandoned.
+- Within a block only the *last* assignment of a name is uncommented, because that is the
+  one dotenv would have used. Enabling all of them would make the visible first line not
+  the value in effect.
+- The switch writes the file, then rebuilds the config through `loadConfig` exactly as
+  startup does, and rolls the file back if that throws. A bad block leaves neither the
+  file nor the session half-switched. Poking `cfg.baseURL` by hand instead is the
+  `/model`-vs-pane drift again, and a base URL is worse to get wrong than a model: it
+  decides which server receives the key.
+- Saving a key for a provider you are not running goes through `setProfileVar`, which
+  writes *inside* the block, commented to match. `setEnvVars` appends at top level, where
+  the assignment outranks every block — correct when there are no blocks, wrong the
+  moment there are.
+- Secrets are masked in `session/profiles.js`, not at the view: `profileState` is what
+  crosses to the bus and the browser, and `blockState` returns raw values by design.
+
 ## Providers and keys
 
 `/keys` lists every provider, whether it has a key, and which variable supplied it.

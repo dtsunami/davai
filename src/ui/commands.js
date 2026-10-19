@@ -25,6 +25,7 @@ const HELP = `Commands
   /sessions           recent sessions
   /stream [n]         streamed reasoning + text for a turn, read back from disk
   /keys [provider]    enable a provider: see, paste or save API keys
+  /env [name]         provider blocks in your .env; /env <name> switches to one
   /config             resolved configuration
   /prompts [export]   where each prompt comes from; export writes them to ./.prompts
   /clear              drop conversation context, keep grounding
@@ -649,6 +650,129 @@ export async function handleCommand(text, deps) {
       // handleCommand declines it, so a slash command is never written to disk. The
       // key does remain in this process's up-arrow buffer and in the scrollback,
       // which is why the bare `/keys <provider>` form exists.
+      return { handled: true };
+    }
+
+    /**
+     * `/env` — several endpoint-and-key sets in one .env, one live at a time.
+     *
+     * Switching is a comment/uncomment edit of $DAVAI_HOME/.env and nothing else: the
+     * inactive blocks stay in the file as ordinary comments, so a key pasted six months
+     * ago survives every switch since, and the file is still a .env that dotenv, Docker
+     * and `set -a; . ./.env` read the same way davai does.
+     */
+    case 'env':
+    case 'profile': {
+      const { profileState, switchProfile, chooseProfileVar } = await import(
+        '../session/profiles.js'
+      );
+      const words = arg.split(/\s+/).filter(Boolean);
+      const off = words.includes('--off');
+      // `/env openrouter DAVAI_MODEL=deepseek/deepseek-v4.1-flash` picks one of several
+      // assignments of the same name inside a block: the headless form of the pane's
+      // one-hot. Matched against the whole argument, so a value may contain spaces.
+      const assign = /(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(\S.*)$/.exec(arg);
+      const want = words.filter((w) => !w.startsWith('--') && !w.includes('='))[0];
+
+      // Bare `/env` opens the pane: switching is a keypress there, and the pane is the
+      // only view that can show a block's settings without putting them in scrollback.
+      // The printed list stays for headless, where there is no pane to open.
+      if (!want && !off && setPane && !words.includes('--list')) {
+        const hasBlocks = profileState(cfg).blocks.length > 0;
+        if (hasBlocks) {
+          setPane('env');
+          return { handled: true };
+        }
+      }
+
+      if (!want && !off) {
+        const state = profileState(cfg);
+        if (!state.blocks.length) {
+          push({
+            type: 'info',
+            text: [
+              `No provider blocks in ${state.file}.`,
+              '',
+              'A block is a sentinel comment and the settings under it:',
+              '',
+              '  #---# mistral',
+              '  DAVAI_PROVIDER=openai',
+              '  DAVAI_BASE_URL=https://api.mistral.ai/v1',
+              '  DAVAI_OPENAI_API_KEY=sk-...',
+              '  #-end-provider-#',
+              '',
+              'A block runs to the next sentinel, to #-end-provider-#, or to end of file.',
+              'Settings above the first sentinel always apply. `##` marks a comment davai',
+              'will never uncomment. /env <name> then makes one live and the rest inert.',
+            ].join('\n'),
+          });
+          return { handled: true };
+        }
+        const rows = state.blocks.map((b) => {
+          const mark = b.enabled ? glyphs.check : ' ';
+          const what = [b.provider, b.baseURL].filter(Boolean).join(' ' + glyphs.arrow + ' ');
+          const names = b.vars.map((v) => v.name).join(', ');
+          return `  ${mark} ${b.name.padEnd(14)} ${what || names}`;
+        });
+        push({
+          type: 'info',
+          text: [
+            `Provider blocks  (${state.file})`,
+            ...rows,
+            ...(state.active.length > 1
+              ? [
+                  '',
+                  `  ${glyphs.warn || '!'} ${state.active.join(' and ')} are both live — the ` +
+                    `last one in the file wins. /env <name> fixes it.`,
+                ]
+              : []),
+            '',
+            `  /env <name>     make that block live, every other block inert`,
+            `  /env --off      disable them all, leaving only the settings above them`,
+            `  /env <name> VAR=value   pick one of several assignments in that block`,
+          ].join('\n'),
+        });
+        return { handled: true };
+      }
+
+      if (want && assign) {
+        try {
+          const r = await chooseProfileVar(session, {
+            block: want,
+            name: assign[1],
+            value: assign[2].trim(),
+          });
+          for (const message of r.notices) push({ type: 'warning', message });
+          push({
+            type: 'notice',
+            message:
+              `${r.block} ${glyphs.bullet} ${r.name}=${r.value} ${glyphs.bullet} ` +
+              `${r.provider} ${glyphs.arrow} ${r.model}`,
+          });
+          log.event('profile-select', { block: r.block, name: r.name, value: r.value });
+          refresh();
+        } catch (err) {
+          push({ type: 'error', message: err.message });
+        }
+        return { handled: true };
+      }
+
+      try {
+        const r = await switchProfile(session, off ? null : want);
+        for (const message of r.notices) push({ type: 'warning', message });
+        push({
+          type: 'notice',
+          message: r.block
+            ? `${r.block} is live — ${r.provider} ${glyphs.arrow} ${r.model}` +
+              (r.baseURL ? ` at ${r.baseURL}` : '') +
+              (r.disabled.length ? ` (${r.disabled.length} setting(s) commented out)` : '')
+            : `all provider blocks disabled — ${r.provider} ${glyphs.arrow} ${r.model}`,
+        });
+        log.event('profile-switch', { block: r.block, provider: r.provider, model: r.model });
+        refresh();
+      } catch (err) {
+        push({ type: 'error', message: err.message });
+      }
       return { handled: true };
     }
 

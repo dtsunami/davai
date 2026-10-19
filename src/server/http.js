@@ -27,6 +27,7 @@ import {
   applyModelChange,
 } from '../session/models.js';
 import { keyState, setProviderKey, clearProviderKey } from '../session/keys.js';
+import { profileState, switchProfile, chooseProfileVar } from '../session/profiles.js';
 import { suggestName } from '../context/artifacts.js';
 
 const require = createRequire(import.meta.url);
@@ -102,6 +103,10 @@ export function createWebServer({
     if (req.method === 'POST' && url.pathname === '/api/model') return postModel(req, res);
     if (req.method === 'GET' && url.pathname === '/api/keys') return json(res, { providers: keyState(session.cfg) });
     if (req.method === 'POST' && url.pathname === '/api/keys') return postKeys(req, res);
+    if (req.method === 'GET' && url.pathname === '/api/env') {
+      return json(res, profileState(session.cfg));
+    }
+    if (req.method === 'POST' && url.pathname === '/api/env') return postEnv(req, res);
     if (req.method === 'GET' && url.pathname === '/api/artifacts') return json(res, artifacts());
     if (req.method === 'GET' && url.pathname.startsWith('/api/artifact/')) {
       return getArtifact(url, res);
@@ -259,6 +264,59 @@ export function createWebServer({
         });
         bus.publish('session-changed', null);
         json(res, { ok: true, provider: r.provider, model: r.model.id, effort: r.effort });
+      } catch (e) {
+        json(res, { error: e.message }, 400);
+      }
+    });
+  }
+
+  /**
+   * Switch which provider block in $DAVAI_HOME/.env is live.
+   *
+   * A write and a reconfigure from one HTTP request, so it is behind the same mandatory
+   * token as everything else. It is safe to get wrong in the way that matters: the
+   * switch only comments and uncomments, so the failure mode is a session pointed at a
+   * provider you did not want, not a key you can no longer recover. `block: null`
+   * disables every block, which is how you fall back to the settings above them.
+   */
+  function postEnv(req, res) {
+    body(req, async (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      try {
+        // `var` picks between several assignments of one name inside a block — the four
+        // candidate OpenRouter models, say — and makes that block live. Without it the
+        // browser could switch blocks but not choose within one.
+        if (data?.var) {
+          const c = await chooseProfileVar(session, {
+            block: data.block,
+            name: data.var,
+            line: data.line,
+            value: data.value,
+          });
+          for (const message of c.notices) {
+            bus.publish('transcript', { type: 'warning', message, origin: 'web' });
+          }
+          bus.publish('transcript', {
+            type: 'notice',
+            message: `.env ${c.block} · ${c.name}=${c.value} (${c.provider}, ${c.model})`,
+            origin: 'web',
+          });
+          bus.publish('session-changed', null);
+          return json(res, { ok: true, ...c, ...profileState(session.cfg) });
+        }
+        const r = await switchProfile(session, data?.block ?? null);
+        for (const message of r.notices) {
+          bus.publish('transcript', { type: 'warning', message, origin: 'web' });
+        }
+        bus.publish('transcript', {
+          type: 'notice',
+          message: r.block
+            ? `.env block → ${r.block} (${r.provider}, ${r.model}${r.baseURL ? ` at ${r.baseURL}` : ''})`
+            : `.env blocks all disabled (${r.provider}, ${r.model})`,
+          origin: 'web',
+        });
+        bus.publish('session-changed', null);
+        json(res, { ok: true, ...r, ...profileState(session.cfg) });
       } catch (e) {
         json(res, { error: e.message }, 400);
       }
