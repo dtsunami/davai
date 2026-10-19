@@ -86,8 +86,16 @@ function connect() {
   }
 }
 
-/** REPL pane name -> this client's tab. */
-const PANE_TAB = { context: 'ctx', tps: 'perf', model: 'models', artifacts: 'art' };
+/**
+ * REPL pane name -> this client's tab.
+ *
+ * `keys` maps to the models tab rather than one of its own: in the browser it is a
+ * panel inside that tab, because enabling a provider and picking a model are the same
+ * errand. `handle()` expands the panel as well, but the entry has to exist here —
+ * test/webclient.test.js checks every setPane() name in commands.js is mapped, which
+ * is what catches a pane that silently leaves an attached browser sitting on chat.
+ */
+const PANE_TAB = { context: 'ctx', tps: 'perf', model: 'models', artifacts: 'art', keys: 'models' };
 
 const EVENTS = [
   'thinking', 'text', 'turn-start', 'turn-end', 'ops-parsed', 'ops-result',
@@ -128,7 +136,12 @@ function handle(type, d) {
     case 'pane':
       // The REPL's pane names, mapped onto this client's tabs. Every pane has one now,
       // so /model or ctrl+a in the terminal moves an attached browser with it.
-      if (PANE_TAB[d.pane]) setTab(PANE_TAB[d.pane]);
+      //
+      // `keys` is the exception: it is not a tab here but a panel inside the models
+      // tab, so /keys in the terminal opens that tab with the panel expanded. Routing
+      // it through setTab('keys') would look for a #view-keys that does not exist.
+      if (d.pane === 'keys') { setTab('models'); toggleKeys(true); }
+      else if (PANE_TAB[d.pane]) setTab(PANE_TAB[d.pane]);
       else if (d.pane === null) setTab('chat');
       break;
     case 'session-changed':
@@ -652,12 +665,145 @@ function modelRow(m) {
 async function switchModel(want) {
   $('m-status').textContent = 'switching…';
   try {
-    await api('/api/model', { provider: models.provider, ...want });
+    await api('/api/model', {
+      provider: models.provider,
+      persist: $('m-persist').checked,
+      ...want,
+    });
     await refreshSession();
     await loadModels();
   } catch (e) {
     $('m-status').textContent = `could not switch: ${e.message}`;
   }
+}
+
+// --- provider keys ---
+//
+// The only part of this client that handles a secret. The value goes straight into the
+// POST body and is never put in the DOM, never logged, and never kept in `keys` state:
+// the input is read at submit time and cleared immediately after. What comes back, and
+// what the event stream broadcasts, is maskKey's description.
+
+const keys = { providers: [], open: false, editing: null };
+
+async function loadKeys() {
+  try {
+    const d = await api('/api/keys');
+    keys.providers = d.providers || [];
+  } catch (e) {
+    keys.providers = [];
+    $('m-status').textContent = `could not load providers: ${e.message}`;
+  }
+  renderKeys();
+}
+
+function renderKeys() {
+  $('keys').hidden = !keys.open;
+  const list = $('k-list');
+  list.innerHTML = '';
+
+  for (const p of keys.providers) {
+    const row = el('div', `k-row${p.current ? ' live' : ''}`);
+
+    const name = el('div', 'k-name');
+    name.appendChild(el('span', null, p.name));
+    if (p.current) name.appendChild(el('span', 'live-tag', ' ● running'));
+    row.appendChild(name);
+
+    const meta = el('div', 'k-meta');
+    if (p.hasKey) {
+      meta.appendChild(el('span', null, p.masked));
+      meta.appendChild(el('span', 'muted', `${p.varName} from ${p.origin}`));
+    } else {
+      meta.appendChild(el('span', 'warn', 'no key'));
+      meta.appendChild(el('span', 'muted', `will be saved as ${p.varName}`));
+    }
+    row.appendChild(meta);
+
+    const act = el('div', 'k-act');
+    if (keys.editing === p.name) {
+      const input = el('input', 'k-input');
+      input.type = 'password';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      input.placeholder = `paste a ${p.name} key`;
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') submitKey(p.name, input);
+        if (e.key === 'Escape') { keys.editing = null; renderKeys(); }
+      });
+      act.appendChild(input);
+      const ok = el('button', 'chip', 'set');
+      ok.onclick = () => submitKey(p.name, input);
+      act.appendChild(ok);
+      const no = el('button', 'chip plain', 'cancel');
+      no.onclick = () => { keys.editing = null; renderKeys(); };
+      act.appendChild(no);
+      // Focus after the row is in the DOM, or the caret lands nowhere.
+      setTimeout(() => input.focus(), 0);
+    } else if (!p.editable) {
+      // Set in the server's shell environment, which outranks the .env davai writes.
+      // Offering an edit that cannot take effect is worse than not offering one.
+      act.appendChild(el('span', 'muted', 'from the environment — unset it to change'));
+    } else {
+      const b = el('button', 'chip', p.hasKey ? 'replace' : 'add key');
+      b.onclick = () => { keys.editing = p.name; renderKeys(); };
+      act.appendChild(b);
+      if (p.hasKey && !p.current) {
+        const x = el('button', 'chip plain', 'clear');
+        x.onclick = () => clearKey(p.name);
+        act.appendChild(x);
+      }
+    }
+    row.appendChild(act);
+    list.appendChild(row);
+  }
+}
+
+async function submitKey(provider, input) {
+  const key = input.value.trim();
+  if (!key) return;
+  // Cleared before the await: a slow verify must not leave the secret sitting in a
+  // focused field on a phone screen.
+  input.value = '';
+  input.disabled = true;
+  $('m-status').textContent = `verifying ${provider} key…`;
+  try {
+    const d = await api('/api/keys', {
+      provider,
+      key,
+      persist: $('k-persist').checked,
+    });
+    keys.providers = d.providers || keys.providers;
+    keys.editing = null;
+    $('m-status').textContent = `${provider} key set${d.persisted ? ' and saved to .env' : ''}`;
+    renderKeys();
+    await loadModels({ provider });
+  } catch (e) {
+    $('m-status').textContent = `key not set: ${e.message}`;
+    input.disabled = false;
+    renderKeys();
+  }
+}
+
+async function clearKey(provider) {
+  try {
+    const d = await api('/api/keys', {
+      provider,
+      clear: true,
+      persist: $('k-persist').checked,
+    });
+    keys.providers = d.providers || keys.providers;
+    renderKeys();
+  } catch (e) {
+    $('m-status').textContent = `could not clear: ${e.message}`;
+  }
+}
+
+function toggleKeys(open) {
+  keys.open = open ?? !keys.open;
+  keys.editing = null;
+  if (keys.open) loadKeys();
+  else renderKeys();
 }
 
 // --- artifacts ---
@@ -1204,6 +1350,8 @@ function bind() {
     if (rows.length === 1) rows[0].querySelector('button')?.click();
   });
   $('m-refresh').onclick = () => loadModels({ refresh: true });
+  $('m-keys').onclick = () => toggleKeys();
+  $('k-close').onclick = () => toggleKeys(false);
 
   for (const k of FILTERS) $(`f-${k}`).onclick = () => toggleFilter(k);
   $('fold-all').onclick = () => setFoldAll(false);

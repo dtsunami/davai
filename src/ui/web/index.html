@@ -102,9 +102,36 @@
                 <option value="context">largest context</option>
               </select>
               <button id="m-refresh" class="chip plain" title="re-fetch the provider catalog">refresh</button>
+              <label class="toggle" title="also remember this choice for new sessions">
+                <input id="m-persist" type="checkbox" /> remember
+              </label>
+              <button id="m-keys" class="chip plain" title="add or replace provider API keys">keys</button>
             </div>
             <div id="m-status" class="muted"></div>
           </div>
+
+          <!--
+            Keys live inside the models tab because "enable a provider" and "pick a
+            model" are one task interrupted by a missing credential, not two features.
+            Collapsed by default: most sessions never need it.
+          -->
+          <div id="keys" class="keys" hidden>
+            <div class="keys-head">
+              <strong>provider keys</strong>
+              <label class="toggle" title="write to $DAVAI_HOME/.env instead of this session only">
+                <input id="k-persist" type="checkbox" /> save to .env
+              </label>
+              <span class="spacer"></span>
+              <button id="k-close" class="chip plain">close</button>
+            </div>
+            <div id="k-list" class="k-list"></div>
+            <p class="muted k-note">
+              Keys are sent to davai over this connection and never broadcast back — the
+              transcript shows only a masked description. Saving writes
+              $DAVAI_HOME/.env on the machine davai runs on.
+            </p>
+          </div>
+
           <div id="m-efforts" class="efforts"></div>
           <div id="m-list" class="m-list"></div>
         </section>

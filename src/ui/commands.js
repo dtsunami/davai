@@ -16,7 +16,7 @@ import { formatTokens, glyphs } from './theme.js';
 
 const HELP = `Commands
   sh <cmd>            run a shell command; output is added to context (sudo asks for a password)
-  /model [id|query]   model and settings pane (with live OpenRouter search)
+  /model [id|query]   model and settings pane (--save to remember it for next time)
   /tps                token/s and time-to-first-token, per turn and per model (also ctrl+t)
   /context            context breakdown (also ctrl+g)
   /artifacts          artifacts from this session (also ctrl+a)
@@ -24,6 +24,7 @@ const HELP = `Commands
   /compact            compact the context now
   /sessions           recent sessions
   /stream [n]         streamed reasoning + text for a turn, read back from disk
+  /keys [provider]    enable a provider: see, paste or save API keys
   /config             resolved configuration
   /prompts [export]   where each prompt comes from; export writes them to ./.prompts
   /clear              drop conversation context, keep grounding
@@ -69,6 +70,28 @@ export function commandList() {
     out.push({ name, usage, desc: m[2].trim() });
   }
   return out;
+}
+
+/**
+ * " (from <source>)" for a variable, or '' when nothing set it. Reads cfg.varOrigins,
+ * which holds sources only and never values.
+ */
+function origin(cfg, name) {
+  const from = cfg.varOrigins?.[name];
+  if (!from) return '';
+  const home = `${cfg.home}/.env`;
+  const label = from === home ? '~/.davai/.env' : from;
+  return `  (from ${label})`;
+}
+
+/** Which providers are usable, for /config. Never a key, only whether there is one. */
+function describeKeys(cfg) {
+  const have = Object.keys(cfg.keys || {}).filter((p) => cfg.keys[p]);
+  const missing = Object.keys(cfg.keys || {}).filter((p) => !cfg.keys[p]);
+  return (
+    (have.length ? have.join(', ') : 'none') +
+    (missing.length ? `  (no key: ${missing.join(', ')} — /keys to add one)` : '')
+  );
 }
 
 function truncate(text, max) {
@@ -183,7 +206,13 @@ export async function handleCommand(text, deps) {
       return { handled: true };
 
     case 'model': {
-      if (!arg) {
+      // --save additionally remembers the choice in settings.json. Without it a switch
+      // is for this session only, which is the common case and the safe default: a
+      // model tried once should not become the default for every project.
+      const save = /(^|\s)--save(\s|$)/.test(arg);
+      const argText = arg.replace(/(^|\s)--save(\s|$)/, ' ').trim();
+      if (!argText) {
+        session.modelPersist = save;
         setPane('model');
         return { handled: true };
       }
@@ -192,16 +221,24 @@ export async function handleCommand(text, deps) {
       // The switch itself is session/models.js, shared with the pane and the browser.
       const { PROVIDERS, findModel } = await import('../config/models.js');
       const { applyModelChange } = await import('../session/models.js');
-      const trimmed = arg.trim();
+      const trimmed = argText;
       if (PROVIDERS.includes(trimmed.toLowerCase())) {
         const nextProv = trimmed.toLowerCase();
         if (!cfg.keys?.[nextProv]) {
-          push({ type: 'warning', message: `no API key configured for ${nextProv}` });
+          // Naming a provider with no key is the single most common way an operator
+          // asks to enable one. Send them where that happens instead of refusing.
+          push({
+            type: 'warning',
+            message: `no API key for ${nextProv} — /keys ${nextProv} to add one`,
+          });
+          session.keysProvider = nextProv;
+          setPane('keys');
           return { handled: true };
         }
         // Browsed, not switched: naming a provider alone says nothing about which of its
         // models to run, and the pane's enter is what commits.
         session.modelBrowse = nextProv;
+        session.modelPersist = save;
         setPane('model');
         return { handled: true };
       }
@@ -214,11 +251,17 @@ export async function handleCommand(text, deps) {
             ? 'openrouter'
             : cfg.provider;
         try {
-          const r = await applyModelChange(session, { provider: targetProvider, model: trimmed });
+          const r = await applyModelChange(
+            session,
+            { provider: targetProvider, model: trimmed },
+            { persist: save },
+          );
           for (const message of r.notices) push({ type: 'warning', message });
           push({
             type: 'notice',
-            message: `model ${glyphs.arrow} ${trimmed} (${r.provider}, ${formatTokens(r.contextLimit)} context)`,
+            message:
+              `model ${glyphs.arrow} ${trimmed} (${r.provider}, ${formatTokens(r.contextLimit)} context)` +
+              (r.persisted ? ' · saved as the default' : ' · this session only'),
           });
           refresh();
         } catch (err) {
@@ -227,6 +270,7 @@ export async function handleCommand(text, deps) {
         return { handled: true };
       }
       session.modelSearch = trimmed;
+      session.modelPersist = save;
       setPane('model');
       return { handled: true };
     }
@@ -524,11 +568,98 @@ export async function handleCommand(text, deps) {
       return { handled: true };
     }
 
+    /**
+     * `/keys` — see which providers are usable; `/keys <provider> <key>` makes one so.
+     *
+     * A key typed at the prompt is in the scrollback and in history.jsonl, so the bare
+     * form opens the pane, where the input is masked and never recorded. The inline form
+     * stays because it is the only thing that works over a pipe in headless mode, and it
+     * scrubs itself from history below.
+     */
+    case 'keys':
+    case 'providers': {
+      const { keyState, setProviderKey, clearProviderKey } = await import('../session/keys.js');
+      const words = arg.split(/\s+/).filter(Boolean);
+      const save = words.includes('--save');
+      const noVerify = words.includes('--no-verify');
+      const rest2 = words.filter((w) => !w.startsWith('--'));
+      const [who, secret] = rest2;
+
+      if (!who) {
+        const rows = keyState(cfg).map((p) => {
+          const mark = p.current ? glyphs.check : ' ';
+          const status = p.hasKey ? `${p.masked}  (${p.varName} from ${p.origin})` : 'no key';
+          return `  ${mark} ${p.name.padEnd(12)} ${status}`;
+        });
+        push({
+          type: 'info',
+          text: [
+            'Providers',
+            ...rows,
+            '',
+            `  /keys <provider>            open the pane and paste a key (not echoed)`,
+            `  /keys <provider> <key>      set it for this session`,
+            `  /keys <provider> <key> --save   also write it to ${cfg.home}/.env`,
+            `  /keys <provider> --clear    forget it`,
+          ].join('\n'),
+        });
+        return { handled: true };
+      }
+
+      if (words.includes('--clear')) {
+        try {
+          const r = clearProviderKey(session, { provider: who, persist: save });
+          push({
+            type: 'notice',
+            message: `${r.provider} key cleared${r.persisted ? ` and removed from ${r.file}` : ' for this session'}`,
+          });
+          refresh();
+        } catch (err) {
+          push({ type: 'error', message: err.message });
+        }
+        return { handled: true };
+      }
+
+      if (!secret) {
+        session.keysProvider = who.toLowerCase();
+        session.keysPersist = save;
+        setPane('keys');
+        return { handled: true };
+      }
+
+      try {
+        const r = await setProviderKey(session, {
+          provider: who,
+          key: secret,
+          persist: save,
+          verify: !noVerify,
+        });
+        for (const message of r.warnings) push({ type: 'warning', message });
+        push({
+          type: 'notice',
+          message:
+            `${r.provider} key set (${r.masked})` +
+            (r.persisted ? ` · saved to ${r.file} as ${r.varName}` : ' · this session only'),
+        });
+        refresh();
+      } catch (err) {
+        push({ type: 'error', message: `key not set: ${err.message}` });
+      }
+      // Nothing to scrub from history.jsonl: dispatch records a line only after
+      // handleCommand declines it, so a slash command is never written to disk. The
+      // key does remain in this process's up-arrow buffer and in the scrollback,
+      // which is why the bare `/keys <provider>` form exists.
+      return { handled: true };
+    }
+
     case 'config': {
       const lines = [
         'Configuration',
-        `  provider       ${cfg.provider}`,
-        `  model          ${cfg.model.id}${cfg.model.unverified ? ' (unverified — not in the local registry)' : ''}`,
+        // Where a setting came from is half the answer whenever it is not what the
+        // operator expected: settings.json is now the weakest layer, not the strongest,
+        // and "model, from .env" vs "model, from settings.json" is the whole difference.
+        `  provider       ${cfg.provider}${origin(cfg, 'DAVAI_PROVIDER')}`,
+        `  model          ${cfg.model.id}${origin(cfg, 'DAVAI_MODEL')}${cfg.model.unverified ? ' (unverified — not in the local registry)' : ''}`,
         `  context limit  ${formatTokens(cfg.contextLimit)}`,
         `  max output     ${formatTokens(cfg.maxTokens)}`,
         `  effort         ${cfg.effort}`,
@@ -540,6 +671,7 @@ export async function handleCommand(text, deps) {
         `  working dir    ${cfg.cwd}`,
         `  read-only dirs ${cfg.roDirs.length ? cfg.roDirs.join(', ') : '(none)'}`,
         `  .env loaded    ${cfg.envFiles.length ? cfg.envFiles.join(', ') : '(none)'}`,
+        `  providers      ${describeKeys(cfg)}`,
         `  session        ${log.id} ${glyphs.arrow} ${log.dir}`,
       ];
       push({ type: 'info', text: lines.join('\n') });

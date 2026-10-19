@@ -5,6 +5,7 @@ import { Composer } from './Composer.jsx';
 import { StatusBar } from './StatusBar.jsx';
 import { ContextPane } from './ContextPane.jsx';
 import { ModelPane } from './ModelPane.jsx';
+import { KeyPane } from './KeyPane.jsx';
 import { ArtifactPane } from './ArtifactPane.jsx';
 import { ApprovalPane } from './ApprovalPane.jsx';
 import { ThroughputPane } from './ThroughputPane.jsx';
@@ -32,7 +33,8 @@ export function App({ session, initialInput }) {
   const [live, setLive] = useState('');
   const [thinking, setThinking] = useState('');
   const [status, setStatus] = useState(null);
-  const [pane, setPane] = useState(null); // 'context' | 'model' | 'artifacts'
+  // 'context' | 'model' | 'keys' | 'artifacts' | 'tps'
+  const [pane, setPane] = useState(null);
   const [approval, setApproval] = useState(null);
   const [busy, setBusy] = useState(false);
   const [stats, setStats] = useState({ turns: 0, ops: 0, cost: 0 });
@@ -434,6 +436,9 @@ export function App({ session, initialInput }) {
       ) : null}
       {pane === 'model' ? (
         <ModelPane session={session} onClose={() => setPane(null)} push={push} />
+      ) : null}
+      {pane === 'keys' ? (
+        <KeyPane session={session} onClose={() => setPane(null)} push={push} />
       ) : null}
       {pane === 'artifacts' ? (
         <ArtifactPane

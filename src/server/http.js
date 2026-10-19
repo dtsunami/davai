@@ -26,6 +26,7 @@ import {
   serializeModel,
   applyModelChange,
 } from '../session/models.js';
+import { keyState, setProviderKey, clearProviderKey } from '../session/keys.js';
 import { suggestName } from '../context/artifacts.js';
 
 const require = createRequire(import.meta.url);
@@ -99,6 +100,8 @@ export function createWebServer({
     }
     if (req.method === 'GET' && url.pathname === '/api/models') return getModels(res, url);
     if (req.method === 'POST' && url.pathname === '/api/model') return postModel(req, res);
+    if (req.method === 'GET' && url.pathname === '/api/keys') return json(res, { providers: keyState(session.cfg) });
+    if (req.method === 'POST' && url.pathname === '/api/keys') return postKeys(req, res);
     if (req.method === 'GET' && url.pathname === '/api/artifacts') return json(res, artifacts());
     if (req.method === 'GET' && url.pathname.startsWith('/api/artifact/')) {
       return getArtifact(url, res);
@@ -241,11 +244,11 @@ export function createWebServer({
     body(req, async (err, data) => {
       if (err) return json(res, { error: err.message }, 400);
       try {
-        const r = await applyModelChange(session, {
-          provider: data?.provider,
-          model: data?.model,
-          effort: data?.effort,
-        });
+        const r = await applyModelChange(
+          session,
+          { provider: data?.provider, model: data?.model, effort: data?.effort },
+          { persist: Boolean(data?.persist) },
+        );
         for (const message of r.notices) {
           bus.publish('transcript', { type: 'warning', message, origin: 'web' });
         }
@@ -256,6 +259,69 @@ export function createWebServer({
         });
         bus.publish('session-changed', null);
         json(res, { ok: true, provider: r.provider, model: r.model.id, effort: r.effort });
+      } catch (e) {
+        json(res, { error: e.message }, 400);
+      }
+    });
+  }
+
+  /**
+   * Set or clear a provider key.
+   *
+   * The request body carries a secret, which is the one place in this server where that
+   * is true. Three consequences, all enforced here rather than left to the client:
+   * the value is never echoed back (only `maskKey`'s description of it), it is never
+   * written to the event stream — where it would be replayed to every attached browser
+   * and sit in the SSE backlog — and the response says where it was stored.
+   *
+   * `persist` writes $DAVAI_HOME/.env. That is a genuine filesystem write triggered by
+   * an HTTP request, which is why the sidecar's token is mandatory and the bind is
+   * loopback by default.
+   */
+  function postKeys(req, res) {
+    body(req, async (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      try {
+        if (data?.clear) {
+          const r = clearProviderKey(session, {
+            provider: data.provider,
+            persist: Boolean(data.persist),
+          });
+          bus.publish('transcript', {
+            type: 'notice',
+            message: `${r.provider} key cleared${r.persisted ? ' and removed from .env' : ' for this session'}`,
+            origin: 'web',
+          });
+          bus.publish('session-changed', null);
+          return json(res, { ok: true, providers: keyState(session.cfg) });
+        }
+
+        const r = await setProviderKey(session, {
+          provider: data?.provider,
+          key: data?.key,
+          persist: Boolean(data?.persist),
+          verify: data?.verify !== false,
+        });
+        for (const message of r.warnings) {
+          bus.publish('transcript', { type: 'warning', message, origin: 'web' });
+        }
+        // The masked form is safe to broadcast; the key itself never reaches the bus.
+        bus.publish('transcript', {
+          type: 'notice',
+          message:
+            `${r.provider} key set (${r.masked})` +
+            (r.persisted ? ` — saved to .env as ${r.varName}` : ' — this session only'),
+          origin: 'web',
+        });
+        bus.publish('session-changed', null);
+        json(res, {
+          ok: true,
+          provider: r.provider,
+          masked: r.masked,
+          persisted: r.persisted,
+          varName: r.varName,
+          providers: keyState(session.cfg),
+        });
       } catch (e) {
         json(res, { error: e.message }, 400);
       }

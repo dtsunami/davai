@@ -121,12 +121,18 @@ export function serializeModel(m) {
  * `openaiApi` are copied across afterwards. Leaving them at the old provider's values is
  * how a switch to openrouter could keep sending requests to a custom OpenAI endpoint.
  *
+ * Session-scoped by default. `persist: true` also writes settings.json, which is the
+ * floor the next session starts from — but only the floor: a DAVAI_MODEL in a .env
+ * outranks it, so persisting under one is reported as having no effect next run rather
+ * than appearing to have worked. `/keys` and the key pane are where a .env gets edited.
+ *
  * @param {object} session
  * @param {{provider?: string, model?: string, effort?: string}} want
+ * @param {{persist?: boolean}} [opts]
  * @returns {Promise<{provider: string, model: object, effort: string, contextLimit: number,
- *   notices: string[]}>}
+ *   notices: string[], persisted: boolean}>}
  */
-export async function applyModelChange(session, want = {}) {
+export async function applyModelChange(session, want = {}, opts = {}) {
   const { cfg, ledger, agent } = session;
 
   const provider = (want.provider || cfg.provider).trim().toLowerCase();
@@ -147,6 +153,8 @@ export async function applyModelChange(session, want = {}) {
   ).trim();
   if (!model) throw new Error('no model id');
 
+  // As `overrides`: an explicit switch beats the .env for this session, exactly as a
+  // command-line flag would. Persisting it is a separate, weaker act.
   const next = loadConfig({
     cwd: cfg.cwd,
     overrides: { DAVAI_PROVIDER: provider, DAVAI_MODEL: model, DAVAI_EFFORT: effort },
@@ -164,7 +172,36 @@ export async function applyModelChange(session, want = {}) {
   ledger.limit = cfg.contextLimit;
   agent.provider = createProvider(cfg);
 
-  saveSettings(cfg.home, { provider, model, effort });
+  // The live config also carries the new key origin, so an auth failure right after a
+  // switch names the variable that supplied the key it actually used.
+  cfg.keyOrigins = next.keyOrigins;
+  cfg.varOrigins = next.varOrigins;
 
-  return { provider, model: cfg.model, effort, contextLimit: cfg.contextLimit, notices };
+  let persisted = false;
+  if (opts.persist) {
+    saveSettings(cfg.home, { provider, model, effort });
+    persisted = true;
+    // settings.json is the floor. Saying "saved" when a .env will win next run is the
+    // same lie the old precedence told, just in the other direction.
+    const shadowed = ['DAVAI_PROVIDER', 'DAVAI_MODEL', 'DAVAI_EFFORT'].filter((v) => {
+      const from = cfg.varOrigins?.[v];
+      return from && from !== 'settings.json' && from !== 'command-line flag';
+    });
+    if (shadowed.length) {
+      notices.push(
+        `saved as the default, but ${shadowed.join(', ')} ${shadowed.length > 1 ? 'are' : 'is'} ` +
+          `set in ${cfg.varOrigins[shadowed[0]]} and will win on the next run. ` +
+          `\`/keys --save\` edits that file; this session is unaffected.`,
+      );
+    }
+  }
+
+  return {
+    provider,
+    model: cfg.model,
+    effort,
+    contextLimit: cfg.contextLimit,
+    notices,
+    persisted,
+  };
 }

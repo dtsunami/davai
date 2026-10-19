@@ -2,9 +2,16 @@
  * DAVAI_HOME resolution, .env loading, and validated config.
  *
  * Precedence, lowest to highest:
- *   $DAVAI_HOME/.env  ->  ./.env (cwd)  ->  real process environment
- *     ->  $DAVAI_HOME/settings.json  ->  CLI flags
- * (settings.json and flags arrive as `overrides`, assembled in session/bootstrap.js)
+ *   $DAVAI_HOME/settings.json  ->  $DAVAI_HOME/.env  ->  ./.env (cwd)
+ *     ->  real process environment  ->  CLI flags
+ * (settings.json arrives as `defaults` and flags as `overrides`; both are assembled
+ * in session/bootstrap.js)
+ *
+ * settings.json used to outrank every .env. A model chosen once in the /model pane
+ * therefore shadowed DAVAI_MODEL on every later run, with nothing on screen to say
+ * why the .env had stopped mattering. It is a remembered default now: the files the
+ * operator writes by hand win, and a switch made in a pane lives for the session
+ * unless it is deliberately written to .env.
  *
  * The cwd overlay exists because a per-project .env is a natural thing to reach for
  * even though DAVAI_HOME is the documented location.
@@ -163,14 +170,35 @@ function resolveBaseURL(provider, merged) {
  */
 const HOME_ONLY_VARS = ['DAVAI_BASE_URL', 'OPENAI_BASE_URL'];
 
-/** The variables each provider's key is read from, in priority order. */
-const KEY_VARS = {
-  anthropic: ['ANTHROPIC_API_KEY'],
-  openai: ['OPENAI_API_KEY'],
-  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
-  grok: ['XAI_API_KEY', 'GROK_API_KEY'],
-  openrouter: ['OPENROUTER_API_KEY'],
+/**
+ * The variables each provider's key is read from, in priority order.
+ *
+ * The DAVAI_-prefixed name comes first and is the one davai writes. The bare names are
+ * shared with every other tool on the machine — OPENAI_API_KEY in particular is read by
+ * the OpenAI SDK itself, by other CLIs, and by anything else that imports it from the
+ * environment — so "the key davai sends" and "the key my shell exports" could not be
+ * different values, and a key set for something else was silently adopted here. They
+ * stay as a fallback, because adopting them is usually what an operator wants on a
+ * first run; the prefixed name is how you override that without touching anything else.
+ *
+ * DAVAI_OPENAI_API_KEY is also why the surface selector was renamed: DAVAI_OPENAI_API
+ * and DAVAI_OPENAI_API_KEY differ by a suffix, which is a typo waiting to happen. It is
+ * DAVAI_OPENAI_SURFACE now, with the old name still honoured.
+ */
+export const KEY_VARS = {
+  anthropic: ['DAVAI_ANTHROPIC_API_KEY', 'ANTHROPIC_API_KEY'],
+  openai: ['DAVAI_OPENAI_API_KEY', 'OPENAI_API_KEY'],
+  gemini: ['DAVAI_GEMINI_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+  grok: ['DAVAI_GROK_API_KEY', 'XAI_API_KEY', 'GROK_API_KEY'],
+  openrouter: ['DAVAI_OPENROUTER_API_KEY', 'OPENROUTER_API_KEY'],
 };
+
+/** The variable davai writes when it is asked to persist a key for `provider`. */
+export function keyVarFor(provider) {
+  const names = KEY_VARS[provider];
+  if (!names) throw new Error(`unknown provider "${provider}"`);
+  return names[0];
+}
 
 /** Single-quote a string for sh. */
 function shQuote(s) {
@@ -240,7 +268,14 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 /**
  * Build the validated config. Throws with an actionable message on bad input.
- * @param {{cwd?: string, overrides?: Record<string,string>}} [opts]
+ *
+ * `defaults` are remembered preferences (settings.json) and sit below every file;
+ * `overrides` are an explicit instruction for this run (CLI flags) and sit above
+ * everything. Anything that should be beaten by a hand-written .env belongs in the
+ * first, and anything that should beat one belongs in the second.
+ *
+ * @param {{cwd?: string, defaults?: Record<string,string>,
+ *   overrides?: Record<string,string>}} [opts]
  * @returns {Config}
  */
 export function loadConfig(opts = {}) {
@@ -255,6 +290,15 @@ export function loadConfig(opts = {}) {
   // Where each merged value came from, for diagnostics. Holds sources, never values.
   /** @type {Record<string,string>} */
   const origins = {};
+
+  // The floor: remembered defaults, outranked by every file and by the environment.
+  for (const [k, v] of Object.entries(opts.defaults || {})) {
+    if (v !== undefined && v !== '') {
+      merged[k] = v;
+      origins[k] = 'settings.json';
+    }
+  }
+
   const fileVars = {};
   for (const file of [homeEnvFile, cwdEnvFile]) {
     const parsed = readEnvFile(file);
@@ -272,10 +316,10 @@ export function loadConfig(opts = {}) {
       origins[k] = 'environment';
     }
   }
-  // Explicit overrides (CLI flags, /model pane) win over everything.
+  // Explicit overrides (CLI flags, a live switch) win over everything.
   merged = { ...merged, ...(opts.overrides || {}) };
   for (const [k, v] of Object.entries(opts.overrides || {})) {
-    if (v !== undefined) origins[k] = 'settings.json / command-line flag';
+    if (v !== undefined) origins[k] = 'command-line flag';
   }
   // Run inside $DAVAI_HOME, the project .env is the home one and is trusted.
   const warnings =
@@ -304,11 +348,16 @@ export function loadConfig(opts = {}) {
 
   // A custom endpoint defaults to Chat Completions: that is what OpenAI-compatible
   // servers implement, and most (Mistral included) have no /v1/responses.
-  const openaiApi = (merged.DAVAI_OPENAI_API || (baseURL ? 'chat' : 'responses'))
+  // DAVAI_OPENAI_API is the old spelling, one suffix away from DAVAI_OPENAI_API_KEY.
+  // Still read, so an existing .env keeps working.
+  const surfaceVar = merged.DAVAI_OPENAI_SURFACE !== undefined
+    ? 'DAVAI_OPENAI_SURFACE'
+    : 'DAVAI_OPENAI_API';
+  const openaiApi = (merged[surfaceVar] || (baseURL ? 'chat' : 'responses'))
     .trim()
     .toLowerCase();
   if (!['responses', 'chat'].includes(openaiApi)) {
-    throw new Error(`DAVAI_OPENAI_API="${openaiApi}" is not valid. Expected responses or chat.`);
+    throw new Error(`${surfaceVar}="${openaiApi}" is not valid. Expected responses or chat.`);
   }
 
   const compactAt = num(merged.DAVAI_COMPACT_AT, 0.75);
@@ -333,13 +382,14 @@ export function loadConfig(opts = {}) {
     })
     .filter(Boolean);
 
-  const keys = {
-    anthropic: merged.ANTHROPIC_API_KEY,
-    openai: merged.OPENAI_API_KEY,
-    gemini: merged.GEMINI_API_KEY || merged.GOOGLE_API_KEY,
-    grok: merged.XAI_API_KEY || merged.GROK_API_KEY,
-    openrouter: merged.OPENROUTER_API_KEY,
-  };
+  // Built from KEY_VARS so the accepted names live in exactly one place. The value is
+  // taken raw, not trimmed: maskKey's "contains trailing whitespace" diagnostic is the
+  // only thing that explains a 401 on a key that looks right.
+  /** @type {Record<string,string|undefined>} */
+  const keys = {};
+  for (const [p, names] of Object.entries(KEY_VARS)) {
+    keys[p] = names.map((n) => merged[n]).find((v) => v !== undefined && String(v).trim() !== '');
+  }
   // Where the key and endpoint came from, for the auth-failure diagnostic. Names and
   // sources only; the values stay in `keys` and `baseURL`.
   const keyOrigins = {};
@@ -412,6 +462,10 @@ export function loadConfig(opts = {}) {
     keys,
     keyOrigins,
     baseURLOrigin,
+    // Every merged variable's source, names only. `/config` reads it to say which
+    // layer won, and a live switch reads it to warn that a .env will beat what it
+    // just persisted.
+    varOrigins: origins,
     envFiles,
     warnings,
   };
@@ -424,16 +478,15 @@ export function loadConfig(opts = {}) {
 export function requireKey(cfg) {
   const key = cfg.keys[cfg.provider];
   if (!key) {
-    const varName = {
-      anthropic: 'ANTHROPIC_API_KEY',
-      openai: 'OPENAI_API_KEY',
-      gemini: 'GEMINI_API_KEY',
-      grok: 'XAI_API_KEY',
-      openrouter: 'OPENROUTER_API_KEY',
-    }[cfg.provider];
+    const [preferred, ...fallbacks] = KEY_VARS[cfg.provider] || [];
     throw new Error(
       `No API key for provider "${cfg.provider}".\n` +
-        `  Set ${varName} in ${path.join(cfg.home, '.env')} or in your environment.`,
+        `  Run \`/keys\` to paste one, or set ${preferred} in ` +
+        `${path.join(cfg.home, '.env')}.\n` +
+        (fallbacks.length
+          ? `  ${fallbacks.join(' or ')} ${fallbacks.length > 1 ? 'are' : 'is'} also read, ` +
+            `if another tool already set one.`
+          : ''),
     );
   }
   return key;

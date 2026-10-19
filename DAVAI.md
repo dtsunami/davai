@@ -65,6 +65,50 @@ and remote access.
   copy in `complete.js` is why `/stream` and `/prompts` reached the help text, the
   dispatcher and the browser but could not be tab-completed in the REPL.
 
+## Configuration precedence
+
+Lowest to highest: `settings.json` → `$DAVAI_HOME/.env` → `./.env` → the real
+environment → CLI flags. A live switch (`/model`, the pane, `POST /api/model`) enters as
+an override, so it wins for the session it was made in.
+
+- `settings.json` is a *remembered default*, not an overlay. It used to sit at the top,
+  so a model chosen once in the pane shadowed `DAVAI_MODEL` on every later run with
+  nothing on screen to say why the `.env` had stopped mattering. The file an operator
+  writes by hand wins; the file davai writes as a side effect of a keypress does not.
+- Nothing is persisted unless asked: `/model --save`, `s` in the pane, the browser's
+  *remember* checkbox. `applyModelChange(session, want, { persist })` is the one path,
+  and when it saves under a `.env` that will outrank it, it says so rather than
+  reporting success.
+- `loadConfig` takes `defaults` (bottom) and `overrides` (top). Anything that should
+  lose to a hand-written `.env` belongs in the first. `cfg.varOrigins` records which
+  layer supplied each variable.
+
+## Providers and keys
+
+`/keys` lists every provider, whether it has a key, and which variable supplied it.
+`session/keys.js` owns it; `KeyPane.jsx`, `/keys` and `/api/keys` are three views over
+`keyState` / `setProviderKey` / `clearProviderKey`, the same split as `session/models.js`.
+
+- Keys are read from `DAVAI_<PROVIDER>_API_KEY` first, then the bare conventional names
+  (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`…). The bare names are shared
+  with every other tool on the machine — the OpenAI SDK reads `OPENAI_API_KEY` itself —
+  so "the key davai sends" was not separable from "the key my shell exports". The
+  prefixed name is what davai writes and what overrides that.
+- The surface selector is `DAVAI_OPENAI_SURFACE`; `DAVAI_OPENAI_API` still works. One
+  suffix apart from `DAVAI_OPENAI_API_KEY` was a typo waiting to happen.
+- A key is session-scoped unless saved. Saving writes `$DAVAI_HOME/.env` through
+  `config/envfile.js`, which edits a file rather than reserializing one: comments and
+  ordering survive, the write is atomic, and the mode is 0600. Never the project `.env`
+  — a key in a repo's `.env` is a key in a commit.
+- A key is verified before it is stored with one `models.list` call, bounded by
+  `VERIFY_TIMEOUT_MS`. The SDKs retry with backoff and some have no default timeout, so
+  an unreachable host hung the pane with its input disabled and the whole REPL looked
+  dead. A timeout counts as unverified, not rejected — being offline must not make davai
+  refuse a valid key. Esc abandons the probe, and the pane verifies before it applies so
+  abandoning really does leave nothing set.
+- A secret never reaches the bus. `/api/keys` broadcasts `maskKey`'s description only;
+  the value would otherwise sit in the SSE backlog and replay to every attached browser.
+
 ## Testing
 
 `npm test` — vitest. The ops engine, sandbox and parser are tested against temp

@@ -1,6 +1,17 @@
 /**
- * Runtime-mutable settings, persisted to $DAVAI_HOME/settings.json.
- * These are the knobs the /model pane edits; they overlay the .env config.
+ * Remembered preferences, persisted to $DAVAI_HOME/settings.json.
+ *
+ * These sit *below* every .env file, not above one. They are what davai starts with
+ * when nothing else says otherwise — the model you last chose, so a new session opens
+ * where the previous one left off — and a hand-written DAVAI_MODEL always beats them.
+ *
+ * The inversion matters because the two are written by different people. A .env is
+ * typed deliberately and read back later; settings.json is a side effect of pressing
+ * enter in a pane. When the side effect outranked the deliberate act, a model picked
+ * once silently shadowed the .env on every subsequent run.
+ *
+ * Nothing here is written unless the operator asks for it to persist. A switch made
+ * during a session lives in cfg for that session only.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,10 +63,11 @@ export function saveSettings(home, settings) {
 }
 
 /**
- * Translate persisted settings into the env-shaped overrides loadConfig expects,
- * so there is exactly one code path that validates configuration.
+ * Translate persisted settings into the env-shaped layer loadConfig expects, so there
+ * is exactly one code path that validates configuration. Passed as `defaults`, which
+ * is the bottom of the precedence stack rather than the top.
  */
-export function settingsToOverrides(settings) {
+export function settingsToDefaults(settings) {
   const o = {};
   if (settings.provider) o.DAVAI_PROVIDER = settings.provider;
   if (settings.model) o.DAVAI_MODEL = settings.model;

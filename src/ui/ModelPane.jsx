@@ -74,11 +74,20 @@ export function ModelPane({ session, onClose, push }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, q, browsing]);
 
+  // Whether a choice made here is remembered for the next session. Off by default:
+  // trying a model should not redefine what davai starts as. `/model --save` arrives
+  // with it on, and `s` toggles it.
+  const [persist, setPersist] = useState(() => Boolean(session.modelPersist));
+  useEffect(() => { delete session.modelPersist; }, [session]);
+
   const change = async (want, describe) => {
     try {
-      const r = await applyModelChange(session, want);
+      const r = await applyModelChange(session, want, { persist });
       for (const message of r.notices) push({ type: 'warning', message });
-      push({ type: 'notice', message: describe(r) });
+      push({
+        type: 'notice',
+        message: `${describe(r)}${r.persisted ? ' · saved as the default' : ''}`,
+      });
       onClose();
     } catch (err) {
       push({ type: 'error', message: `could not switch: ${err.message}` });
@@ -169,6 +178,20 @@ export function ModelPane({ session, onClose, push }) {
 
     if (input === 'r' && tab === 'models') {
       refreshModels();
+      return;
+    }
+
+    if (input === 's') {
+      setPersist((p) => !p);
+      return;
+    }
+
+    // A provider with no key cannot be switched to, and the pane is where an operator
+    // notices that. `enter` on it opens the one place that fixes it.
+    if (input === 'K' || (key.return && !cfg.keys?.[browsing])) {
+      session.keysProvider = browsing;
+      onClose();
+      push({ type: 'notice', message: `/keys ${browsing} — add a key to use it` });
       return;
     }
 
@@ -270,7 +293,13 @@ export function ModelPane({ session, onClose, push }) {
       <Box marginTop={1} flexDirection="column">
         <Text color={colors.dim}>
           enter apply {glyphs.bullet} {tab === 'models' ? `/ search/custom id ${glyphs.bullet} r refresh ${glyphs.bullet} ` : ''}
+          s {persist ? 'session only' : 'remember'} {glyphs.bullet} K keys {glyphs.bullet}{' '}
           tab {tab === 'models' ? 'settings' : 'models'} {glyphs.bullet} esc close
+        </Text>
+        <Text color={persist ? colors.warn : colors.dim}>
+          {persist
+            ? 'a choice here is remembered as the default for new sessions'
+            : 'a choice here applies to this session only'}
         </Text>
         <Text color={colors.dim}>
           max output {formatTokens(cfg.maxTokens)} {glyphs.bullet} compact at{' '}

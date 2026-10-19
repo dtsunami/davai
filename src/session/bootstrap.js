@@ -3,7 +3,7 @@
  * identical machinery.
  */
 import { loadConfig, requireKey, ensureHome, applyModelLimits } from '../config/env.js';
-import { loadSettings, settingsToOverrides } from '../config/settings.js';
+import { loadSettings, settingsToDefaults } from '../config/settings.js';
 import { createProvider } from '../providers/index.js';
 import { refineModel } from '../config/models.js';
 import { Sandbox } from '../agent/sandbox.js';
@@ -33,9 +33,11 @@ export async function createSession(opts = {}) {
   // different tree than the transcript talks about.
   const prior = opts.resume ? resolvePrior(home, opts.resume) : null;
 
+  // Remembered preferences go in as `defaults` — under the .env files, not over them.
   const cfg = loadConfig({
     cwd: opts.cwd || prior?.cwd,
-    overrides: { ...settingsToOverrides(settings), ...(opts.overrides || {}) },
+    defaults: settingsToDefaults(settings),
+    overrides: opts.overrides || {},
   });
   const apiKey = requireKey(cfg);
   ensureHome(cfg);
