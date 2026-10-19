@@ -132,10 +132,43 @@ describe('routes', () => {
     expect(d.context.rows).toHaveLength(1);
   });
 
-  it('returns raw per-turn perf rows for the client to aggregate', async () => {
+  it('returns raw per-turn perf rows and session accumulator for the client', async () => {
+    let keystroked = false;
+    session.throughput.recordKeystroke = () => { keystroked = true; };
+    session.throughput.sessionSummary = () => ({
+      startedAt: 500,
+      now: 3500,
+      elapsedMs: 3000,
+      state: 'user-idle',
+      totals: { modelMs: 2000, opsMs: 0, userTypingMs: 200, userIdleMs: 800 },
+      phases: [],
+    });
+    session.throughput.turns[0].effort = 'high';
+    session.throughput.turns[0].maxTokens = 32000;
+    session.throughput.turns[0].contextLimit = 1_000_000;
+
+    const ty = await fetch(url('/api/typing'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: '{}',
+    });
+    expect(ty.status).toBe(200);
+    expect(keystroked).toBe(true);
+
     const d = await (await fetch(url('/api/perf'), { headers: auth() })).json();
     expect(d.turns).toHaveLength(1);
-    expect(d.turns[0]).toMatchObject({ turn: 1, ttftMs: 500, durationMs: 2000, tokens: 300 });
+    expect(d.turns[0]).toMatchObject({
+      turn: 1,
+      provider: 'anthropic',
+      model: 'claude-opus-5',
+      effort: 'high',
+      maxTokens: 32000,
+      contextLimit: 1_000_000,
+      ttftMs: 500,
+      durationMs: 2000,
+      tokens: 300,
+    });
+    expect(d.session).toMatchObject({ state: 'user-idle', elapsedMs: 3000 });
   });
 
   it('serves the command table so the web client cannot drift from the REPL', async () => {

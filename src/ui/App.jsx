@@ -138,6 +138,9 @@ export function App({ session, initialInput }) {
         turn: agent.stats.turns + 1,
         model: session.cfg.model.id,
         provider: session.cfg.provider,
+        effort: session.cfg.model.effort ? session.cfg.effort : null,
+        maxTokens: session.cfg.maxTokens ?? null,
+        contextLimit: session.cfg.contextLimit ?? null,
       });
     };
     const onTurnEnd = ({ text, ttftMs, durationMs }) => {
@@ -154,10 +157,12 @@ export function App({ session, initialInput }) {
       setStatus(null);
     };
     const onOpsParsed = (ops) => {
+      throughput.startOps({ ops: ops.length });
       setStatus(`running ${ops.length} op${ops.length > 1 ? 's' : ''}`);
       push({ type: 'ops', ops });
     };
     const onOpsResult = ({ outcome, ops }) => {
+      throughput.endOps();
       setStatus(null);
       push({ type: 'ops-result', outcome, ops });
       // Ops land between usage events, so without this the counter lags a whole turn.

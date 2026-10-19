@@ -41,7 +41,7 @@
       </header>
 
       <div id="perf-pop" class="pop" hidden>
-        <div class="pop-head">recent turns <span class="muted">· click for the full pane</span></div>
+        <div class="pop-head">recent turns <span id="pop-state" class="muted"></span> <span class="muted">· click for the full pane</span></div>
         <div id="pop-tps"></div>
         <div id="pop-ttft"></div>
       </div>
@@ -67,11 +67,24 @@
         </section>
 
         <section id="view-perf" class="view" hidden>
+          <div id="perf-acc" class="perf-acc">
+            <div class="perf-acc-head">
+              <strong>session accumulator</strong>
+              <span id="perf-state" class="tag"></span>
+              <span class="spacer"></span>
+              <span id="perf-elapsed" class="muted"></span>
+            </div>
+            <div id="perf-bar" class="perf-bar"></div>
+            <div id="perf-totals" class="perf-totals"></div>
+            <div id="perf-timeline" class="perf-timeline"></div>
+          </div>
           <div class="perf-head">
             <label for="perf-turn">turn detail</label>
             <select id="perf-turn"></select>
+            <span id="perf-turn-meta" class="muted"></span>
             <span id="perf-note" class="muted"></span>
           </div>
+          <div id="perf-point-meta" class="perf-point-meta"></div>
           <div class="chart-wrap"><div id="chart-turn"></div></div>
           <div class="chart-wrap"><div id="chart-tps"></div></div>
           <div class="chart-wrap"><div id="chart-ttft"></div></div>

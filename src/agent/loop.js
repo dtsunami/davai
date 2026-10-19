@@ -532,6 +532,9 @@ export class Agent extends EventEmitter {
       this.log.event('assistant', {
         text,
         ...(thinking ? { thinking } : {}),
+        provider: this.cfg?.provider,
+        model: this.cfg?.model?.id,
+        effort: this.cfg?.model?.effort ? effort : null,
         usage,
         stop: stop?.reason,
         // Timing is logged with the turn rather than recomputed later from stream.jsonl.
@@ -541,7 +544,7 @@ export class Agent extends EventEmitter {
         ...(ttftMs != null ? { ttftMs } : {}),
         ...(durationMs != null ? { durationMs } : {}),
         ...(toolCalls.length ? { toolCalls } : {}),
-        ...(demotion ? { effort, demotions: demotion } : {}),
+        ...(demotion ? { demotions: demotion } : {}),
       });
       return { text, thinking, usage, stop, toolCalls, ttftMs, durationMs };
     }

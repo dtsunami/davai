@@ -1072,16 +1072,32 @@ const fmtBytes = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}kB` : `${n}B`);
 
 const perf = {
   turns: [],
+  session: null,
   /** Live estimate, char-derived: the provider's token count only arrives at turn end. */
   liveTps: 0,
   chars: 0,
   timer: null,
+  paneTimer: null,
+  lastTypingPost: 0,
 };
+
+function recordLocalTyping() {
+  const now = Date.now();
+  if (perf.session) {
+    perf.session.state = 'user-typing';
+    perf.session.lastLocalTypingAt = now;
+  }
+  if (now - perf.lastTypingPost > 1000) {
+    perf.lastTypingPost = now;
+    api('/api/typing', {}).catch(() => {});
+  }
+}
 
 async function refreshPerf() {
   try {
     const d = await api('/api/perf');
     perf.turns = d.turns || [];
+    perf.session = d.session ? { ...d.session, fetchedAt: Date.now() } : null;
   } catch { /* leave the last good series up */ }
   drawSpark();
   if (!$('perf-pop').hidden) drawPop();
@@ -1115,6 +1131,28 @@ const turnTps = (t) =>
   t.durationMs && t.ttftMs != null && t.durationMs > t.ttftMs
     ? t.tokens / ((t.durationMs - t.ttftMs) / 1000)
     : 0;
+
+function fmtDuration(ms) {
+  const sec = Math.max(0, ms || 0) / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  if (m < 60) return `${m}m ${String(s).padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+function describeTurnConfig(t) {
+  if (!t) return '';
+  const provModel = [t.provider, t.model].filter(Boolean).join('/') || 'unknown model';
+  const parts = [`turn ${t.turn}`, provModel];
+  if (t.effort) parts.push(`effort ${t.effort}`);
+  if (t.contextTokens) parts.push(`${fmtTokens(t.contextTokens)} ctx`);
+  if (t.contextLimit) parts.push(`limit ${fmtTokens(t.contextLimit)}`);
+  if (t.maxTokens) parts.push(`max ${fmtTokens(t.maxTokens)} out`);
+  if (t.startedAt) parts.push(new Date(t.startedAt).toLocaleTimeString());
+  return parts.join(' · ');
+}
 
 function sparkSeries() {
   const hist = perf.turns.map(turnTps);
@@ -1155,25 +1193,150 @@ function drawSpark() {
   g.stroke();
 }
 
-/** Shared uPlot options. uPlot is optional: if it did not load, the panels stay empty. */
-const AXES = () => [
-  { stroke: '#6b7487', grid: { stroke: '#1e2430' }, ticks: { stroke: '#1e2430' } },
+/**
+ * Shared uPlot options.
+ *
+ * Notice `scales: { x: { time: false } }`! uPlot defaults `scales.x.time` to `true`, which
+ * interprets x values as Unix epoch seconds and formats turn numbers (1, 2, 3...) or
+ * intra-turn elapsed seconds (0, 1, 2...) as 1970-01-01 00:00:01 UTC — i.e.
+ * "12/31/69 4:00pm" in US Pacific time.
+ */
+const AXES = (xFmt) => [
+  {
+    stroke: '#6b7487',
+    grid: { stroke: '#1e2430' },
+    ticks: { stroke: '#1e2430' },
+    ...(xFmt ? { values: (_u, splits) => splits.map(xFmt) } : {}),
+  },
   { stroke: '#6b7487', grid: { stroke: '#1e2430' }, ticks: { stroke: '#1e2430' } },
 ];
 
-function chartOpts({ title, width, height, series }) {
+function chartOpts({ title, width, height, xLabel = 'turn', xValue, xAxisFmt, series, onHover }) {
   return {
     title,
     width,
     height,
-    series: [{ label: 'x' }, ...series],
-    axes: AXES(),
-    legend: { show: series.length > 1 },
+    scales: { x: { time: false } },
+    series: [
+      {
+        label: xLabel,
+        ...(xValue ? { value: xValue } : {}),
+      },
+      ...series,
+    ],
+    axes: AXES(xAxisFmt),
+    legend: { show: true },
     cursor: { y: false },
+    ...(onHover
+      ? {
+          hooks: {
+            setCursor: [
+              (u) => {
+                const idx = u.cursor.idx;
+                if (idx != null && idx >= 0) onHover(idx);
+              },
+            ],
+          },
+        }
+      : {}),
   };
 }
 
 function hasPlot() { return typeof uPlot !== 'undefined'; }
+
+function turnXValue(_u, v, _sIdx, idx) {
+  if (idx == null || !perf.turns[idx]) return v == null ? '—' : `#${v}`;
+  return describeTurnConfig(perf.turns[idx]);
+}
+
+function turnAxisFmt(v) {
+  return Number.isInteger(v) ? `#${v}` : '';
+}
+
+// --- perf: session accumulator ---
+
+function renderSessionAccumulator() {
+  const s = perf.session;
+  if (!s) return;
+  const extraMs = Math.max(0, Date.now() - (s.fetchedAt || Date.now()));
+  const totals = { ...(s.totals || { modelMs: 0, opsMs: 0, userTypingMs: 0, userIdleMs: 0 }) };
+  let liveState = s.state || (state.busy ? 'model' : 'user-idle');
+  if (state.busy) {
+    liveState = 'model';
+    totals.modelMs += extraMs;
+  } else if (s.lastLocalTypingAt && Date.now() - s.lastLocalTypingAt <= 5000) {
+    liveState = 'user-typing';
+    totals.userTypingMs += extraMs;
+  } else if (liveState === 'user-typing' && extraMs <= 5000) {
+    totals.userTypingMs += extraMs;
+  } else {
+    if (!state.busy) liveState = 'user-idle';
+    totals.userIdleMs += extraMs;
+  }
+  const elapsedMs = Math.max(
+    1,
+    (s.elapsedMs || 0) + extraMs,
+    totals.modelMs + totals.opsMs + totals.userTypingMs + totals.userIdleMs,
+  );
+
+  const stateTag =
+    liveState === 'user-typing'
+      ? '*user-typing*'
+      : liveState === 'user-idle'
+        ? '*user-idle*'
+        : liveState;
+  $('perf-state').textContent = stateTag;
+  $('pop-state').textContent = `· ${stateTag}`;
+  $('perf-elapsed').textContent =
+    `started ${new Date(s.startedAt).toLocaleTimeString()} · ${fmtDuration(elapsedMs)} total`;
+
+  const bar = $('perf-bar');
+  bar.innerHTML = '';
+  const cats = [
+    { kind: 'model', label: 'model', ms: totals.modelMs },
+    { kind: 'ops', label: 'ops', ms: totals.opsMs },
+    { kind: 'user-typing', label: '*user-typing*', ms: totals.userTypingMs },
+    { kind: 'user-idle', label: '*user-idle*', ms: totals.userIdleMs },
+  ];
+  for (const c of cats) {
+    if (c.ms <= 0) continue;
+    const seg = el('div', `perf-seg ${c.kind}`);
+    const pct = (c.ms / elapsedMs) * 100;
+    seg.style.width = `${pct.toFixed(2)}%`;
+    seg.title = `${c.label}: ${fmtDuration(c.ms)} (${pct.toFixed(1)}%)`;
+    bar.appendChild(seg);
+  }
+
+  const tot = $('perf-totals');
+  tot.innerHTML = '';
+  for (const c of cats) {
+    const pct = ((c.ms / elapsedMs) * 100).toFixed(0);
+    const item = el('span');
+    item.appendChild(el('i', `perf-swatch ${c.kind}`));
+    item.appendChild(document.createTextNode(`${c.label} `));
+    item.appendChild(el('b', null, fmtDuration(c.ms)));
+    item.appendChild(document.createTextNode(` (${pct}%)`));
+    tot.appendChild(item);
+  }
+
+  const tl = $('perf-timeline');
+  tl.innerHTML = '';
+  const phases = s.phases || [];
+  for (const p of phases) {
+    const dur = Math.max(0, (p.endedAt || s.now) - (p.startedAt || s.startedAt));
+    if (dur <= 0) continue;
+    const seg = el('div', `perf-seg ${p.kind}`);
+    seg.style.width = `${((dur / elapsedMs) * 100).toFixed(2)}%`;
+    const who =
+      p.kind === 'model'
+        ? `turn #${p.turn || '?'} (${[p.provider, p.model].filter(Boolean).join('/')}${p.effort ? `, effort ${p.effort}` : ''})`
+        : p.kind === 'ops'
+          ? `${p.ops || 1} op(s)`
+          : `*${p.kind}*`;
+    seg.title = `${who} · ${fmtDuration(dur)} (${new Date(p.startedAt).toLocaleTimeString()})`;
+    tl.appendChild(seg);
+  }
+}
 
 // --- perf: hover overlay ---
 
@@ -1182,19 +1345,34 @@ let popCharts = [];
 function drawPop() {
   for (const c of popCharts) c.destroy();
   popCharts = [];
+  if (perf.session) renderSessionAccumulator();
   if (!hasPlot() || !perf.turns.length) return;
   const idx = perf.turns.map((t) => t.turn);
   const w = 340;
   popCharts.push(
     new uPlot(
-      chartOpts({ title: 'tok/s per turn', width: w, height: 110, series: [{ label: 'tok/s', stroke: '#98c379', width: 2 }] }),
+      chartOpts({
+        title: 'tok/s per turn',
+        width: w,
+        height: 110,
+        xValue: turnXValue,
+        xAxisFmt: turnAxisFmt,
+        series: [{ label: 'tok/s', stroke: '#98c379', width: 2 }],
+      }),
       [idx, perf.turns.map(turnTps)],
       $('pop-tps'),
     ),
   );
   popCharts.push(
     new uPlot(
-      chartOpts({ title: 'ttft (s)', width: w, height: 110, series: [{ label: 'ttft', stroke: '#e5c07b', width: 2 }] }),
+      chartOpts({
+        title: 'ttft (s)',
+        width: w,
+        height: 110,
+        xValue: turnXValue,
+        xAxisFmt: turnAxisFmt,
+        series: [{ label: 'ttft', stroke: '#e5c07b', width: 2 }],
+      }),
       [idx, perf.turns.map((t) => (t.ttftMs ?? 0) / 1000)],
       $('pop-ttft'),
     ),
@@ -1218,20 +1396,42 @@ function closePop() {
 let paneCharts = [];
 let paneDraw = 0;
 
+function showPointMeta(idx) {
+  const t = perf.turns[idx];
+  if (!t) return;
+  $('perf-point-meta').textContent =
+    `${describeTurnConfig(t)} · ${turnTps(t).toFixed(1)} tok/s · ttft ${((t.ttftMs ?? 0) / 1000).toFixed(2)}s · ${t.tokens || 0} out tok`;
+}
+
 function drawPane() {
   const token = ++paneDraw;
   for (const c of paneCharts) c.destroy();
   paneCharts = [];
+  renderSessionAccumulator();
+
   const sel = $('perf-turn');
   const prev = sel.value;
   sel.innerHTML = '';
   for (const t of perf.turns) {
-    const o = el('option', null, `turn ${t.turn} · ${t.model || ''}`);
+    const label = [
+      `turn ${t.turn}`,
+      [t.provider, t.model].filter(Boolean).join('/'),
+      t.effort ? `effort ${t.effort}` : null,
+    ].filter(Boolean).join(' · ');
+    const o = el('option', null, label);
     o.value = String(t.turn);
     sel.appendChild(o);
   }
   if (prev && perf.turns.some((t) => String(t.turn) === prev)) sel.value = prev;
   else if (perf.turns.length) sel.value = String(perf.turns[perf.turns.length - 1].turn);
+
+  const selectedTurn = perf.turns.find((x) => String(x.turn) === sel.value) || perf.turns.at(-1);
+  $('perf-turn-meta').textContent = selectedTurn ? describeTurnConfig(selectedTurn) : '';
+  if (selectedTurn) {
+    showPointMeta(perf.turns.indexOf(selectedTurn));
+  } else {
+    $('perf-point-meta').textContent = '';
+  }
 
   if (!hasPlot()) {
     $('perf-note').textContent = 'uplot is not installed — plots unavailable';
@@ -1244,15 +1444,39 @@ function drawPane() {
   const idx = perf.turns.map((t) => t.turn);
 
   paneCharts.push(new uPlot(
-    chartOpts({ title: 'tokens/sec (streaming)', width: w, height: 190, series: [{ label: 'tok/s', stroke: '#98c379', width: 2, points: { show: perf.turns.length < 40 } }] }),
+    chartOpts({
+      title: 'tokens/sec (streaming) — hover point for model/provider/settings',
+      width: w,
+      height: 190,
+      xValue: turnXValue,
+      xAxisFmt: turnAxisFmt,
+      onHover: showPointMeta,
+      series: [{ label: 'tok/s', stroke: '#98c379', width: 2, points: { show: perf.turns.length < 40 } }],
+    }),
     [idx, perf.turns.map(turnTps)], $('chart-tps'),
   ));
   paneCharts.push(new uPlot(
-    chartOpts({ title: 'time to first token (s)', width: w, height: 190, series: [{ label: 'ttft', stroke: '#e5c07b', width: 2, points: { show: perf.turns.length < 40 } }] }),
+    chartOpts({
+      title: 'time to first token (s)',
+      width: w,
+      height: 190,
+      xValue: turnXValue,
+      xAxisFmt: turnAxisFmt,
+      onHover: showPointMeta,
+      series: [{ label: 'ttft', stroke: '#e5c07b', width: 2, points: { show: perf.turns.length < 40 } }],
+    }),
     [idx, perf.turns.map((t) => (t.ttftMs ?? 0) / 1000)], $('chart-ttft'),
   ));
   paneCharts.push(new uPlot(
-    chartOpts({ title: 'context tokens', width: w, height: 190, series: [{ label: 'ctx', stroke: '#56b6c2', width: 2, points: { show: perf.turns.length < 40 } }] }),
+    chartOpts({
+      title: 'context tokens',
+      width: w,
+      height: 190,
+      xValue: turnXValue,
+      xAxisFmt: turnAxisFmt,
+      onHover: showPointMeta,
+      series: [{ label: 'ctx', stroke: '#56b6c2', width: 2, points: { show: perf.turns.length < 40 } }],
+    }),
     [idx, perf.turns.map((t) => t.contextTokens || 0)], $('chart-ctx'),
   ));
 
@@ -1276,9 +1500,12 @@ function drawTurnDetail(w) {
   const x = b.map((p) => (p.t - b[0].t) / 1000);
   paneCharts.push(new uPlot(
     chartOpts({
-      title: `turn ${t.turn} · estimated tok/s by second`,
+      title: `${describeTurnConfig(t)} · estimated tok/s by second`,
       width: w,
       height: 190,
+      xLabel: 'elapsed (s)',
+      xValue: (_u, v) => (v == null ? '—' : `${Number(v).toFixed(1)}s`),
+      xAxisFmt: (v) => `${v}s`,
       series: [
         { label: 'total', stroke: '#98c379', width: 2 },
         { label: 'thinking', stroke: '#c678dd', width: 1 },
@@ -1427,7 +1654,23 @@ function setTab(name) {
     $(`view-${t}`).hidden = t !== name;
     $(`tab-${t}`).classList.toggle('active', t === name);
   }
-  if (name === 'perf') { closePop(); refreshPerf(); }
+  clearInterval(perf.paneTimer);
+  perf.paneTimer = null;
+  if (name === 'perf') {
+    closePop();
+    refreshPerf();
+    // Tick the session accumulator while the perf tab is open so user-idle / user-typing
+    // and model durations advance live and reflect REPL keystrokes.
+    perf.paneTimer = setInterval(() => {
+      api('/api/perf')
+        .then((d) => {
+          perf.turns = d.turns || perf.turns;
+          perf.session = d.session ? { ...d.session, fetchedAt: Date.now() } : perf.session;
+          renderSessionAccumulator();
+        })
+        .catch(() => renderSessionAccumulator());
+    }, 2000);
+  }
   if (name === 'ctx') refreshSession();
   // The catalog is cached in-process on the server, so reopening is cheap; the first
   // open is the only one that waits on the network.
@@ -1441,11 +1684,13 @@ function bind() {
   const input = $('input');
 
   input.addEventListener('input', () => {
+    recordLocalTyping();
     resize(input);
     updateComplete();
   });
 
   input.addEventListener('keydown', (e) => {
+    recordLocalTyping();
     if (completeItems.length) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();

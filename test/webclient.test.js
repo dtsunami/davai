@@ -157,3 +157,15 @@ describe('the hidden attribute actually hides', () => {
     }
   });
 });
+
+describe('perf charts do not treat turn numbers or elapsed seconds as epoch timestamps', () => {
+  /**
+   * uPlot defaults `scales.x.time` to true, which formats x=1, 2, 3 as 1970-01-01 00:00:01
+   * UTC — "12/31/69 4:00pm" in US Pacific time. `chartOpts` must disable time scaling on x.
+   */
+  it('sets scales.x.time = false in chartOpts', () => {
+    const block = /function chartOpts\([\s\S]*?\n\}/.exec(client);
+    expect(block, 'chartOpts missing in app.js').toBeTruthy();
+    expect(block[0]).toMatch(/scales:\s*\{\s*x:\s*\{\s*time:\s*false\s*\}\s*\}/);
+  });
+});

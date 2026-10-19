@@ -15,16 +15,24 @@ import { billedInput } from '../providers/base.js';
 import { glyphs } from './theme.js';
 
 const BUCKET_MS = 1000;
+const TYPING_TIMEOUT_MS = 5000;
 const SPARK_CHARS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const ASCII_SPARK = ['.', ':', '-', '=', '+', '*', '#', '@'];
 
 const modernSpark = glyphs.bar === '█';
 
 export class ThroughputTracker {
-  /** @param {{bucketMs?: number, maxBuckets?: number}} [opts] */
-  constructor({ bucketMs = BUCKET_MS, maxBuckets = 600 } = {}) {
+  /** @param {{bucketMs?: number, maxBuckets?: number, startedAt?: number, typingTimeoutMs?: number}} [opts] */
+  constructor({
+    bucketMs = BUCKET_MS,
+    maxBuckets = 600,
+    startedAt = Date.now(),
+    typingTimeoutMs = TYPING_TIMEOUT_MS,
+  } = {}) {
     this.bucketMs = bucketMs;
     this.maxBuckets = maxBuckets;
+    this.startedAt = startedAt;
+    this.typingTimeoutMs = typingTimeoutMs;
     /**
      * Completed and active turns.
      *
@@ -37,6 +45,9 @@ export class ThroughputTracker {
      *   turn: number,
      *   model: string,
      *   provider: string,
+     *   effort: string|null,
+     *   maxTokens: number|null,
+     *   contextLimit: number|null,
      *   startedAt: number,
      *   firstTokenAt: number|null,
      *   endedAt: number|null,
@@ -51,20 +62,141 @@ export class ThroughputTracker {
      */
     this.turns = [];
     this.active = null;
+    /**
+     * Committed session intervals (model, ops, user-typing, user-idle) up to the start of
+     * the current wait or active phase.
+     * @type {Array<{kind: 'model'|'ops'|'user-typing'|'user-idle', startedAt: number, endedAt: number, turn?: number, model?: string, provider?: string, effort?: string|null, ops?: number}>}
+     */
+    this.phases = [];
+    this.activeOps = null;
+    this.waitStartedAt = startedAt;
+    this.typingStartedAt = null;
+    this.lastKeystrokeAt = null;
+    this.keystrokes = 0;
+  }
+
+  /**
+   * Flush any open user wait interval up to `now` into committed `user-idle` /
+   * `user-typing` phases before starting a model or ops phase.
+   */
+  #closeUserWait(now) {
+    if (this.typingStartedAt != null && this.lastKeystrokeAt != null) {
+      const typingEnd = Math.min(now, this.lastKeystrokeAt + this.typingTimeoutMs);
+      if (typingEnd > this.typingStartedAt) {
+        this.phases.push({
+          kind: 'user-typing',
+          startedAt: this.typingStartedAt,
+          endedAt: typingEnd,
+        });
+      }
+      this.waitStartedAt = typingEnd;
+      this.typingStartedAt = null;
+      this.lastKeystrokeAt = null;
+    }
+    if (this.waitStartedAt != null && now > this.waitStartedAt) {
+      this.phases.push({
+        kind: 'user-idle',
+        startedAt: this.waitStartedAt,
+        endedAt: now,
+      });
+    }
+    this.waitStartedAt = null;
+  }
+
+  /**
+   * Record operator typing activity (REPL or browser composer).
+   *
+   * Keystrokes arriving within `typingTimeoutMs` (5s) of each other coalesce into a
+   * single `*user-typing*` span; any longer gap splits into `*user-idle*` (afk / reading)
+   * followed by a new `*user-typing*` span.
+   */
+  recordKeystroke(now = Date.now()) {
+    this.keystrokes++;
+    // While the agent is streaming or running ops, the session clock belongs to the work
+    // in progress rather than waiting on the user.
+    if (this.active || this.activeOps) return;
+    if (this.waitStartedAt == null) this.waitStartedAt = now;
+
+    if (this.lastKeystrokeAt != null && now - this.lastKeystrokeAt <= this.typingTimeoutMs) {
+      this.lastKeystrokeAt = now;
+      return;
+    }
+
+    if (this.typingStartedAt != null && this.lastKeystrokeAt != null) {
+      const typingEnd = Math.min(now, this.lastKeystrokeAt + this.typingTimeoutMs);
+      if (typingEnd > this.typingStartedAt) {
+        this.phases.push({
+          kind: 'user-typing',
+          startedAt: this.typingStartedAt,
+          endedAt: typingEnd,
+        });
+      }
+      this.waitStartedAt = typingEnd;
+    }
+
+    if (now > this.waitStartedAt) {
+      this.phases.push({
+        kind: 'user-idle',
+        startedAt: this.waitStartedAt,
+        endedAt: now,
+      });
+    }
+    this.typingStartedAt = now;
+    this.lastKeystrokeAt = now;
+    this.waitStartedAt = now;
+  }
+
+  /**
+   * Start tracking a batch of ops (including any shell approval wait).
+   * @param {{ops?: number, now?: number}} [info]
+   */
+  startOps({ ops = 1, now = Date.now() } = {}) {
+    if (this.active && !this.active.endedAt) this.endTurn(now);
+    if (this.activeOps) this.endOps(now);
+    this.#closeUserWait(now);
+    this.activeOps = { kind: 'ops', startedAt: now, ops };
+  }
+
+  endOps(now = Date.now()) {
+    if (!this.activeOps) return;
+    const endedAt = Math.max(this.activeOps.startedAt, now);
+    this.phases.push({
+      kind: 'ops',
+      startedAt: this.activeOps.startedAt,
+      endedAt,
+      ops: this.activeOps.ops,
+    });
+    this.activeOps = null;
+    this.waitStartedAt = endedAt;
   }
 
   /**
    * Start tracking a new assistant turn.
-   * @param {{turn?: number, model?: string, provider?: string, now?: number}} [info]
+   * @param {{turn?: number, model?: string, provider?: string, effort?: string|null, maxTokens?: number|null, contextLimit?: number|null, now?: number}} [info]
    */
-  startTurn({ turn = this.turns.length + 1, model = '', provider = '', now = Date.now() } = {}) {
+  startTurn({
+    turn = this.turns.length + 1,
+    model = '',
+    provider = '',
+    effort = null,
+    maxTokens = null,
+    contextLimit = null,
+    now = Date.now(),
+  } = {}) {
     if (this.active && !this.active.endedAt) {
-      this.active.endedAt = now;
+      this.endTurn(now);
     }
+    if (this.activeOps) {
+      this.endOps(now);
+    }
+    this.#closeUserWait(now);
     const entry = {
       turn,
       model,
       provider,
+      effort,
+      maxTokens,
+      contextLimit,
       startedAt: now,
       firstTokenAt: null,
       endedAt: null,
@@ -179,8 +311,111 @@ export class ThroughputTracker {
   endTurn(now = Date.now()) {
     if (!this.active) return;
     this.tick(now);
-    this.active.endedAt = now;
+    const t = this.active;
+    const endedAt = Math.max(t.startedAt, now);
+    t.endedAt = endedAt;
+    this.phases.push({
+      kind: 'model',
+      startedAt: t.startedAt,
+      endedAt,
+      turn: t.turn,
+      model: t.model,
+      provider: t.provider,
+      effort: t.effort ?? null,
+    });
     this.active = null;
+    this.waitStartedAt = endedAt;
+  }
+
+  /**
+   * Overall session time accumulator and continuous phase timeline from session start
+   * through `now`, including waiting on the user (`user-typing` when keystrokes arrive
+   * every few seconds, `user-idle` when afk / quiet).
+   */
+  sessionSummary(now = Date.now()) {
+    const phases = [...this.phases];
+    let state = 'user-idle';
+
+    if (this.active) {
+      state = 'model';
+      if (now >= this.active.startedAt) {
+        phases.push({
+          kind: 'model',
+          startedAt: this.active.startedAt,
+          endedAt: now,
+          turn: this.active.turn,
+          model: this.active.model,
+          provider: this.active.provider,
+          effort: this.active.effort ?? null,
+          active: true,
+        });
+      }
+    } else if (this.activeOps) {
+      state = 'ops';
+      if (now >= this.activeOps.startedAt) {
+        phases.push({
+          kind: 'ops',
+          startedAt: this.activeOps.startedAt,
+          endedAt: now,
+          ops: this.activeOps.ops,
+          active: true,
+        });
+      }
+    } else {
+      let waitStart = this.waitStartedAt ?? this.startedAt;
+      if (this.typingStartedAt != null && this.lastKeystrokeAt != null) {
+        const typingEnd = Math.min(now, this.lastKeystrokeAt + this.typingTimeoutMs);
+        if (typingEnd >= this.typingStartedAt) {
+          const isTypingNow = now - this.lastKeystrokeAt <= this.typingTimeoutMs;
+          phases.push({
+            kind: 'user-typing',
+            startedAt: this.typingStartedAt,
+            endedAt: typingEnd,
+            ...(isTypingNow ? { active: true } : {}),
+          });
+          if (isTypingNow) state = 'user-typing';
+        }
+        waitStart = typingEnd;
+      }
+      if (now > waitStart && state !== 'user-typing') {
+        phases.push({
+          kind: 'user-idle',
+          startedAt: waitStart,
+          endedAt: now,
+          active: true,
+        });
+      }
+    }
+
+    const totals = {
+      modelMs: 0,
+      opsMs: 0,
+      userTypingMs: 0,
+      userIdleMs: 0,
+    };
+    for (const p of phases) {
+      const dur = Math.max(0, (p.endedAt || now) - (p.startedAt || now));
+      if (p.kind === 'model') totals.modelMs += dur;
+      else if (p.kind === 'ops') totals.opsMs += dur;
+      else if (p.kind === 'user-typing') totals.userTypingMs += dur;
+      else if (p.kind === 'user-idle') totals.userIdleMs += dur;
+    }
+
+    const elapsedMs = Math.max(
+      0,
+      now - this.startedAt,
+      totals.modelMs + totals.opsMs + totals.userTypingMs + totals.userIdleMs,
+    );
+
+    return {
+      startedAt: this.startedAt,
+      now,
+      elapsedMs,
+      state,
+      keystrokes: this.keystrokes,
+      totals,
+      phases,
+    };
   }
 
   /**

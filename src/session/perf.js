@@ -40,8 +40,9 @@ export function loadPerfHistory(home, { sessions = 20, except } = {}) {
       const streamMs = durationMs != null ? Math.max(1, durationMs - (ttftMs || 0)) : null;
       rows.push({
         at: ev.ts || '',
-        model: s.model || '',
-        provider: s.provider || '',
+        model: ev.model || s.model || '',
+        provider: ev.provider || s.provider || '',
+        effort: ev.effort ?? s.effort ?? null,
         // The whole billed prompt, not just the fresh part: `in` alone omits the cached
         // prefix, which on a long Anthropic session is most of the window. Transcripts
         // written before `contextIn` existed sum back to the same figure — correct for

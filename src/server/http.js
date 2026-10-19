@@ -96,6 +96,10 @@ export function createWebServer({
     if (req.method === 'GET' && isStream) return stream(req, res, url);
     if (req.method === 'GET' && url.pathname === '/api/session') return json(res, describe());
     if (req.method === 'GET' && url.pathname === '/api/perf') return json(res, perf());
+    if (req.method === 'POST' && url.pathname === '/api/typing') {
+      session.throughput?.recordKeystroke?.();
+      return json(res, { ok: true });
+    }
     if (req.method === 'GET' && url.pathname === '/api/commands') {
       return json(res, { commands: commandList() });
     }
@@ -187,12 +191,16 @@ export function createWebServer({
    */
   function perf() {
     const t = session.throughput;
-    if (!t) return { turns: [] };
+    if (!t) return { turns: [], session: null };
     return {
+      session: typeof t.sessionSummary === 'function' ? t.sessionSummary() : null,
       turns: t.turns.map((x) => ({
         turn: x.turn,
         model: x.model,
         provider: x.provider,
+        effort: x.effort ?? null,
+        maxTokens: x.maxTokens ?? null,
+        contextLimit: x.contextLimit ?? null,
         startedAt: x.startedAt,
         endedAt: x.endedAt,
         ttftMs: x.ttftMs,

@@ -96,6 +96,65 @@ describe('tracker carries what the history needs', () => {
     expect(groups[0].key).toBe('anthropic/claude-opus-5');
     expect(groups[0].avgTps).toBeCloseTo(300 / 3.95, 5);
   });
+
+  it('accumulates session phases including user-typing vs user-idle and per-turn settings', () => {
+    const t0 = 1_000_000;
+    const tracker = new ThroughputTracker({ startedAt: t0, typingTimeoutMs: 5000 });
+
+    // Idle for 10s after session start.
+    expect(tracker.sessionSummary(t0 + 10_000).state).toBe('user-idle');
+    expect(tracker.sessionSummary(t0 + 10_000).totals.userIdleMs).toBe(10_000);
+
+    // Keystrokes every 2s between t0+10s and t0+16s -> user-typing.
+    tracker.recordKeystroke(t0 + 10_000);
+    tracker.recordKeystroke(t0 + 12_000);
+    tracker.recordKeystroke(t0 + 14_000);
+    const midTyping = tracker.sessionSummary(t0 + 16_000);
+    expect(midTyping.state).toBe('user-typing');
+    expect(midTyping.totals.userIdleMs).toBe(10_000);
+    expect(midTyping.totals.userTypingMs).toBe(6_000);
+
+    // AFK past the 5s window -> transitions to user-idle after t0+19s.
+    const afterAfk = tracker.sessionSummary(t0 + 25_000);
+    expect(afterAfk.state).toBe('user-idle');
+    expect(afterAfk.totals.userTypingMs).toBe(9_000); // 10s..19s
+    expect(afterAfk.totals.userIdleMs).toBe(16_000); // 0..10s (10s) + 19s..25s (6s)
+
+    // User types again at 25s and submits at 27s -> model turn with settings, then ops.
+    tracker.recordKeystroke(t0 + 25_000);
+    tracker.startTurn({
+      turn: 1,
+      model: 'claude-opus-5',
+      provider: 'anthropic',
+      effort: 'high',
+      maxTokens: 32000,
+      contextLimit: 200000,
+      now: t0 + 27_000,
+    });
+    expect(tracker.turns[0]).toMatchObject({
+      model: 'claude-opus-5',
+      provider: 'anthropic',
+      effort: 'high',
+      maxTokens: 32000,
+      contextLimit: 200000,
+    });
+    expect(tracker.sessionSummary(t0 + 29_000).state).toBe('model');
+    tracker.endTurn(t0 + 30_000);
+
+    tracker.startOps({ ops: 2, now: t0 + 30_000 });
+    expect(tracker.sessionSummary(t0 + 31_000).state).toBe('ops');
+    tracker.endOps(t0 + 32_000);
+
+    const end = tracker.sessionSummary(t0 + 35_000);
+    expect(end.state).toBe('user-idle');
+    expect(end.totals).toEqual({
+      userIdleMs: 19_000, // 10s + 6s + 3s
+      userTypingMs: 11_000, // 9s + 2s
+      modelMs: 3_000,
+      opsMs: 2_000,
+    });
+    expect(end.elapsedMs).toBe(35_000);
+  });
 });
 
 describe('context trend', () => {

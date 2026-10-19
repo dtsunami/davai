@@ -173,9 +173,18 @@ function TurnView({ tracker, turns, selectedIdx, width }) {
   );
 }
 
+function fmtDur(ms) {
+  const sec = Math.max(0, ms || 0) / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}m ${String(s).padStart(2, '0')}s`;
+}
+
 function HistoryView({ tracker, disk, width }) {
   const live = byModel(tracker.turns);
   const past = disk === null ? null : rollup(disk);
+  const acc = tracker.sessionSummary ? tracker.sessionSummary() : null;
   const modelWidth = Math.max(18, Math.min(30, width - 54));
 
   // Live first, then anything on disk this session has not seen. A model that appears in
@@ -203,6 +212,28 @@ function HistoryView({ tracker, disk, width }) {
       paddingX={1}
       marginTop={1}
     >
+      {acc ? (
+        <Box flexDirection="column" marginBottom={1}>
+          <Box justifyContent="space-between">
+            <Text bold color={colors.accent}>
+              Session accumulator
+            </Text>
+            <Text color={colors.dim}>
+              {fmtDur(acc.elapsedMs)} total {glyphs.bullet} state: *{acc.state}*
+            </Text>
+          </Box>
+          <Box>
+            <Text color={colors.accent}>model {fmtDur(acc.totals.modelMs)}</Text>
+            <Text color={colors.dim}> {glyphs.bullet} </Text>
+            <Text color={colors.op}>ops {fmtDur(acc.totals.opsMs)}</Text>
+            <Text color={colors.dim}> {glyphs.bullet} </Text>
+            <Text color={colors.ok}>*user-typing* {fmtDur(acc.totals.userTypingMs)}</Text>
+            <Text color={colors.dim}> {glyphs.bullet} </Text>
+            <Text color={colors.dim}>*user-idle* {fmtDur(acc.totals.userIdleMs)}</Text>
+          </Box>
+        </Box>
+      ) : null}
+
       <Box justifyContent="space-between">
         <Text bold color={colors.accent}>
           Throughput by model

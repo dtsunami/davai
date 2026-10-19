@@ -42,6 +42,7 @@ export function Composer({ onSubmit, session, busy }) {
 
   useInput(
     (input, key) => {
+      session.throughput?.recordKeystroke?.();
       // --- bracketed paste ---
       // A burst arriving as one chunk with line breaks is a paste, not typing.
       if (looksLikePaste(input)) {
