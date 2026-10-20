@@ -159,6 +159,10 @@ function handle(type, d) {
       // A /model switch in the terminal moves the browser's catalog with it, so the
       // '● running' marker does not sit on a model the session stopped using.
       if (models.loaded) loadModels();
+      if (currentTab === 'ctx') {
+        loadCtxHistory();
+        loadPrompts();
+      }
       break;
     case 'turn-start':
       live = ''; thinking = '';
@@ -567,9 +571,18 @@ async function refreshSession() {
 
 // --- context view ---
 
-function renderContext(ctx) {
-  if (!ctx) return;
-  const pct = Math.round((ctx.usage || 0) * 100);
+const ctx = {
+  rows: [],
+  sel: new Set(),
+  growthChart: null,
+  history: { points: [], limit: null },
+  prompts: null,
+};
+
+function renderContext(d) {
+  if (!d) return;
+  ctx.rows = d.rows || [];
+  const pct = Math.round((d.usage || 0) * 100);
   const meter = $('ctx-meter');
   meter.innerHTML = '';
   const bar = el('i');
@@ -581,18 +594,209 @@ function renderContext(ctx) {
   const t = $('ctx-table');
   t.innerHTML = '';
   const head = el('tr');
-  head.appendChild(el('td', null, `${fmtTokens(ctx.tokens)} / ${fmtTokens(ctx.limit)}`));
-  head.appendChild(el('td', 'n', `${pct}%`));
+  head.appendChild(el('td', 'ctx-sel'));
+  head.appendChild(el('td', null, `segment — ${fmtTokens(d.tokens)} / ${fmtTokens(d.limit)} (${pct}%)`));
+  head.appendChild(el('td', 'n', 'tokens'));
+  head.appendChild(el('td', 'n', '%'));
+  head.appendChild(el('td', 'ctx-act'));
   t.appendChild(head);
-  for (const r of ctx.rows || []) {
+
+  for (const r of ctx.rows) {
     const tr = el('tr');
-    tr.appendChild(el('td', null, `${r.pinned ? '• ' : ''}${r.label}`));
-    tr.appendChild(el('td', 'n', `${fmtTokens(r.tokens)}  ${r.pct.toFixed(1)}%`));
+    const id = Number(r.id);
+    const structural = id === 0 || r.type === 'grounding';
+
+    const selCell = el('td', 'ctx-sel');
+    const droppable = !structural && !r.pinned;
+    if (droppable) {
+      const cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = ctx.sel.has(id);
+      cb.onchange = () => toggleCtxSelect(id, cb.checked);
+      selCell.appendChild(cb);
+    }
+    tr.appendChild(selCell);
+
+    tr.appendChild(el('td', null, `${r.pinned ? '📌 ' : ''}${r.label}`));
+
+    tr.appendChild(el('td', 'n', fmtTokens(r.tokens)));
+    tr.appendChild(el('td', 'n', `${r.pct.toFixed(1)}%`));
+
+    const act = el('td', 'ctx-act');
+    const pinBtn = el('button', 'chip plain', r.pinned ? 'unpin' : 'pin');
+    pinBtn.disabled = structural;
+    pinBtn.onclick = () => ctxAction('/api/context/pin', { id, pinned: !r.pinned });
+    act.appendChild(pinBtn);
+
+    const viewBtn = el('button', 'chip plain', 'view');
+    viewBtn.onclick = () => viewSegment(id);
+    act.appendChild(viewBtn);
+
+    if (droppable) {
+      const dropBtn = el('button', 'chip no', 'drop');
+      dropBtn.onclick = async () => {
+        await ctxAction('/api/context/drop', { id });
+        ctx.sel.delete(id);
+      };
+      act.appendChild(dropBtn);
+    }
+    tr.appendChild(act);
     t.appendChild(tr);
   }
+
+  updateCtxSelectAll();
 }
 
 const fmtTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n ?? 0));
+
+function updateCtxSelectAll() {
+  const boxes = [...document.querySelectorAll('#ctx-table input[type="checkbox"]')];
+  const s = boxes.filter((b) => b.checked).length;
+  $('ctx-select-all').checked = boxes.length > 0 && s === boxes.length;
+  $('ctx-sel-count').textContent = s ? `${s} selected` : '';
+  $('ctx-summarize').disabled = s === 0;
+}
+
+function toggleCtxSelect(id, checked) {
+  const n = Number(id);
+  if (checked) ctx.sel.add(n);
+  else ctx.sel.delete(n);
+  updateCtxSelectAll();
+}
+
+function selectAllCtx(on) {
+  for (const cb of document.querySelectorAll('#ctx-table input[type="checkbox"]')) cb.checked = on;
+  ctx.sel.clear();
+  if (on) {
+    for (const r of ctx.rows) {
+      if (Number(r.id) !== 0 && r.type !== 'grounding' && !r.pinned) ctx.sel.add(Number(r.id));
+    }
+  }
+  updateCtxSelectAll();
+}
+
+async function summarizeSelected() {
+  const ids = [...ctx.sel];
+  if (!ids.length) return;
+  try {
+    await ctxAction('/api/context/summarize', { ids });
+    ctx.sel.clear();
+    updateCtxSelectAll();
+  } catch (e) {
+    pushEntry({ type: 'error', message: e.message });
+  }
+}
+
+async function compactNow() {
+  try {
+    await ctxAction('/api/compact', {});
+  } catch (e) {
+    pushEntry({ type: 'error', message: e.message });
+  }
+}
+
+/** One mutation, then re-read everything this tab draws. */
+async function ctxAction(path, body) {
+  await api(path, body);
+  await refreshSession();
+  await loadCtxHistory();
+}
+
+async function loadPrompts() {
+  try {
+    ctx.prompts = await api('/api/prompts');
+    renderPrompts(ctx.prompts);
+  } catch (e) {
+    // Visible rather than silent: an empty box reads as "no prompts", which is the
+    // opposite of what this section is for.
+    const box = $('ctx-prompts');
+    box.innerHTML = '';
+    box.hidden = false;
+    box.appendChild(el('div', 'muted', `prompts unavailable: ${e.message}`));
+  }
+}
+
+function renderPrompts(d) {
+  const box = $('ctx-prompts');
+  box.innerHTML = '';
+  if (!d || !d.system) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const layers = el('div', 'prompt-layers');
+  // `layers` is keyed by prompt name (preamble: 'home', protocol: 'default', ...);
+  // show the non-default ones so the operator sees which files overrode the built-ins.
+  for (const [key, layer] of Object.entries(d.layers || {})) {
+    if (layer === 'default') continue;
+    layers.appendChild(el('span', 'tag', `${key}: ${layer}`));
+    layers.lastChild.title = `${key} comes from ${(d.sources || {})[key] || layer}`;
+  }
+  box.appendChild(layers);
+
+  const det = el('details', 'prompt-details');
+  det.open = true; // the point of this section is seeing the prompt
+  det.appendChild(el('summary', null, 'system prompt'));
+  det.appendChild(el('pre', 'prompt-text', d.system));
+  box.appendChild(det);
+
+  const src = el('div', 'prompt-sources');
+  for (const [key, from] of Object.entries(d.sources || {})) {
+    src.appendChild(el('div', null, `${key}: ${from}`));
+  }
+  box.appendChild(src);
+}
+
+async function loadCtxHistory() {
+  try {
+    ctx.history = await api('/api/context/history');
+    drawCtxGrowth();
+  } catch { /* keep the last good curve */ }
+}
+
+function drawCtxGrowth() {
+  const box = $('chart-ctx-growth');
+  if (typeof uPlot === 'undefined') {
+    $('ctx-chart-note').textContent = 'uplot is not installed — growth plot unavailable';
+    return;
+  }
+  $('ctx-chart-note').textContent = '';
+  const pts = ctx.history.points || [];
+  if (!pts.length) { box.innerHTML = ''; return; }
+  const w = Math.max(240, $('view-ctx').clientWidth - 40);
+  if (ctx.growthChart) {
+    if (ctx.growthChart._w !== w) {
+      ctx.growthChart._w = w;
+      ctx.growthChart.setSize({ width: w, height: 180 });
+    }
+    ctx.growthChart.setData([pts.map((p) => p.t), pts.map((p) => p.tokens)]);
+    return;
+  }
+  box.innerHTML = '';
+  ctx.growthChart = new uPlot(
+    chartOpts({
+      title: 'context growth over the session',
+      width: w,
+      height: 180,
+      xLabel: 'time',
+      xValue: (_u, v) => (v == null ? '—' : new Date(v).toLocaleTimeString()),
+      xAxisFmt: (v) => new Date(v).toLocaleTimeString(),
+      series: [{ label: 'ctx', stroke: '#56b6c2', width: 2 }],
+    }),
+    [pts.map((p) => p.t), pts.map((p) => p.tokens)],
+    box,
+  );
+  ctx.growthChart._w = w;
+}
+
+async function viewSegment(id) {
+  try {
+    const d = await api(`/api/context/segment/${id}`);
+    $('ctx-seg-title').textContent = `#${d.id} · ${d.type} · ${d.label} · ${fmtTokens(d.tokens)}`;
+    $('ctx-seg-body').textContent = d.text || (d.image ? '(image content)' : '');
+    $('ctx-segment').hidden = false;
+  } catch (e) {
+    pushEntry({ type: 'error', message: e.message });
+  }
+}
 
 // --- models ---
 //
@@ -1855,7 +2059,11 @@ function setTab(name) {
     // keeps four canvases and their listeners out of memory while the tab is away.
     destroyPaneCharts();
   }
-  if (name === 'ctx') refreshSession();
+  if (name === 'ctx') {
+    refreshSession();
+    loadCtxHistory();
+    loadPrompts();
+  }
   // The catalog is cached in-process on the server, so reopening is cheap; the first
   // open is the only one that waits on the network.
   if (name === 'models' && !models.loaded) loadModels();
@@ -1964,6 +2172,12 @@ function bind() {
 
   $('perf-turn').onchange = () => drawPane();
 
+  // Context tab: row actions, selection, summarization and compaction.
+  $('ctx-select-all').onchange = () => selectAllCtx($('ctx-select-all').checked);
+  $('ctx-summarize').onclick = summarizeSelected;
+  $('ctx-compact').onclick = compactNow;
+  $('ctx-seg-close').onclick = () => { $('ctx-segment').hidden = true; };
+
   // Global keys, matching the REPL where a browser allows it.
   document.addEventListener('keydown', (e) => {
     if (state.pendingApproval) {
@@ -1991,6 +2205,7 @@ function bind() {
       drawSpark();
       resizePaneCharts();
       if (!$('perf-pop').hidden) drawPop();
+      if (currentTab === 'ctx') drawCtxGrowth();
     });
   };
   window.addEventListener('resize', onResize);
@@ -2012,6 +2227,9 @@ async function start(token) {
   $('app').hidden = false;
   renderHeader(d);
   renderContext(d.context);
+  // Load the prompt panel at startup so the context tab is populated before its
+  // first click; setTab('ctx') refetches it too.
+  loadPrompts();
   loadFilters();
   applyFilters();
   try {

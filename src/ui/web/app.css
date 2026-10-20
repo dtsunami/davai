@@ -419,6 +419,51 @@ details.art > summary::-webkit-details-marker { display: none; }
 #ctx-table td { padding: 3px 6px; border-bottom: 1px solid var(--line); }
 #ctx-table td.n { text-align: right; color: var(--dim); white-space: nowrap; }
 
+.ctx-toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.ctx-toolbar .spacer { flex: 1; }
+.chip.no { color: var(--red); border-color: var(--red); }
+#ctx-table td.ctx-sel { width: 24px; padding-left: 2px; }
+#ctx-table td.ctx-act { text-align: right; white-space: nowrap; }
+#ctx-table .chip { padding: 1px 7px; font-size: 12px; }
+#ctx-table input[type="checkbox"] { accent-color: var(--cyan); cursor: pointer; }
+
+.ctx-prompts {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+.prompt-layers { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
+.prompt-layers .tag { font-size: 11px; }
+.prompt-details summary { cursor: pointer; color: var(--dim); }
+.prompt-text {
+  max-height: 30vh;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px;
+  white-space: pre-wrap;
+  margin: 6px 0 0;
+}
+.prompt-sources { font-size: 12px; color: var(--dim); margin-top: 6px; }
+.prompt-sources div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ctx-segment {
+  position: absolute;
+  inset: 12px;
+  background: var(--panel);
+  border: 1px solid var(--cyan);
+  border-radius: 6px;
+  padding: 12px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+#ctx-seg-body { flex: 1; overflow: auto; white-space: pre-wrap; margin-top: 8px; }
+
 /* --- approval --- */
 .approval {
   position: absolute;

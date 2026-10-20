@@ -12,6 +12,13 @@ class FakeAgent extends EventEmitter {
     super();
     this.stats = { turns: 1, ops: 2, cost: 0.01 };
     this.cancelled = false;
+    // The routes that summarize/compact hand the provider factory to manage.js; it is
+    // exercised every time, so the fake has to speak provider enough to be awaited.
+    this.makeProvider = () => ({
+      async *send() {
+        yield { t: 'text', delta: 'fake summary' };
+      },
+    });
   }
   cancel() { this.cancelled = true; }
 }
@@ -39,10 +46,26 @@ beforeEach(async () => {
     log: { id: 'sess123', dir: base },
     sandbox: { writeRoot: base },
     ledger: {
-      tokens: 1000,
+      get tokens() { return this.systemTokens + this.segments.reduce((n, s) => n + (s.tokens || 0), 0); },
       limit: 1_000_000,
       usage: 0.001,
       breakdown: () => [{ id: 0, type: 'system', label: 'system', tokens: 1000, pct: 100 }],
+      system: 'SYS',
+      systemTokens: 1000,
+      segments: [],
+      dropped: [],
+      pinned: [],
+      added: [],
+      calibrator: { apply: (n) => n },
+      get(id) { return this.segments.find((s) => s.id === Number(id)); },
+      drop(id) {
+        if (id === 0) return false;
+        this.dropped.push(Number(id));
+        this.segments = this.segments.filter((s) => s.id !== Number(id));
+        return true;
+      },
+      pin(id, value) { this.pinned.push([Number(id), Boolean(value)]); return true; },
+      add(spec) { this.added.push(spec); this.segments.push({ id: 99, ...spec }); return { id: 99, ...spec }; },
     },
     artifacts: {
       items: [
@@ -346,6 +369,136 @@ describe('routes', () => {
   it('404s an unknown route', async () => {
     const res = await fetch(url('/api/nope'), { headers: auth() });
     expect(res.status).toBe(404);
+  });
+});
+
+describe('prompts', () => {
+  it('exposes the system prompt and its layer sources', async () => {
+    session.ledger.system = '# system';
+    session.cfg.prompts = { preamble: 'p' };
+    session.cfg.promptSources = { preamble: '/home/u/.davai/prompts/preamble.md' };
+    session.cfg.promptLayers = { preamble: 'home' };
+    const d = await (await fetch(url('/api/prompts'), { headers: auth() })).json();
+    expect(d.system).toBe('# system');
+    expect(d.values.preamble).toBe('p');
+    expect(d.sources.preamble).toContain('preamble.md');
+    expect(d.layers.preamble).toBe('home');
+  });
+});
+
+describe('context actions', () => {
+  it('drops a segment and broadcasts a notice', async () => {
+    const seen = [];
+    bus.on('event', (ev) => seen.push(ev));
+    const res = await fetch(url('/api/context/drop'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ id: 3 }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+    expect(session.ledger.dropped).toEqual([3]);
+    const note = seen.find((e) => e.type === 'transcript');
+    expect(note.data).toMatchObject({ type: 'notice', origin: 'web' });
+    expect(note.data.message).toMatch(/#3/);
+  });
+
+  it('refuses dropping a non-droppable segment', async () => {
+    session.ledger.segments = [{ id: 0, type: 'system' }];
+    const res = await fetch(url('/api/context/drop'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ id: 0 }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('pins and unpins a segment', async () => {
+    session.ledger.pinned = [];
+    await fetch(url('/api/context/pin'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ id: 2, pinned: true }),
+    });
+    expect(session.ledger.pinned).toEqual([[2, true]]);
+  });
+
+  it('summarizes selected segments into a summary', async () => {
+    session.ledger.dropped = [];
+    session.ledger.added = [];
+    session.ledger.segments = [
+      { id: 1, type: 'user', label: 'q', tokens: 5000, pinned: false, role: 'user', part: { type: 'text', text: 'How do I do X?' } },
+      { id: 2, type: 'assistant', label: 'a', tokens: 4000, pinned: false, role: 'assistant', part: { type: 'text', text: 'Do Y.' } },
+    ];
+    const res = await fetch(url('/api/context/summarize'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ ids: [1, 2] }),
+    });
+    expect(res.status).toBe(200);
+    const d = await res.json();
+    expect(d.ok).toBe(true);
+    expect(d.freed).toBeGreaterThan(0);
+    expect(session.ledger.dropped).toEqual([1, 2]);
+    expect(session.ledger.added[0]).toMatchObject({ type: 'summary', pinned: true });
+  });
+
+  it('rejects a summarize with no ids', async () => {
+    const res = await fetch(url('/api/context/summarize'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ ids: [] }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('serves a segment body', async () => {
+    session.ledger.segments = [{ id: 7, type: 'shell', label: 'ls', tokens: 5, pinned: false, role: 'user', part: { type: 'text', text: 'hello' } }];
+    const d = await (await fetch(url('/api/context/segment/7'), { headers: auth() })).json();
+    expect(d.text).toBe('hello');
+    expect(d.type).toBe('shell');
+  });
+
+  it('serves the system segment as id 0', async () => {
+    const d = await (await fetch(url('/api/context/segment/0'), { headers: auth() })).json();
+    expect(d.text).toBe('SYS');
+    expect(d.pinned).toBe(true);
+  });
+
+  it('404s an unknown segment', async () => {
+    const res = await fetch(url('/api/context/segment/99'), { headers: auth() });
+    expect(res.status).toBe(404);
+  });
+
+  it('returns context history as cumulative points at the limit', async () => {
+    session.ledger.systemTokens = 1000;
+    session.ledger.segments = [
+      { createdAt: 2000, tokens: 500 },
+      { createdAt: 3000, tokens: 250 },
+    ];
+    session.ledger.limit = 100_000;
+    session.log.startedAt = 1000;
+    const d = await (await fetch(url('/api/context/history'), { headers: auth() })).json();
+    expect(d.limit).toBe(100_000);
+    expect(d.points).toEqual([
+      { t: 1000, tokens: 1000 },
+      { t: 2000, tokens: 1500 },
+      { t: 3000, tokens: 1750 },
+    ]);
+  });
+
+  it('runs a manual compaction against the same policy as auto-compact', async () => {
+    const res = await fetch(url('/api/compact'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: '{}',
+    });
+    expect(res.status).toBe(200);
+    const d = await res.json();
+    expect(d.ok).toBe(true);
+    // An empty ledger has nothing to trim; the policy must return zero, not fail.
+    expect(d.freed).toBe(0);
+    expect(d.actions).toEqual([]);
   });
 });
 

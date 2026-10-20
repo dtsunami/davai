@@ -134,7 +134,7 @@ function currentExchangeIds(ledger) {
   return ids;
 }
 
-async function summarize(transcript, { cfg, makeProvider }) {
+export async function summarize(transcript, { cfg, makeProvider }) {
   const model = SUMMARIZER_MODEL[cfg.provider];
   const provider = makeProvider(model);
   const system =

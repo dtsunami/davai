@@ -5,6 +5,24 @@ import path from 'node:path';
 import { loadCatalog, serializeModel, applyModelChange, EFFORTS } from '../src/session/models.js';
 import { providerState } from '../src/session/models.js';
 
+vi.mock('@google/genai', () => ({
+  GoogleGenAI: class {
+    constructor() {}
+    models = {
+      list: async () => ({
+        models: [
+          {
+            name: 'models/gemini-3-pro-preview',
+            inputTokenLimit: 1048576,
+            outputTokenLimit: 65536,
+            displayName: 'Gemini 3 Pro',
+          },
+        ],
+      }),
+    };
+  },
+}));
+
 /**
  * session/models.js is the one place either view switches a model, so these cover the
  * things that used to differ between the pane and `/model`: whether cfg.provider moves,
@@ -163,5 +181,58 @@ describe('applyModelChange', () => {
     await applyModelChange(s, { provider: 'gemini' }).catch(() => {});
     expect(s.cfg.model).toBe(before.model);
     expect(s.agent.provider).toBeNull();
+  });
+});
+
+describe('refineModel gemini', () => {
+  it('fills limits from the Gemini models list', async () => {
+    const { refineModel } = await import('../src/config/models.js');
+    const spec = {
+      id: 'gemini-3-pro-preview',
+      provider: 'gemini',
+      label: 'gemini-3-pro-preview',
+      context: 200_000,
+      maxOutput: 32_000,
+      vision: true,
+      effort: false,
+      thinking: true,
+      inputPrice: null,
+      outputPrice: null,
+      unverified: true,
+    };
+    await refineModel(spec, { apiKey: 'AIza-fake' });
+    expect(spec.context).toBe(1048576);
+    expect(spec.maxOutput).toBe(65536);
+    expect(spec.label).toBe('Gemini 3 Pro');
+    expect(spec.refined).toBe(true);
+    expect(spec.unverified).toBeUndefined();
+  });
+});
+
+describe('refineModel OpenRouter fallback', () => {
+  it('fills an unverified model from the OpenRouter catalog', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => OR_BODY }));
+    const { refineModel } = await import('../src/config/models.js');
+    const spec = {
+      id: 'brand-new-model',
+      provider: 'openai',
+      label: 'brand-new-model',
+      context: 200_000,
+      maxOutput: 32_000,
+      vision: true,
+      effort: true,
+      thinking: true,
+      inputPrice: null,
+      outputPrice: null,
+      unverified: true,
+    };
+    await refineModel(spec, { fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(spec.context).toBe(32000);
+    expect(spec.maxOutput).toBe(16000);
+    expect(spec.inputPrice).toBe(0.1);
+    expect(spec.outputPrice).toBe(0.4);
+    expect(spec.refined).toBe(true);
+    expect(spec.unverified).toBeUndefined();
   });
 });

@@ -4,3 +4,4 @@
 
 .davai
 *.log
+!.env.example

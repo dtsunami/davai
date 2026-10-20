@@ -5,6 +5,7 @@
 import { createSession } from '../session/bootstrap.js';
 import { prepareTerminal, glyphs, formatTokens } from './theme.js';
 import { registerJsx } from './jsx-register.js';
+import { writeClipboard } from '../context/artifacts.js';
 
 export async function startTui({ input, cwd, overrides, resume, web }) {
   registerJsx();
@@ -25,7 +26,21 @@ export async function startTui({ input, cwd, overrides, resume, web }) {
   const wantWeb = web || session.cfg.web?.enabled;
   const sidecar = wantWeb ? await startSidecar(session, web || {}) : null;
 
-  banner(session, sidecar);
+  // Put the sidecar URL — token included — on the clipboard before the banner shows it.
+  // The banner already prints the same token, so this adds no exposure; it removes the
+  // paste step, which is the whole point of reaching the UI from a phone.
+  let urlCopied = false;
+  if (sidecar) {
+    try {
+      await writeClipboard(sidecar.url);
+      urlCopied = true;
+    } catch {
+      // No clipboard helper (pbcopy / wl-copy / xclip / clip.exe) on this box. The
+      // banner line still shows the URL, so this degrades to manual copy.
+    }
+  }
+
+  banner(session, sidecar, urlCopied);
 
   const instance = render(React.createElement(App, { session, initialInput: input }), {
     exitOnCtrlC: false,
@@ -120,7 +135,7 @@ async function startSidecar(session, web) {
   };
 }
 
-function banner(session, sidecar) {
+function banner(session, sidecar, urlCopied) {
   const { cfg, sandbox } = session;
   const w = (s) => process.stdout.write(s + '\n');
   const dim = (s) => `\u001b[2m${s}\u001b[0m`;
@@ -159,7 +174,7 @@ function banner(session, sidecar) {
   if (sidecar) {
     // Printed with the token in it: this is the thing you paste into a phone, and the
     // alternative is making the operator assemble a URL from two lines of banner.
-    w(dim(`  web ${glyphs.arrow} ${sidecar.url}`));
+    w(dim(`  web ${glyphs.arrow} ${sidecar.url}${urlCopied ? ' · copied to clipboard' : ''}`));
   }
   w(dim('  /help for commands · ctrl+g context · ctrl+a artifacts · esc cancel'));
   w('');

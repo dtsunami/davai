@@ -412,24 +412,92 @@ export async function refineModel(spec, { apiKey, baseURL, fetchImpl } = {}) {
     }
     return spec;
   }
-  if (spec.provider !== 'anthropic' || !apiKey) return spec;
-  try {
-    const { default: Anthropic } = await import('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey, maxRetries: 1 });
-    const m = await client.models.retrieve(spec.id);
-    const caps = m.capabilities || {};
-    if (m.max_input_tokens) spec.context = m.max_input_tokens;
-    if (m.max_tokens) spec.maxOutput = m.max_tokens;
-    if (m.display_name) spec.label = m.display_name;
-    spec.vision = caps.image_input?.supported ?? spec.vision;
-    spec.effort = caps.effort?.supported ?? spec.effort;
-    spec.thinking = caps.thinking?.types?.adaptive?.supported ?? spec.thinking;
+
+  // Gemini's models list carries the real limits — the one provider besides Anthropic
+  // whose metadata is available without guessing.
+  if (spec.provider === 'gemini' && apiKey) {
+    try {
+      const { GoogleGenAI } = await import('@google/genai');
+      const client = new GoogleGenAI({ apiKey });
+      // The list response shape varies with SDK version: an array of models, a plain
+      // `{ models: [...] }` envelope, or a paginated object. Normalise all three.
+      const listResp = await client.models.list();
+      const models = Array.isArray(listResp)
+        ? listResp
+        : Array.isArray(listResp?.models)
+          ? listResp.models
+          : listResp?.pages?.flat?.() || [];
+      for (const m of models) {
+        const id = String(m.name || '').replace(/^models\//, '');
+        if (id !== spec.id) continue;
+        if (m.inputTokenLimit) spec.context = Number(m.inputTokenLimit);
+        if (m.outputTokenLimit) spec.maxOutput = Number(m.outputTokenLimit);
+        if (m.displayName) spec.label = String(m.displayName);
+        spec.refined = true;
+        delete spec.unverified;
+        break;
+      }
+    } catch {
+      // Fall through to the OpenRouter fallback below.
+    }
+  } else if (spec.provider === 'anthropic' && apiKey) {
+    try {
+      const { default: Anthropic } = await import('@anthropic-ai/sdk');
+      const client = new Anthropic({ apiKey, maxRetries: 1 });
+      const m = await client.models.retrieve(spec.id);
+      const caps = m.capabilities || {};
+      if (m.max_input_tokens) spec.context = m.max_input_tokens;
+      if (m.max_tokens) spec.maxOutput = m.max_tokens;
+      if (m.display_name) spec.label = m.display_name;
+      spec.vision = caps.image_input?.supported ?? spec.vision;
+      spec.effort = caps.effort?.supported ?? spec.effort;
+      spec.thinking = caps.thinking?.types?.adaptive?.supported ?? spec.thinking;
+      spec.refined = true;
+      delete spec.unverified;
+    } catch {
+      // A 404 here means the id really is wrong; the first send() will say so clearly.
+    }
+  }
+
+  // Fallback probe: OpenAI and Grok expose no model metadata endpoint, and any brand-new
+  // id (e.g. a proxy serving a private slug) will have come back unverified. OpenRouter's
+  // catalog is the one public source that covers most real ids, so ask it for anything it
+  // knows. Prices there are per-route and only approximate for native billing, so they
+  // fill only missing fields — never override confirmed ones.
+  if (spec.unverified || !spec.refined || spec.inputPrice == null || spec.outputPrice == null) {
+    try {
+      const catalog = await fetchOpenRouterCatalog({
+        baseURL: baseURL || 'https://openrouter.ai/api/v1',
+        fetchImpl,
+      });
+      const match = catalog.find((m) => String(m.id).split('/').at(-1) === spec.id);
+      if (match) applyOpenRouterFallback(spec, match);
+    } catch {
+      /* offline — stay conservative */
+    }
+  }
+
+  return spec;
+}
+
+/**
+ * Fill only fields that are still missing from a catalog match, without ever overriding
+ * a value the native provider (or the seed) confirmed.
+ */
+function applyOpenRouterFallback(spec, match) {
+  if (match.label && (!spec.label || spec.label === spec.id)) spec.label = match.label;
+  if (Number.isFinite(match.context) && (spec.context == null || spec.unverified)) spec.context = match.context;
+  if (Number.isFinite(match.maxOutput) && (spec.maxOutput == null || spec.unverified)) spec.maxOutput = match.maxOutput;
+  if (match.inputPrice != null && spec.inputPrice == null) spec.inputPrice = match.inputPrice;
+  if (match.outputPrice != null && spec.outputPrice == null) spec.outputPrice = match.outputPrice;
+  // Verification means we have real limits, not just a price guess.
+  if (spec.unverified && Number.isFinite(spec.context) && Number.isFinite(spec.maxOutput)) {
+    spec.vision = spec.vision || match.vision;
+    spec.effort = spec.effort || match.effort;
+    spec.thinking = spec.thinking || match.thinking;
     spec.refined = true;
     delete spec.unverified;
-  } catch {
-    // A 404 here means the id really is wrong; the first send() will say so clearly.
   }
-  return spec;
 }
 
 /**

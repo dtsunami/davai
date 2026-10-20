@@ -29,6 +29,7 @@ import {
 import { keyState, setProviderKey, clearProviderKey } from '../session/keys.js';
 import { profileState, switchProfile, chooseProfileVar } from '../session/profiles.js';
 import { suggestName } from '../context/artifacts.js';
+import { dropSegment, pinSegment, summarizeSegments, runCompact } from '../context/manage.js';
 
 const require = createRequire(import.meta.url);
 
@@ -118,6 +119,15 @@ export function createWebServer({
       return json(res, profileState(session.cfg));
     }
     if (req.method === 'POST' && url.pathname === '/api/env') return postEnv(req, res);
+    if (req.method === 'GET' && url.pathname === '/api/prompts') return json(res, prompts());
+    if (req.method === 'GET' && url.pathname === '/api/context/history') return json(res, contextHistory());
+    if (req.method === 'GET' && url.pathname.startsWith('/api/context/segment/')) {
+      return getContextSegment(url, res);
+    }
+    if (req.method === 'POST' && url.pathname === '/api/context/drop') return postCtxDrop(req, res);
+    if (req.method === 'POST' && url.pathname === '/api/context/pin') return postCtxPin(req, res);
+    if (req.method === 'POST' && url.pathname === '/api/context/summarize') return postCtxSummarize(req, res);
+    if (req.method === 'POST' && url.pathname === '/api/compact') return postCompact(req, res);
     if (req.method === 'GET' && url.pathname === '/api/artifacts') return json(res, artifacts());
     if (req.method === 'GET' && url.pathname.startsWith('/api/artifact/')) {
       return getArtifact(url, res);
@@ -232,6 +242,139 @@ export function createWebServer({
         buckets: x.buckets.map((b) => ({ t: b.t, tok: b.tok, think: b.thinkTok, text: b.textTok })),
       })),
     };
+  }
+
+  /** The prompt layers and the exact system prompt that was sent. */
+  function prompts() {
+    const { cfg, ledger } = session;
+    return {
+      system: ledger?.system || '',
+      values: cfg.prompts || {},
+      sources: cfg.promptSources || {},
+      layers: cfg.promptLayers || [],
+    };
+  }
+
+  /** Context growth as a step series: each segment's creation adds its tokens. */
+  function contextHistory() {
+    const l = session.ledger;
+    if (!l) return { points: [], limit: null };
+    const t0 = session.log?.startedAt || Date.now();
+    let cum = l.systemTokens || 0;
+    const applyCal = (n) => l.calibrator?.apply?.(n) ?? n;
+    const points = [{ t: t0, tokens: applyCal(cum) }];
+    for (const s of l.segments || []) {
+      cum += s.tokens || 0;
+      points.push({ t: s.createdAt || t0, tokens: applyCal(cum) });
+    }
+    return { points, limit: l.limit };
+  }
+
+  /** One segment's content, for the detail view. Images report presence, not data. */
+  function getContextSegment(url, res) {
+    const id = Number(url.pathname.split('/').pop());
+    if (id === 0) {
+      const l = session.ledger;
+      return json(res, {
+        id: 0,
+        type: 'system',
+        label: 'system prompt + protocol',
+        tokens: l?.calibrator?.apply?.(l.systemTokens) ?? 0,
+        pinned: true,
+        role: null,
+        text: l?.system || '',
+        image: false,
+      });
+    }
+    if (!session.ledger) return json(res, { error: 'no ledger' }, 404);
+    const seg = session.ledger.get(id);
+    if (!seg) return json(res, { error: `no segment #${id}` }, 404);
+    return json(res, {
+      id: seg.id,
+      type: seg.type,
+      label: seg.label,
+      tokens: seg.tokens,
+      pinned: seg.pinned,
+      role: seg.role,
+      text: seg.part?.type === 'text' ? seg.part.text : null,
+      image: seg.part?.type === 'image',
+    });
+  }
+
+  /** Announce a manual ledger mutation to every view, including the REPL. */
+  function contextChanged(message) {
+    bus.publish('transcript', { type: 'notice', message, origin: 'web' });
+    bus.publish('session-changed', null);
+  }
+
+  function postCtxDrop(req, res) {
+    body(req, (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      const ok = dropSegment(session.ledger, Number(data?.id));
+      if (!ok) return json(res, { error: 'no droppable segment with that id' }, 400);
+      contextChanged(`dropped segment #${Number(data.id)}`);
+      json(res, { ok: true });
+    });
+  }
+
+  function postCtxPin(req, res) {
+    body(req, (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      const ok = pinSegment(session.ledger, Number(data?.id), Boolean(data?.pinned));
+      if (!ok) return json(res, { error: 'no segment with that id' }, 400);
+      contextChanged(`segment #${Number(data.id)} ${data.pinned ? 'pinned' : 'unpinned'}`);
+      json(res, { ok: true });
+    });
+  }
+
+  function postCtxSummarize(req, res) {
+    body(req, async (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      const ids = Array.isArray(data?.ids) ? data.ids.map(Number) : [];
+      if (!ids.length) return json(res, { error: 'no segments selected' }, 400);
+      try {
+        const r = await summarizeSegments(session.ledger, ids, {
+          cfg: session.cfg,
+          makeProvider: session.agent.makeProvider,
+          onEvent: (ev) => {
+            if (ev?.type === 'compact-warning') {
+              bus.publish('transcript', { type: 'warning', message: ev.message, origin: 'web' });
+            }
+          },
+        });
+        for (const a of r.actions) contextChanged(a);
+        json(res, { ok: true, freed: r.freed, actions: r.actions });
+      } catch (e) {
+        json(res, { error: e.message }, 400);
+      }
+    });
+  }
+
+  function postCompact(req, res) {
+    body(req, async (err) => {
+      if (err) return json(res, { error: err.message }, 400);
+      try {
+        const r = await runCompact(session.ledger, {
+          cfg: session.cfg,
+          makeProvider: session.agent.makeProvider,
+          onEvent: (ev) => {
+            if (ev?.type === 'compact-warning') {
+              bus.publish('transcript', { type: 'warning', message: ev.message, origin: 'web' });
+            }
+          },
+        });
+        if (r.actions.length) {
+          session.log.event('compact', r);
+          for (const a of r.actions) contextChanged(a);
+          contextChanged(`compacted · freed ~${r.freed} tokens`);
+        } else {
+          contextChanged('compaction found nothing to trim');
+        }
+        json(res, { ok: true, freed: r.freed, actions: r.actions });
+      } catch (e) {
+        json(res, { error: e.message }, 400);
+      }
+    });
   }
 
   /**
@@ -532,7 +675,12 @@ export function createWebServer({
         res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
         return;
       }
-      res.writeHead(200, { 'content-type': TYPES[path.extname(file)] || 'application/octet-stream' });
+      res.writeHead(200, {
+        'content-type': TYPES[path.extname(file)] || 'application/octet-stream',
+        // The client bundle is the live source; serving it with cache headers lets a
+        // stale copy hide a fix.
+        'cache-control': 'no-cache, no-transform',
+      });
       res.end(buf);
     });
   }

@@ -92,8 +92,27 @@
         </section>
 
         <section id="view-ctx" class="view" hidden>
+          <div id="ctx-prompts" class="ctx-prompts"></div>
+          <div class="ctx-toolbar">
+            <strong>context</strong>
+            <span class="muted" id="ctx-sel-count"></span>
+            <span class="spacer"></span>
+            <label class="toggle"><input id="ctx-select-all" type="checkbox" /> select all</label>
+            <button id="ctx-summarize" class="chip" disabled>summarize selected</button>
+            <button id="ctx-compact" class="chip plain">compact now</button>
+          </div>
+          <div id="ctx-chart-note" class="muted"></div>
+          <div class="chart-wrap"><div id="chart-ctx-growth"></div></div>
           <div id="ctx-meter" class="meter"></div>
           <table id="ctx-table"></table>
+          <div id="ctx-segment" class="ctx-segment" hidden>
+            <div class="keys-head">
+              <strong id="ctx-seg-title"></strong>
+              <span class="spacer"></span>
+              <button id="ctx-seg-close" class="chip plain">close</button>
+            </div>
+            <pre id="ctx-seg-body"></pre>
+          </div>
         </section>
 
         <section id="view-models" class="view" hidden>
