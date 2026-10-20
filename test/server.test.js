@@ -66,6 +66,16 @@ beforeEach(async () => {
       },
       pin(id, value) { this.pinned.push([Number(id), Boolean(value)]); return true; },
       add(spec) { this.added.push(spec); this.segments.push({ id: 99, ...spec }); return { id: 99, ...spec }; },
+      compacting: false,
+      async withCompactionLock(fn) {
+        if (this.compacting) {
+          const err = new Error('a compaction is already running');
+          err.code = 'LEDGER_BUSY';
+          throw err;
+        }
+        this.compacting = true;
+        try { return await fn(); } finally { this.compacting = false; }
+      },
     },
     artifacts: {
       items: [
@@ -485,6 +495,58 @@ describe('context actions', () => {
       { t: 2000, tokens: 1500 },
       { t: 3000, tokens: 1750 },
     ]);
+  });
+
+  it('calibrates segment tokens the same way the breakdown row does', async () => {
+    // A raw count here made the detail header disagree with the table row it was
+    // opened from, for the same segment.
+    session.ledger.calibrator = { apply: (n) => n * 2 };
+    session.ledger.segments = [
+      { id: 7, type: 'shell', label: 'ls', tokens: 50, pinned: false, role: 'user', part: { type: 'text', text: 'hello' } },
+    ];
+    const d = await (await fetch(url('/api/context/segment/7'), { headers: auth() })).json();
+    expect(d.tokens).toBe(100);
+  });
+
+  it('returns history points sorted by creation, not by array position', async () => {
+    // Compaction splices the summary backwards into the slot of the turns it replaced,
+    // so the array stops being ordered by createdAt — and uPlot needs x ascending.
+    session.ledger.systemTokens = 1000;
+    session.ledger.segments = [
+      { createdAt: 5000, tokens: 100 }, // a summary, spliced back over older turns
+      { createdAt: 2000, tokens: 500 },
+      { createdAt: 3000, tokens: 250 },
+    ];
+    session.log.startedAt = 1000;
+    const d = await (await fetch(url('/api/context/history'), { headers: auth() })).json();
+    expect(d.points.map((p) => p.t)).toEqual([1000, 2000, 3000, 5000]);
+    expect(d.points.map((p) => p.tokens)).toEqual([1000, 1500, 1750, 1850]);
+  });
+
+  it('answers 409, not 400, when a compaction is already running', async () => {
+    // Well-formed request, transient conflict: the client has to tell "try again in a
+    // moment" apart from "you sent nonsense".
+    session.ledger.compacting = true;
+    const res = await fetch(url('/api/compact'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: '{}',
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/already running/);
+  });
+
+  it('answers 409 for a summarize that collides with a compaction', async () => {
+    session.ledger.compacting = true;
+    session.ledger.segments = [
+      { id: 1, type: 'user', label: 'q', tokens: 10, pinned: false, role: 'user', part: { type: 'text', text: 'q' } },
+    ];
+    const res = await fetch(url('/api/context/summarize'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ ids: [1] }),
+    });
+    expect(res.status).toBe(409);
   });
 
   it('runs a manual compaction against the same policy as auto-compact', async () => {

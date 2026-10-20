@@ -16,6 +16,7 @@ export async function runHeadless(input, opts = {}) {
     cwd: opts.cwd,
     overrides: opts.overrides,
     resume: opts.resume,
+    acceptStalePrompts: opts.acceptStalePrompts,
   });
   const { agent, log } = session;
 
@@ -104,6 +105,13 @@ export async function runHeadless(input, opts = {}) {
   agent.on('compact-done', (r) => {
     emit({ type: 'compact', ...r });
     if (!opts.json) process.stderr.write(`  · auto-compacted, freed ~${r.freed} tokens\n`);
+  });
+
+  // Only reachable when a view queued a prompt rebuild, and headless has no view. Kept
+  // so the event contract holds in every mode rather than being excused in one.
+  agent.on('prompts-applied', (r) => {
+    emit({ type: 'prompts-applied', ...r });
+    if (!opts.json) process.stderr.write('  · prompt changes applied\n');
   });
 
   agent.on('warning', (w) => {

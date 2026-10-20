@@ -182,6 +182,12 @@ export function App({ session, initialInput }) {
         type: 'notice',
         message: `steering applied (${applied})`,
       });
+    // A prompt edited in a browser landed at this step boundary. Said out loud because
+    // the cached prefix was just rebuilt, which the operator pays for on the next turn.
+    const onPromptsApplied = () => {
+      push({ type: 'notice', message: 'prompt changes applied — system prompt rebuilt' });
+      setTick((t) => t + 1);
+    };
     const onRetry = ({ attempt, of, waitMs, message }) =>
       push({
         type: 'warning',
@@ -271,6 +277,7 @@ export function App({ session, initialInput }) {
       retry: onRetry,
       'steer-queued': onSteerQueued,
       steered: onSteered,
+      'prompts-applied': onPromptsApplied,
     };
     for (const [name, fn] of Object.entries(handlers)) agent.on(name, fn);
 
@@ -469,7 +476,19 @@ export function App({ session, initialInput }) {
       ) : null}
 
       {pane === 'context' ? (
-        <ContextPane ledger={ledger} width={width} onClose={() => setPane(null)} />
+        <ContextPane
+          ledger={ledger}
+          width={width}
+          onClose={() => setPane(null)}
+          // Drop and pin mutate the ledger, so the status bar has to re-read it and an
+          // attached browser has to be told. The web routes publish exactly this pair
+          // (`contextChanged` in server/http.js); this is the same thing in reverse.
+          onChange={(message) => {
+            if (message) push({ type: 'notice', message });
+            setTick((t) => t + 1);
+            session.bus?.publish('session-changed', null);
+          }}
+        />
       ) : null}
       {pane === 'model' ? (
         <ModelPane session={session} onClose={() => setPane(null)} push={push} />

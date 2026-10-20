@@ -34,6 +34,7 @@ OPTIONS
       --sessions         list recent sessions
       --resume [id]      rebuild context from a past session; id may be a prefix
       --config           show resolved configuration
+      --accept-prompts   start even if a prompt override was forked from an older davai
   -h, --help             this text
   -v, --version
 
@@ -75,6 +76,11 @@ export function parseArgs(argv) {
       case '-y':
       case '--yes':
         out.yes = true;
+        break;
+      case '--accept-prompts':
+        // The escape hatch for the stale-fork gate. Named for what it does rather than
+        // --force: it accepts a specific, stated risk, and only for this run.
+        out.acceptStalePrompts = true;
         break;
       case '--yolo':
         // Same intent in both modes, so it implies --yes rather than being a second
@@ -219,6 +225,7 @@ async function main() {
       cwd: args.cwd,
       overrides: args.overrides,
       resume: args.resume,
+      acceptStalePrompts: args.acceptStalePrompts,
     });
   }
 
@@ -230,7 +237,14 @@ async function main() {
     args.web || args.port !== undefined || args.host !== undefined
       ? { port: args.port, host: args.host }
       : null;
-  return startTui({ input, cwd: args.cwd, overrides: args.overrides, resume: args.resume, web });
+  return startTui({
+    input,
+    cwd: args.cwd,
+    overrides: args.overrides,
+    resume: args.resume,
+    acceptStalePrompts: args.acceptStalePrompts,
+    web,
+  });
 }
 
 // Only when run as a program. Importing this file — which test/cli.test.js does, to get

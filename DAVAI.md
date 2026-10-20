@@ -108,6 +108,48 @@ rather than the page dying.
   (`commitThinking`, `turn-end`), since a pending frame would otherwise redraw notes that
   have already been committed to the transcript. Same reasoning as `FRAME_MS` in App.jsx.
 
+## Prompts, agents files and the cached prefix
+
+The system prompt is `preamble + protocol + grounding`, resolved once at bootstrap and
+byte-stable for the session — it is the provider's cache prefix, so anything that varies
+per turn silently stops caching from working.
+
+- **An agents file is additive; a prompt override replaces.** `AGENTS.md` adds the
+  operator's standing instructions to grounding. A file in `~/.davai/prompts` or
+  `./.prompts` replaces davai's own contract text. They are reported separately by
+  `/api/prompts` for that reason: lumping them together implies an AGENTS.md could
+  override the protocol, which it cannot.
+- **Agents files multiplex, home then project.** `$DAVAI_HOME/AGENTS.md` and the first of
+  `AGENTS.md`/`DAVAI.md`/`CLAUDE.md` in the cwd are *both* read. First-matching meant a
+  repo with its own file silently suppressed the conventions that applied everywhere.
+  `DAVAI_AGENTS_MD` is a path list and *replaces* the search, like `DAVAI_RO_DIRS`.
+- **The agents file is the only part of the prompt worth bounding.** Measured on this
+  repo: preamble 147 tokens, protocol 1040, listing+git ~1000, AGENTS.md 3346 — 88% of
+  grounding. `DAVAI_AGENTS_BUDGET` (default 6000 tokens, clamped to 8% of the window)
+  bounds it, and the clip cuts at a markdown heading rather than mid-sentence, because a
+  mid-sentence cut reads as a complete document. That is how the old hard-coded
+  `slice(0, 8000)` hid itself while discarding 42% of this file.
+- **A truncation names the path.** The file is on disk and `read` is the first op in the
+  protocol, so a clip that says "continues for N more characters at /path" costs one
+  round trip while a silent one costs instructions nobody knows are missing. Same reason
+  a summary would be worse than a clip: lossy *and* unverifiable.
+- **Overrides record where they were forked from.** A fork of `protocol.md` describes the
+  protocol as it was; add an op and the copy is wrong with nothing to notice. Hence
+  `.davai-prompts.json` beside the files, holding the built-in's hash at fork time.
+  A *stale* fork (recorded hash ≠ today's) is positive evidence of drift and refuses to
+  start — a warning would scroll past, and silent prompt rot is undetectable from the
+  transcript. An *unstamped* fork is merely unknown, and only warns; blocking there would
+  wall off everyone who forked before the manifest existed. `--accept-prompts` overrides
+  once, `/prompts accept` re-baselines. The manifest is a sidecar file and not front
+  matter because prompt files are read verbatim — a header would be sent to the model.
+- **Save, stage and apply are three things.** Save writes a file and is safe mid-turn;
+  the running session does not read it. Apply rebuilds `ledger.system`, so it is queued
+  and drained at a step boundary beside `#applySteers` — the one moment with nothing in
+  flight and the next request not yet built. It also busts the prompt cache, so the next
+  turn pays full input price; that is stated in the UI rather than hidden behind a single
+  save button. A broken override is rejected at `stageApply`, not at the boundary,
+  because an error at the button is actionable and one three minutes later is not.
+
 ## Configuration precedence
 
 Lowest to highest: `settings.json` → `$DAVAI_HOME/.env` → `./.env` → the real

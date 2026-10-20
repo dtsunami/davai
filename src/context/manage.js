@@ -33,7 +33,11 @@ export function pinSegment(ledger, id, value) {
  * @param {{cfg: object, makeProvider: (model: string) => any, onEvent?: Function}} deps
  * @returns {Promise<{freed: number, actions: string[]}>}
  */
-export async function summarizeSegments(ledger, ids, { cfg, makeProvider, onEvent }) {
+export async function summarizeSegments(ledger, ids, deps) {
+  return ledger.withCompactionLock(() => summarizeNow(ledger, ids, deps));
+}
+
+async function summarizeNow(ledger, ids, { cfg, makeProvider, onEvent }) {
   const before = ledger.tokens;
   const actions = [];
 
@@ -41,13 +45,18 @@ export async function summarizeSegments(ledger, ids, { cfg, makeProvider, onEven
     .map((id) => ledger.get(id))
     .filter(Boolean);
 
-  const old = selected.filter(
-    (s) =>
-      (s.type === 'user' || s.type === 'assistant') &&
-      s.part.type === 'text' &&
-      !s.pinned &&
-      s.type !== 'grounding',
-  );
+  // Ledger order, not selection order. The anchor below assumes `old[0]` is the oldest
+  // of the set and that every id it drops sits at or after that index — true in
+  // compact.js, which filters `ledger.segments`, but not here: the web client sends
+  // `breakdown()` order, which is sorted by token count. Taking the caller's order put
+  // the summary wherever the *largest* selected segment happened to sit, which can be
+  // ahead of turns it is meant to replace, silently reordering the conversation.
+  const order = new Map(ledger.segments.map((s, i) => [s.id, i]));
+  const old = selected
+    .filter(
+      (s) => (s.type === 'user' || s.type === 'assistant') && s.part.type === 'text' && !s.pinned,
+    )
+    .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   if (!old.length) throw new Error('no summarizable segments selected');
 
   const transcript = old.map((s) => `${s.role.toUpperCase()}: ${s.part.text}`).join('\n\n');
@@ -90,5 +99,7 @@ export async function summarizeSegments(ledger, ids, { cfg, makeProvider, onEven
  */
 export async function runCompact(ledger, deps) {
   const { compact } = await import('./compact.js');
-  return compact(ledger, deps);
+  // Same lock the agent's auto-compact takes, so a button press and a step boundary
+  // cannot reshape the segment array at the same time.
+  return ledger.withCompactionLock(() => compact(ledger, deps));
 }

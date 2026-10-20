@@ -43,6 +43,41 @@ export class Ledger {
     this.compactAt = compactAt;
     this.systemTokens = 0;
     this.calibrator = new TokenCalibrator();
+    /** Held while a compaction or a manual summarize is in flight. See withCompactionLock. */
+    this.compacting = false;
+  }
+
+  /**
+   * Serialize the reshaping operations.
+   *
+   * Compaction and summarize are async — they await a summarizer over the network — and
+   * they rewrite `segments` wholesale: drop a run of ids, then splice a new segment back
+   * into the index the first one occupied. Two of those overlapping is not a slow path,
+   * it is corruption: both snapshot the array, both drop, and the second splices its
+   * summary into an index the first already invalidated.
+   *
+   * There are now three callers (auto-compact at a step boundary, `/compact`, and
+   * `POST /api/compact` or `/api/context/summarize` from any number of browsers), so
+   * "it only runs from one place" stopped being true. Refuse rather than queue: a
+   * second compaction right behind the first has nothing left to free, and the operator
+   * who pressed the button twice wants to be told, not to wait.
+   *
+   * @template T
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  async withCompactionLock(fn) {
+    if (this.compacting) {
+      const err = new Error('a compaction is already running');
+      err.code = 'LEDGER_BUSY';
+      throw err;
+    }
+    this.compacting = true;
+    try {
+      return await fn();
+    } finally {
+      this.compacting = false;
+    }
   }
 
   /** The system prompt is tracked separately: it is the cached prefix, never evicted. */

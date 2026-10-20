@@ -6,12 +6,13 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_PROMPTS, PROMPT_SPECS, promptDirs } from '../agent/prompt.js';
+import { checkForks, stampFork, snapshot, hashText } from '../agent/promptfork.js';
 import { runShell } from '../agent/ops/shell.js';
 import { gateShell } from '../agent/ops/executor.js';
 import { loadImage, clipboardImage } from '../context/images.js';
 import { listSessions } from '../session/log.js';
 import { readStream } from '../session/stream.js';
-import { compact } from '../context/compact.js';
+import { runCompact } from '../context/manage.js';
 import { formatTokens, glyphs } from './theme.js';
 
 const HELP = `Commands
@@ -27,7 +28,7 @@ const HELP = `Commands
   /keys [provider]    enable a provider: see, paste or save API keys
   /env [name]         provider blocks in your .env; /env <name> switches to one
   /config             resolved configuration
-  /prompts [export]   where each prompt comes from; export writes them to ./.prompts
+  /prompts [sub]      prompt layers and fork drift: export/diff/accept/reset
   /clear              drop conversation context, keep grounding
   /yolo [on|off]      auto-approve shell commands for this session
   /events             harness events emitted vs retired this session
@@ -292,14 +293,27 @@ export async function handleCommand(text, deps) {
       return { handled: true };
 
     case 'compact': {
+      // Through manage.js rather than compact.js directly, so this takes the same lock
+      // the agent's auto-compact and the web route do. Typing /compact mid-run used to
+      // reshape the segment array underneath a compaction already in flight.
       push({ type: 'notice', message: 'compacting…' });
-      const result = await compact(ledger, {
-        cfg,
-        makeProvider: agent.makeProvider,
-        onEvent: (e) => push({ type: 'warning', message: e.message }),
-      });
-      push({ type: 'compact', ...result });
-      refresh();
+      try {
+        const result = await runCompact(ledger, {
+          cfg,
+          makeProvider: agent.makeProvider,
+          onEvent: (e) => push({ type: 'warning', message: e.message }),
+        });
+        push({ type: 'compact', ...result });
+        refresh();
+      } catch (err) {
+        push({
+          type: 'warning',
+          message:
+            err?.code === 'LEDGER_BUSY'
+              ? 'a compaction is already running — wait for it to finish'
+              : `compaction failed: ${err.message}`,
+        });
+      }
       return { handled: true };
     }
 
@@ -501,11 +515,18 @@ export async function handleCommand(text, deps) {
       const dirs = cfg.promptDirs || promptDirs(cfg.home, cfg.cwd);
       const [sub, ...flags] = rest.filter(Boolean);
 
+      const forks = checkForks({ sources: cfg.promptSources, layers: cfg.promptLayers });
+      const driftOf = (key) => {
+        if (forks.stale.some((s) => s.key === key)) return 'STALE';
+        if (forks.unstamped.some((u) => u.key === key)) return 'unstamped';
+        return '';
+      };
+
       if (!sub) {
         const lines = PROMPT_SPECS.map((s) => {
           const layer = cfg.promptLayers?.[s.key] || 'default';
           const where = layer === 'default' ? 'built-in' : cfg.promptSources?.[s.key];
-          return `  ${s.key.padEnd(10)} ${layer.padEnd(8)} ${where}`;
+          return `  ${s.key.padEnd(10)} ${layer.padEnd(8)} ${driftOf(s.key).padEnd(10)} ${where}`;
         });
         push({
           type: 'info',
@@ -516,14 +537,109 @@ export async function handleCommand(text, deps) {
             `  home     ${dirs.home}`,
             `  project  ${dirs.project}`,
             '',
-            '  /prompts export [--force] writes the resolved prompts to ./.prompts; edits apply on relaunch',
+            '  /prompts export [--force]   write the resolved prompts to ./.prompts',
+            '  /prompts diff <key>         what changed in the built-in since you forked',
+            "  /prompts accept <key|all>   keep yours, re-baseline against today's built-in",
+            '  /prompts reset <key>        discard yours and use the built-in',
           ].join('\n'),
         });
         return { handled: true };
       }
 
+      // --- drift resolution ---
+
+      if (sub === 'diff' || sub === 'accept' || sub === 'reset') {
+        const key = flags[0];
+        const known = PROMPT_SPECS.map((s) => s.key);
+
+        if (sub === 'accept' && key === 'all') {
+          const drifted = [...forks.stale, ...forks.unstamped];
+          if (!drifted.length) {
+            push({ type: 'notice', message: 'every override is already current' });
+            return { handled: true };
+          }
+          // Overrides may sit in different directories (home and project), and each
+          // directory carries its own manifest.
+          const byDir = new Map();
+          for (const f of drifted) byDir.set(f.dir, [...(byDir.get(f.dir) || []), f.key]);
+          for (const [dir, ks] of byDir) stampFork(dir, ks);
+          const keys = drifted.map((f) => f.key);
+          log.event('prompts-accept', { keys });
+          push({
+            type: 'notice',
+            message: `re-baselined ${keys.join(', ')} against the current built-ins`,
+          });
+          refresh();
+          return { handled: true };
+        }
+
+        if (!key || !known.includes(key)) {
+          push({ type: 'warning', message: `usage: /prompts ${sub} <${known.join('|')}>` });
+          return { handled: true };
+        }
+        if ((cfg.promptLayers?.[key] || 'default') === 'default') {
+          push({ type: 'notice', message: `${key} is not overridden — nothing to ${sub}` });
+          return { handled: true };
+        }
+        const file = cfg.promptSources?.[key];
+        const spec = PROMPT_SPECS.find((s) => s.key === key);
+
+        if (sub === 'diff') {
+          const entry = forks.stale.find((s) => s.key === key);
+          push({
+            type: 'info',
+            text: [
+              `${key}  ${file}`,
+              entry
+                ? `  forked from davai ${entry.forkedVersion} (${entry.forkedHash}); ` +
+                  `built-in is now ${entry.currentVersion} (${entry.currentHash})`
+                : `  no recorded drift (built-in hash ${hashText(spec.text)})`,
+              '',
+              '--- current built-in ---',
+              spec.text,
+              '',
+              '--- yours ---',
+              cfg.prompts?.[key] ?? '(unreadable)',
+            ].join('\n'),
+          });
+          return { handled: true };
+        }
+
+        if (sub === 'accept') {
+          stampFork(path.dirname(file), [key]);
+          log.event('prompts-accept', { keys: [key] });
+          push({
+            type: 'notice',
+            message: `${key} re-baselined against the current built-in; ${file} is unchanged`,
+          });
+          refresh();
+          return { handled: true };
+        }
+
+        // reset: remove the override so the built-in applies again on relaunch.
+        try {
+          const kept = snapshot(file);
+          fs.rmSync(file);
+          log.event('prompts-reset', { key, file, snapshot: kept });
+          push({
+            type: 'notice',
+            message:
+              `${key} reset to the built-in — ${file} removed` +
+              (kept ? ` (copy kept at ${kept})` : '') +
+              '; applies on relaunch',
+          });
+        } catch (err) {
+          push({ type: 'warning', message: `reset failed: ${err.message}` });
+        }
+        return { handled: true };
+      }
+
       if (sub !== 'export' || flags.some((f) => f !== '--force')) {
-        push({ type: 'warning', message: 'usage: /prompts  or  /prompts export [--force]' });
+        push({
+          type: 'warning',
+          message:
+            'usage: /prompts [export [--force] | diff <key> | accept <key|all> | reset <key>]',
+        });
         return { handled: true };
       }
       const force = flags.includes('--force');
@@ -554,7 +670,17 @@ export async function handleCommand(text, deps) {
       const values = cfg.prompts || DEFAULT_PROMPTS;
       try {
         fs.mkdirSync(path.dirname(targets[0].abs), { recursive: true });
-        for (const t of targets) fs.writeFileSync(t.abs, values[t.spec.key]);
+        for (const t of targets) {
+          if (force) snapshot(t.abs);
+          fs.writeFileSync(t.abs, values[t.spec.key]);
+        }
+        // Record what the built-ins looked like at the moment of the fork. Without this
+        // an exported file is indistinguishable from one forked years ago, and the drift
+        // check can only shrug at it.
+        stampFork(
+          path.dirname(targets[0].abs),
+          targets.map((t) => t.spec.key),
+        );
       } catch (err) {
         push({ type: 'warning', message: `export failed: ${err.message}` });
         return { handled: true };

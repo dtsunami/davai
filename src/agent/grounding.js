@@ -8,11 +8,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { resolveAgents, renderAgents } from './agents.js';
 
 const MAX_TOP_ENTRIES = 40;
 const MAX_PREVIEW_DIRS = 8;
 const MAX_PREVIEW_FILES = 6;
 
+/**
+ * @returns {{text: string, agents: object[], notices: string[]}}
+ *   `notices` are operator-facing: a configured agents file that could not be read, or
+ *   one that did not fit. They are returned rather than thrown because grounding should
+ *   degrade, not fail — but they must not be swallowed either, which is what the old
+ *   silent 8000-character slice did.
+ */
 export function buildGrounding({ sandbox, cfg }) {
   const root = sandbox.writeRoot;
   const lines = [];
@@ -50,14 +58,19 @@ export function buildGrounding({ sandbox, cfg }) {
   lines.push('## Directory');
   lines.push(listing(root, sandbox));
 
-  const agents = readAgentsFile(root);
-  if (agents) {
-    lines.push('');
-    lines.push('## Project instructions (from ' + agents.name + ')');
-    lines.push(agents.text);
-  }
+  // Last, and deliberately so: it is the largest part of the prompt by a wide margin
+  // (~88% of grounding on a project with a substantial AGENTS.md), and everything above
+  // it is cheap, stable context the model needs regardless.
+  const { sections, notices } = resolveAgents({
+    home: cfg.home,
+    cwd: root,
+    agentsFiles: cfg.agentsFiles,
+    agentsBudget: cfg.agentsBudget,
+    contextLimit: cfg.contextLimit,
+  });
+  lines.push(...renderAgents(sections));
 
-  return lines.join('\n');
+  return { text: lines.join('\n'), agents: sections, notices };
 }
 
 function defaultShell() {
@@ -117,18 +130,6 @@ function detectPackageManager(root) {
   return 'npm';
 }
 
-function readAgentsFile(root) {
-  for (const name of ['DAVAI.md', 'AGENTS.md', 'CLAUDE.md']) {
-    const p = path.join(root, name);
-    try {
-      const text = fs.readFileSync(p, 'utf8').trim();
-      if (text) return { name, text: text.slice(0, 8000) };
-    } catch {
-      /* next */
-    }
-  }
-  return null;
-}
 
 /** Activity-ranked directory listing. */
 function listing(root, sandbox) {

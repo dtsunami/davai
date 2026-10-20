@@ -1,12 +1,18 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { colors, glyphs, bar, usageColor, formatTokens } from './theme.js';
+import { dropSegment, pinSegment } from '../context/manage.js';
 
 /**
  * The context breakdown (req 12). Pareto-ordered: biggest consumers first, because
  * that is where the operator's attention should go.
+ *
+ * Mutations go through `context/manage.js` — the same entry points the web routes use —
+ * and report through `onChange`. Calling `ledger.drop` directly and re-rendering only
+ * this component left the status bar and any attached browser showing figures this pane
+ * had already changed.
  */
-export function ContextPane({ ledger, width, onClose }) {
+export function ContextPane({ ledger, width, onChange, onClose }) {
   const [sel, setSel] = useState(0);
   const [viewing, setViewing] = useState(null);
   const [, force] = useState(0);
@@ -14,6 +20,13 @@ export function ContextPane({ ledger, width, onClose }) {
   const rows = ledger.breakdown();
   const total = ledger.tokens;
   const pct = (total / ledger.limit) * 100;
+
+  // Re-render this pane *and* tell the rest of the session. `force` alone redrew the
+  // table over a status bar and a browser still showing the old totals.
+  const changed = (message) => {
+    force((n) => n + 1);
+    onChange?.(message);
+  };
 
   useInput((input, key) => {
     if (viewing !== null) {
@@ -28,16 +41,18 @@ export function ContextPane({ ledger, width, onClose }) {
     if (!row) return;
 
     if (input === 'd' || key.delete) {
-      if (row.id === 0) return; // system prompt is the cached prefix
-      ledger.drop(row.id);
+      // The system prompt is the cached prefix and grounding is structural; the ledger
+      // refuses both, but the browser greys them out and this pane should agree.
+      if (row.id === 0 || row.type === 'grounding') return;
+      if (!dropSegment(ledger, row.id)) return;
       setSel((s) => Math.min(s, Math.max(0, rows.length - 2)));
-      force((n) => n + 1);
+      changed(`dropped segment #${row.id}`);
       return;
     }
     if (input === 'p') {
-      if (row.id === 0) return;
-      ledger.pin(row.id, !row.pinned);
-      force((n) => n + 1);
+      if (row.id === 0 || row.type === 'grounding') return;
+      if (!pinSegment(ledger, row.id, !row.pinned)) return;
+      changed(`segment #${row.id} ${row.pinned ? 'unpinned' : 'pinned'}`);
       return;
     }
     if (input === 'v' || key.return) {

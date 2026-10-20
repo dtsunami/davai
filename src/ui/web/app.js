@@ -111,6 +111,7 @@ const EVENTS = [
   'artifact', 'usage', 'error', 'warning', 'done', 'cancelled',
   'compact-start', 'compact-done', 'repair', 'nudge', 'retry',
   'steer-queued', 'steered', 'approval-request', 'approval-resolved',
+  'prompts-applied',
   // Not an agent event: the REPL's own transcript lines, mirrored by App.jsx so a
   // browser sees the operator's half of the conversation too.
   'transcript',
@@ -213,6 +214,12 @@ function handle(type, d) {
       break;
     case 'steered':
       showQueue(0);
+      break;
+    case 'prompts-applied':
+      // The staged edit landed. Re-read the panel so "pending" clears and the live
+      // prompt shown is the one actually in force.
+      loadPrompts();
+      refreshSession();
       break;
     case 'compact-start':
       setStatus('compacting context');
@@ -575,13 +582,19 @@ const ctx = {
   rows: [],
   sel: new Set(),
   growthChart: null,
-  history: { points: [], limit: null },
+  busy: false,
+  history: { points: [], limit: null, compactAt: null },
   prompts: null,
 };
 
 function renderContext(d) {
   if (!d) return;
   ctx.rows = d.rows || [];
+  // Auto-compaction can remove a segment while this tab is open. A selection left
+  // pointing at it said "3 selected" over two checkboxes, and summarize sent ids the
+  // server would silently skip.
+  const present = new Set(ctx.rows.map((r) => Number(r.id)));
+  for (const id of [...ctx.sel]) if (!present.has(id)) ctx.sel.delete(id);
   const pct = Math.round((d.usage || 0) * 100);
   const meter = $('ctx-meter');
   meter.innerHTML = '';
@@ -654,7 +667,9 @@ function updateCtxSelectAll() {
   const s = boxes.filter((b) => b.checked).length;
   $('ctx-select-all').checked = boxes.length > 0 && s === boxes.length;
   $('ctx-sel-count').textContent = s ? `${s} selected` : '';
-  $('ctx-summarize').disabled = s === 0;
+  // `ctx.busy` wins: a re-render triggered by the refresh inside ctxAction would
+  // otherwise re-enable the button while the request it belongs to is still open.
+  $('ctx-summarize').disabled = s === 0 || ctx.busy;
 }
 
 function toggleCtxSelect(id, checked) {
@@ -675,24 +690,45 @@ function selectAllCtx(on) {
   updateCtxSelectAll();
 }
 
-async function summarizeSelected() {
-  const ids = [...ctx.sel];
-  if (!ids.length) return;
+/**
+ * Both reshaping actions are long, async and mutually exclusive on the server, which
+ * answers 409 for the loser. Disabling the buttons for the duration turns a race the
+ * operator can lose into one they cannot start: double-clicking "compact now" over a
+ * slow summarizer was the easy way to provoke it.
+ */
+async function withCtxBusy(label, fn) {
+  if (ctx.busy) return;
+  ctx.busy = true;
+  const summ = $('ctx-summarize');
+  const comp = $('ctx-compact');
+  const was = comp.textContent;
+  summ.disabled = true;
+  comp.disabled = true;
+  comp.textContent = `${label}…`;
   try {
-    await ctxAction('/api/context/summarize', { ids });
-    ctx.sel.clear();
-    updateCtxSelectAll();
+    await fn();
   } catch (e) {
     pushEntry({ type: 'error', message: e.message });
+  } finally {
+    ctx.busy = false;
+    comp.disabled = false;
+    comp.textContent = was;
+    updateCtxSelectAll();
   }
 }
 
+async function summarizeSelected() {
+  const ids = [...ctx.sel];
+  if (!ids.length) return;
+  await withCtxBusy('summarizing', async () => {
+    await ctxAction('/api/context/summarize', { ids });
+    ctx.sel.clear();
+    updateCtxSelectAll();
+  });
+}
+
 async function compactNow() {
-  try {
-    await ctxAction('/api/compact', {});
-  } catch (e) {
-    pushEntry({ type: 'error', message: e.message });
-  }
+  await withCtxBusy('compacting', () => ctxAction('/api/compact', {}));
 }
 
 /** One mutation, then re-read everything this tab draws. */
@@ -716,6 +752,15 @@ async function loadPrompts() {
   }
 }
 
+/**
+ * The prompt panel: what is in force, what is on disk, and the editor.
+ *
+ * Save and apply are deliberately two buttons. Save is a filesystem write and is always
+ * available, including mid-turn — the whole reason the server decouples them is so the
+ * editor stays usable while the model is working. Apply changes the cached prefix, so it
+ * is queued to a step boundary and costs the next turn its prompt cache. A single
+ * "save" button that did both would hide a real price behind a routine action.
+ */
 function renderPrompts(d) {
   const box = $('ctx-prompts');
   box.innerHTML = '';
@@ -732,17 +777,110 @@ function renderPrompts(d) {
   }
   box.appendChild(layers);
 
+  // Saved-but-not-live. Without this the editor and the session disagree silently,
+  // which is the exact failure the save/apply split exists to make visible.
+  const rows = d.editable?.prompts || [];
+  const dirty = rows.filter((r) => r.dirty);
+  if (dirty.length || d.pendingApply) {
+    const bar = el('div', 'prompt-pending');
+    bar.appendChild(
+      el(
+        'span',
+        null,
+        d.pendingApply
+          ? 'prompt changes are queued — they apply at the next step boundary'
+          : `${dirty.map((r) => r.key).join(', ')} saved but not live`,
+      ),
+    );
+    if (!d.pendingApply) {
+      const apply = el('button', 'chip', 'apply');
+      apply.title = 'rebuilds the system prompt; the next turn pays full input price';
+      apply.onclick = () => applyPrompts();
+      bar.appendChild(apply);
+    }
+    box.appendChild(bar);
+  }
+
+  if (d.agents?.length) {
+    const ag = el('div', 'prompt-sources');
+    for (const a of d.agents) {
+      ag.appendChild(
+        el(
+          'div',
+          a.truncated ? 'hot-text' : null,
+          `${a.source}: ${a.path} (${a.bytes} bytes${a.truncated ? ', CLIPPED' : ''})`,
+        ),
+      );
+    }
+    box.appendChild(ag);
+  }
+
   const det = el('details', 'prompt-details');
   det.open = true; // the point of this section is seeing the prompt
   det.appendChild(el('summary', null, 'system prompt'));
   det.appendChild(el('pre', 'prompt-text', d.system));
   box.appendChild(det);
 
+  for (const row of rows) {
+    const ed = el('details', 'prompt-details');
+    const label = `${row.key} · ${row.layer}${row.dirty ? ' · saved, not live' : ''}`;
+    ed.appendChild(el('summary', null, label));
+
+    const ta = el('textarea', 'prompt-edit');
+    ta.value = row.disk ?? row.live ?? '';
+    ta.spellcheck = false;
+    ed.appendChild(ta);
+
+    const actions = el('div', 'prompt-actions');
+    const save = el('button', 'chip', 'save');
+    save.onclick = async () => {
+      save.disabled = true;
+      try {
+        await api('/api/prompts/save', { key: row.key, text: ta.value, layer: 'project' });
+        await loadPrompts();
+      } catch (e) {
+        pushEntry({ type: 'error', message: e.message });
+      } finally {
+        save.disabled = false;
+      }
+    };
+    actions.appendChild(save);
+
+    if (row.layer !== 'default') {
+      const rev = el('button', 'chip plain', 'revert to built-in');
+      rev.onclick = async () => {
+        try {
+          await api('/api/prompts/revert', { key: row.key, layer: row.layer });
+          await loadPrompts();
+        } catch (e) {
+          pushEntry({ type: 'error', message: e.message });
+        }
+      };
+      actions.appendChild(rev);
+    }
+    ed.appendChild(actions);
+    box.appendChild(ed);
+  }
+
   const src = el('div', 'prompt-sources');
   for (const [key, from] of Object.entries(d.sources || {})) {
     src.appendChild(el('div', null, `${key}: ${from}`));
   }
   box.appendChild(src);
+}
+
+async function applyPrompts() {
+  try {
+    const r = await api('/api/prompts/apply', {});
+    // Queued rather than done: say so, because the operator decides whether to send the
+    // next message based on which prompt is in force.
+    if (r.staged) {
+      pushEntry({ type: 'notice', message: 'prompt changes queued for the next step boundary' });
+    }
+    await loadPrompts();
+  } catch (e) {
+    pushEntry({ type: 'error', message: e.message });
+  }
 }
 
 async function loadCtxHistory() {
@@ -758,16 +896,25 @@ function drawCtxGrowth() {
     $('ctx-chart-note').textContent = 'uplot is not installed — growth plot unavailable';
     return;
   }
-  $('ctx-chart-note').textContent = '';
   const pts = ctx.history.points || [];
+  const limit = ctx.history.limit || null;
+  // The curve alone only says "going up". Drawn against the limit it says how long you
+  // have before compaction, which is the question the pane is open to answer — and it
+  // is why the server sends `limit` at all.
+  $('ctx-chart-note').textContent = limit
+    ? `limit ${fmtTokens(limit)}${
+        ctx.history.compactAt ? ` · auto-compact at ${Math.round(ctx.history.compactAt * 100)}%` : ''
+      }`
+    : '';
   if (!pts.length) { box.innerHTML = ''; return; }
+  const data = [pts.map((p) => p.t), pts.map((p) => p.tokens), pts.map(() => limit)];
   const w = Math.max(240, $('view-ctx').clientWidth - 40);
   if (ctx.growthChart) {
     if (ctx.growthChart._w !== w) {
       ctx.growthChart._w = w;
       ctx.growthChart.setSize({ width: w, height: 180 });
     }
-    ctx.growthChart.setData([pts.map((p) => p.t), pts.map((p) => p.tokens)]);
+    ctx.growthChart.setData(data);
     return;
   }
   box.innerHTML = '';
@@ -779,9 +926,12 @@ function drawCtxGrowth() {
       xLabel: 'time',
       xValue: (_u, v) => (v == null ? '—' : new Date(v).toLocaleTimeString()),
       xAxisFmt: (v) => new Date(v).toLocaleTimeString(),
-      series: [{ label: 'ctx', stroke: '#56b6c2', width: 2 }],
+      series: [
+        { label: 'ctx', stroke: '#56b6c2', width: 2 },
+        { label: 'limit', stroke: '#e06c75', width: 1, dash: [4, 4] },
+      ],
     }),
-    [pts.map((p) => p.t), pts.map((p) => p.tokens)],
+    data,
     box,
   );
   ctx.growthChart._w = w;

@@ -66,6 +66,7 @@ export const EVENTS = [
   'retry',
   'steer-queued',
   'steered',
+  'prompts-applied',
   'repair',
   'warning',
   'cancelled',
@@ -199,6 +200,25 @@ export class Agent extends EventEmitter {
     return true;
   }
 
+  /**
+   * Rebuild the system prompt if a view queued one.
+   *
+   * `onPendingPrompts` is injected rather than imported so the agent stays unaware of
+   * session wiring — it is handed a function that knows how to rebuild, and reports
+   * what happened. Absent, nothing is ever queued and this is free.
+   */
+  #applyPendingPrompts() {
+    if (!this.onPendingPrompts) return;
+    const result = this.onPendingPrompts();
+    if (!result) return;
+    if (result.applied) {
+      this.emit('prompts-applied', result);
+      this.log?.event?.('prompts-applied', result);
+    } else {
+      this.emit('warning', { message: `prompt rebuild skipped: ${result.reason}` });
+    }
+  }
+
   /** Move any queued steers into context. @returns {number} how many were applied */
   #applySteers() {
     if (!this.steers.length) return 0;
@@ -244,6 +264,12 @@ export class Agent extends EventEmitter {
 
         // Before the request, so a correction typed during the last turn shapes this one.
         this.#applySteers();
+
+        // Same boundary, same reason: nothing is in flight and the next request has not
+        // been built. A prompt edited in a view is written to disk immediately but only
+        // becomes *this session's* prompt here, because the system prompt is the cached
+        // prefix and must be byte-stable across a request.
+        this.#applyPendingPrompts();
 
         if (this.#overBudget()) return;
 
@@ -814,16 +840,28 @@ export class Agent extends EventEmitter {
   }
 
   async #compact() {
+    // A manual compaction fired from a pane or a browser may already be running. Skip
+    // this one silently: the threshold is re-tested at every step boundary, so the next
+    // one picks it up if the manual run did not free enough. Emitting compact-start
+    // before finding out would leave the status line stuck on "compacting".
+    if (this.ledger.compacting) return;
     this.emit('compact-start', { tokens: this.ledger.tokens, limit: this.ledger.limit });
     try {
-      const result = await compact(this.ledger, {
-        cfg: this.cfg,
-        makeProvider: this.makeProvider,
-        onEvent: (e) => this.emit('warning', e),
-      });
+      const result = await this.ledger.withCompactionLock(() =>
+        compact(this.ledger, {
+          cfg: this.cfg,
+          makeProvider: this.makeProvider,
+          onEvent: (e) => this.emit('warning', e),
+        }),
+      );
       this.emit('compact-done', result);
       this.log.event('compact', result);
     } catch (err) {
+      // Lost the race between the check above and taking the lock. Not a failure.
+      if (err?.code === 'LEDGER_BUSY') {
+        this.emit('compact-done', { freed: 0, actions: [] });
+        return;
+      }
       this.emit('warning', { message: `auto-compact failed: ${err.message}` });
     }
   }

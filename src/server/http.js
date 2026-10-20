@@ -29,6 +29,13 @@ import {
 import { keyState, setProviderKey, clearProviderKey } from '../session/keys.js';
 import { profileState, switchProfile, chooseProfileVar } from '../session/profiles.js';
 import { suggestName } from '../context/artifacts.js';
+import {
+  savePrompt,
+  revertPrompt,
+  applyPrompts,
+  stageApply,
+  promptState,
+} from '../session/promptedit.js';
 import { dropSegment, pinSegment, summarizeSegments, runCompact } from '../context/manage.js';
 
 const require = createRequire(import.meta.url);
@@ -120,6 +127,9 @@ export function createWebServer({
     }
     if (req.method === 'POST' && url.pathname === '/api/env') return postEnv(req, res);
     if (req.method === 'GET' && url.pathname === '/api/prompts') return json(res, prompts());
+    if (req.method === 'POST' && url.pathname === '/api/prompts/save') return postPromptSave(req, res);
+    if (req.method === 'POST' && url.pathname === '/api/prompts/revert') return postPromptRevert(req, res);
+    if (req.method === 'POST' && url.pathname === '/api/prompts/apply') return postPromptApply(req, res);
     if (req.method === 'GET' && url.pathname === '/api/context/history') return json(res, contextHistory());
     if (req.method === 'GET' && url.pathname.startsWith('/api/context/segment/')) {
       return getContextSegment(url, res);
@@ -244,30 +254,153 @@ export function createWebServer({
     };
   }
 
-  /** The prompt layers and the exact system prompt that was sent. */
+  /**
+   * The prompt layers and the exact system prompt that was sent.
+   *
+   * `agents` is reported separately from `layers` because the two are different kinds
+   * of thing: a prompt layer *replaces* davai's own contract text, an agents file is
+   * additive content the operator wrote. Lumping them together would imply an AGENTS.md
+   * could override the protocol, which it cannot.
+   */
   function prompts() {
     const { cfg, ledger } = session;
+    // `editable` carries what is on disk versus what the session is running, so the
+    // editor can show "saved but not applied" rather than silently disagreeing with
+    // itself. It is a separate key because `values` is the live prompt and several
+    // things already depend on that meaning.
+    let editable = null;
+    try {
+      editable = promptState(session);
+    } catch {
+      /* an unreadable prompt dir must not take the whole endpoint down */
+    }
     return {
       system: ledger?.system || '',
       values: cfg.prompts || {},
       sources: cfg.promptSources || {},
-      layers: cfg.promptLayers || [],
+      layers: cfg.promptLayers || {},
+      editable,
+      pendingApply: Boolean(session.pendingPrompts),
+      agents: (session.agents || []).map((a) => ({
+        path: a.path,
+        source: a.source,
+        bytes: a.bytes,
+        truncated: a.truncated,
+      })),
+      agentsBudget: cfg.agentsBudget ?? null,
     };
+  }
+
+  /**
+   * Save one prompt override.
+   *
+   * Deliberately decoupled from the running session: this writes a file and nothing
+   * else. A turn in flight is unaffected, which is what makes the editor usable while
+   * the model is working — the alternative is a form that greys out for minutes at a
+   * time.
+   */
+  function postPromptSave(req, res) {
+    body(req, (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      try {
+        const r = savePrompt(session, {
+          key: data?.key,
+          text: data?.text,
+          layer: data?.layer,
+        });
+        bus.publish('transcript', {
+          type: 'notice',
+          message: `prompt ${data.key} saved to ${r.file} — not live until applied`,
+          origin: 'web',
+        });
+        bus.publish('session-changed', null);
+        json(res, { ok: true, ...r });
+      } catch (e) {
+        json(res, { error: e.message }, 400);
+      }
+    });
+  }
+
+  function postPromptRevert(req, res) {
+    body(req, (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      try {
+        const r = revertPrompt(session, { key: data?.key, layer: data?.layer });
+        bus.publish('transcript', {
+          type: 'notice',
+          message: r.removed
+            ? `prompt ${data.key} reverted to the built-in (${r.file} removed) — not live until applied`
+            : `prompt ${data.key} has no override at that layer`,
+          origin: 'web',
+        });
+        bus.publish('session-changed', null);
+        json(res, { ok: true, ...r });
+      } catch (e) {
+        json(res, { error: e.message }, 400);
+      }
+    });
+  }
+
+  /**
+   * Make saved prompts live.
+   *
+   * Queued, not executed, whenever a turn is in flight: the system prompt is the cached
+   * prefix and must not change underneath a request. When nothing is running there is no
+   * boundary to wait for, so it applies immediately and says so — the two cases are
+   * reported differently because "staged" and "applied" mean different things to someone
+   * deciding whether to send the next message.
+   */
+  function postPromptApply(req, res) {
+    body(req, (err) => {
+      if (err) return json(res, { error: err.message }, 400);
+      try {
+        if (session.agent?.busy) {
+          stageApply(session);
+          bus.publish('transcript', {
+            type: 'notice',
+            message:
+              'prompt changes queued — they take effect at the next step boundary, ' +
+              'and rebuild the cached prefix (the next turn pays full input price)',
+            origin: 'web',
+          });
+          bus.publish('session-changed', null);
+          return json(res, { ok: true, staged: true, applied: false });
+        }
+        const r = applyPrompts(session);
+        if (!r.applied) return json(res, { error: r.reason }, 400);
+        bus.publish('transcript', {
+          type: 'notice',
+          message: `prompts applied — system prompt rebuilt (~${r.after} tokens)`,
+          origin: 'web',
+        });
+        bus.publish('session-changed', null);
+        json(res, { ok: true, staged: false, ...r });
+      } catch (e) {
+        json(res, { error: e.message }, 400);
+      }
+    });
   }
 
   /** Context growth as a step series: each segment's creation adds its tokens. */
   function contextHistory() {
     const l = session.ledger;
-    if (!l) return { points: [], limit: null };
+    if (!l) return { points: [], limit: null, compactAt: null };
     const t0 = session.log?.startedAt || Date.now();
     let cum = l.systemTokens || 0;
     const applyCal = (n) => l.calibrator?.apply?.(n) ?? n;
     const points = [{ t: t0, tokens: applyCal(cum) }];
-    for (const s of l.segments || []) {
+    // Creation order, not array order. Compaction splices the summary *backwards* into
+    // the slot of the turns it replaced, so after the first compact the array is no
+    // longer sorted by createdAt — and uPlot needs x ascending, or the growth curve
+    // doubles back on itself.
+    const segs = [...(l.segments || [])].sort(
+      (a, b) => (a.createdAt || t0) - (b.createdAt || t0),
+    );
+    for (const s of segs) {
       cum += s.tokens || 0;
       points.push({ t: s.createdAt || t0, tokens: applyCal(cum) });
     }
-    return { points, limit: l.limit };
+    return { points, limit: l.limit, compactAt: l.compactAt ?? null };
   }
 
   /** One segment's content, for the detail view. Images report presence, not data. */
@@ -293,7 +426,9 @@ export function createWebServer({
       id: seg.id,
       type: seg.type,
       label: seg.label,
-      tokens: seg.tokens,
+      // Calibrated, like breakdown() and the id-0 branch above: a raw count here made
+      // the detail header disagree with the table row it was opened from.
+      tokens: session.ledger.calibrator?.apply?.(seg.tokens) ?? seg.tokens,
       pinned: seg.pinned,
       role: seg.role,
       text: seg.part?.type === 'text' ? seg.part.text : null,
@@ -345,7 +480,9 @@ export function createWebServer({
         for (const a of r.actions) contextChanged(a);
         json(res, { ok: true, freed: r.freed, actions: r.actions });
       } catch (e) {
-        json(res, { error: e.message }, 400);
+        // 409, not 400: the request was well-formed and will succeed once the
+        // compaction in flight finishes. The client distinguishes them.
+        json(res, { error: e.message }, e?.code === 'LEDGER_BUSY' ? 409 : 400);
       }
     });
   }
@@ -372,7 +509,7 @@ export function createWebServer({
         }
         json(res, { ok: true, freed: r.freed, actions: r.actions });
       } catch (e) {
-        json(res, { error: e.message }, 400);
+        json(res, { error: e.message }, e?.code === 'LEDGER_BUSY' ? 409 : 400);
       }
     });
   }

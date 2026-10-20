@@ -261,6 +261,8 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
  * @property {Record<string,string|undefined>} keys
  * @property {string[]} envFiles   which .env files were actually loaded
  * @property {string[]} warnings   startup notices for the operator, e.g. an ignored project setting
+ * @property {string[]} agentsFiles  DAVAI_AGENTS_MD, resolved; empty means use the default search
+ * @property {number|undefined} agentsBudget  max estimated tokens of agents files in grounding
  * @property {Record<string,{name: string, from: string|undefined}>} keyOrigins
  *   per provider: the variable that supplied the key and where it was set (never the value)
  * @property {{name: string, from: string|undefined}|undefined} baseURLOrigin  same, for the endpoint
@@ -372,6 +374,15 @@ export function loadConfig(opts = {}) {
     throw new Error(`DAVAI_MAX_COST must be a dollar amount >= 0, or 0 for no cap (got ${maxCost}).`);
   }
 
+  // The operator's own standing instructions. A path list like DAVAI_RO_DIRS, and it
+  // *replaces* the AGENTS.md/DAVAI.md/CLAUDE.md search rather than extending it: an
+  // explicit setting that still picks up surprise files is worse than one that does not.
+  // Resolved against cwd, not realpath'd — a dangling entry is reported by resolveAgents
+  // with the path in the message, which is more useful than silently dropping it.
+  const agentsFiles = splitPathList(merged.DAVAI_AGENTS_MD).map((p) => path.resolve(cwd, p));
+
+  const agentsBudget = positiveInt(merged.DAVAI_AGENTS_BUDGET, 'DAVAI_AGENTS_BUDGET');
+
   const roDirs = splitPathList(merged.DAVAI_RO_DIRS)
     .map((p) => {
       try {
@@ -434,6 +445,8 @@ export function loadConfig(opts = {}) {
     sudoTtlMs: Math.max(0, num(merged.DAVAI_SUDO_TTL, 900)) * 1000,
     contextLimit,
     limitsRequested,
+    agentsFiles,
+    agentsBudget,
     compactAt,
     maxCost,
     thinkingVisible: bool(merged.DAVAI_THINKING, false),

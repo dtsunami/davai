@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Ledger } from '../src/context/ledger.js';
 import { Pastes, looksLikePaste } from '../src/context/pastes.js';
 import { compact } from '../src/context/compact.js';
+import { dropSegment, pinSegment, summarizeSegments, runCompact } from '../src/context/manage.js';
 import { estimate, TokenCalibrator } from '../src/context/tokens.js';
 import { createOpsFilter } from '../src/headless.js';
 
@@ -142,6 +143,93 @@ describe('compaction', () => {
     expect(result.actions.some((a) => a.includes('summarized'))).toBe(true);
     const summary = l.segments.find((s) => s.type === 'summary');
     expect(summary.part.text).toContain('condensed summary');
+  });
+});
+
+describe('manual context management', () => {
+  const deps = {
+    cfg: { provider: 'anthropic' },
+    makeProvider: () => ({
+      async *send() {
+        yield { t: 'text', delta: 'condensed summary' };
+      },
+    }),
+  };
+
+  it('places the summary where the oldest selected segment sat, whatever order the ids arrive in', async () => {
+    const l = makeLedger();
+    const a = l.add({ type: 'user', label: 'q1', role: 'user', text: 'small question' });
+    const b = l.add({ type: 'assistant', label: 'a1', role: 'assistant', text: 'x'.repeat(4000) });
+    const keep = l.add({ type: 'user', label: 'q2', role: 'user', text: 'later question' });
+
+    // The web client sends breakdown() order — biggest first — so the largest segment
+    // leads. Taking that as the anchor put the summary after `keep`, reordering the
+    // conversation that toMessages() renders.
+    await summarizeSegments(l, [b.id, a.id], deps);
+
+    const labels = l.segments.map((s) => s.type);
+    expect(labels).toEqual(['grounding', 'summary', 'user']);
+    expect(l.segments[2].id).toBe(keep.id);
+  });
+
+  it('refuses to reshape the ledger while a compaction is in flight', async () => {
+    // Over the limit, so compaction reaches step 3 and actually awaits the summarizer —
+    // the only point at which the lock is observably held. A ledger under target frees
+    // nothing and returns synchronously enough that there is no window to race.
+    const l = makeLedger(800);
+    const ids = [];
+    for (let i = 0; i < 6; i++) {
+      ids.push(l.add({ type: 'user', label: `q${i}`, role: 'user', text: `question ${i} `.repeat(40) }).id);
+      ids.push(l.add({ type: 'assistant', label: `a${i}`, role: 'assistant', text: `answer ${i} `.repeat(40) }).id);
+    }
+
+    let announce;
+    let unpark;
+    const reached = new Promise((r) => { announce = r; });
+    const parked = new Promise((r) => { unpark = r; });
+    const slow = {
+      cfg: { provider: 'anthropic' },
+      makeProvider: () => ({
+        async *send() {
+          announce();
+          await parked;
+          yield { t: 'text', delta: 'condensed summary' };
+        },
+      }),
+    };
+
+    const first = runCompact(l, slow);
+    await reached; // the summarizer is now parked, mid-compaction, holding the lock
+
+    expect(l.compacting).toBe(true);
+    await expect(runCompact(l, deps)).rejects.toMatchObject({ code: 'LEDGER_BUSY' });
+    await expect(summarizeSegments(l, ids.slice(0, 2), deps)).rejects.toMatchObject({
+      code: 'LEDGER_BUSY',
+    });
+
+    unpark();
+    await first;
+    expect(l.compacting).toBe(false);
+    // Released, so the next one goes through rather than being refused forever.
+    await expect(runCompact(l, deps)).resolves.toBeDefined();
+  });
+
+  it('refuses a selection with nothing summarizable in it', async () => {
+    const l = makeLedger();
+    const op = l.add({ type: 'op-result', label: 'read', role: 'user', text: 'contents' });
+    await expect(summarizeSegments(l, [op.id], deps)).rejects.toThrow(/no summarizable/);
+  });
+
+  it('drops and pins through the same entry points the web routes use', () => {
+    const l = makeLedger();
+    const s = l.add({ type: 'user', label: 'q', role: 'user', text: 'hello' });
+    expect(pinSegment(l, s.id, true)).toBe(true);
+    expect(l.get(s.id).pinned).toBe(true);
+    expect(dropSegment(l, s.id)).toBe(true);
+    expect(l.get(s.id)).toBeUndefined();
+    // Grounding is structural: the ledger refuses it regardless of which view asked.
+    const grounding = l.segments.find((x) => x.type === 'grounding');
+    expect(dropSegment(l, grounding.id)).toBe(false);
   });
 });
 

@@ -18,6 +18,8 @@ import { buildGrounding } from '../agent/grounding.js';
 import { buildSystemPrompt } from '../agent/prompt.js';
 import { SessionLog, pruneSessions } from './log.js';
 import { findSession, restoreLedger } from './resume.js';
+import { drainPendingPrompts } from './promptedit.js';
+import { checkForks, describeStale, describeUnstamped } from '../agent/promptfork.js';
 import { PromptHistory } from './history.js';
 import { resolveHome } from '../config/env.js';
 
@@ -39,6 +41,32 @@ export async function createSession(opts = {}) {
     defaults: settingsToDefaults(settings),
     overrides: opts.overrides || {},
   });
+  // Before anything else reads cfg.prompts: an override forked from an older davai may
+  // describe a protocol that no longer exists, and the model has no way to know. A
+  // stale fork is positive evidence of drift, so it stops the session rather than
+  // warning into a scrollback nobody reads — the whole point is that silent prompt rot
+  // is undetectable from the transcript. `opts.acceptStalePrompts` is the escape hatch
+  // the CLI and the resolve commands use.
+  const forks = checkForks({ sources: cfg.promptSources, layers: cfg.promptLayers });
+  if (forks.stale.length && !opts.acceptStalePrompts) {
+    const err = new Error(
+      `${forks.stale.length} prompt override${forks.stale.length === 1 ? '' : 's'} ` +
+        `forked from an older davai:\n\n` +
+        describeStale(forks.stale).map((l) => `  ${l}`).join('\n\n') +
+        `\n\nResolve with one of:\n` +
+        `  /prompts diff <key>     see what changed in the built-in\n` +
+        `  /prompts accept <key>   keep your version, record today's built-in as its baseline\n` +
+        `  /prompts reset <key>    discard your version and use the built-in\n` +
+        `  davai --accept-prompts  start anyway, this once`,
+    );
+    err.code = 'PROMPT_FORK_STALE';
+    err.forks = forks.stale;
+    throw err;
+  }
+  // No recorded fork point is not evidence of anything — every fork predating this
+  // feature looks like it. Say so, do not block.
+  if (forks.unstamped.length) cfg.warnings.push(...describeUnstamped(forks.unstamped));
+
   const apiKey = requireKey(cfg);
   ensureHome(cfg);
   pruneSessions(cfg.home, prior ? { except: prior.dir } : {});
@@ -58,7 +86,17 @@ export async function createSession(opts = {}) {
   if (cfg.warnings.length) log.event('config-warnings', { warnings: cfg.warnings });
 
   const ledger = new Ledger({ limit: cfg.contextLimit, compactAt: cfg.compactAt });
-  const grounding = buildGrounding({ sandbox, cfg });
+  // After applyModelLimits, so the agents budget is clamped against the real context
+  // window rather than the seed spec's guess at it.
+  const ground = buildGrounding({ sandbox, cfg });
+  const grounding = ground.text;
+  // A clipped or unreadable agents file is the operator's problem to fix, and the old
+  // code discarded 42% of a large AGENTS.md without a word. Surface it where every other
+  // startup notice goes.
+  if (ground.notices.length) {
+    cfg.warnings.push(...ground.notices);
+    log.event('agents-notices', { notices: ground.notices });
+  }
   ledger.setSystem(buildSystemPrompt({ grounding, prompts: cfg.prompts }));
 
   // After setSystem, so the replay budget accounts for the cached prefix.
@@ -82,7 +120,7 @@ export async function createSession(opts = {}) {
     sudo: new SudoAuth({ ttlMs: cfg.sudoTtlMs ?? SUDO_TTL_MS }),
   });
 
-  return {
+  const session = {
     cfg,
     agent,
     ledger,
@@ -90,13 +128,25 @@ export async function createSession(opts = {}) {
     journal,
     log,
     settings,
+    // Which agents files were read, and whether any was clipped. The web sidecar reports
+    // these; without it a clipped file is a one-line startup warning that scrolls away.
+    agents: ground.agents,
     pastes: new Pastes(),
     history: new PromptHistory({ home: cfg.home, cwd: cfg.cwd }),
     artifacts: agent.artifacts,
     grounding,
     resumed,
     limitNotices,
+    /** Set by stageApply; drained by the agent at the next step boundary. */
+    pendingPrompts: null,
   };
+
+  // Bound to the session object rather than imported into the harness, so the agent
+  // stays unaware of session wiring. Only ever called from inside run(), long after
+  // this returns.
+  agent.onPendingPrompts = () => drainPendingPrompts(session);
+
+  return session;
 }
 
 function resolvePrior(home, resume) {

@@ -7,7 +7,7 @@ import { prepareTerminal, glyphs, formatTokens } from './theme.js';
 import { registerJsx } from './jsx-register.js';
 import { writeClipboard } from '../context/artifacts.js';
 
-export async function startTui({ input, cwd, overrides, resume, web }) {
+export async function startTui({ input, cwd, overrides, resume, acceptStalePrompts, web }) {
   registerJsx();
   prepareTerminal();
 
@@ -17,7 +17,7 @@ export async function startTui({ input, cwd, overrides, resume, web }) {
     import('./App.jsx'),
   ]);
 
-  const session = await createSession({ cwd, overrides, resume });
+  const session = await createSession({ cwd, overrides, resume, acceptStalePrompts });
   const { log } = session;
 
   // Started before Ink renders, so a failed bind is a plain error rather than something
