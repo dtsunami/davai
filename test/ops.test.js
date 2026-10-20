@@ -141,6 +141,13 @@ describe('write', () => {
     expect(out.status).toBe('ok');
     expect(read('a.js')).toBe('x');
   });
+
+  it('preserves the mode of an existing file on overwrite', async () => {
+    fs.chmodSync(path.join(root, 'a.js'), 0o755);
+    const out = await run([{ op: 'write', path: 'a.js', text: 'x', overwrite: true }]);
+    expect(out.status).toBe('ok');
+    expect(fs.statSync(path.join(root, 'a.js')).mode & 0o777).toBe(0o755);
+  });
 });
 
 describe('replace across line endings', () => {
@@ -227,6 +234,15 @@ describe('replace', () => {
     expect(read('a.js')).toContain('const b = 3;');
   });
 
+  it('preserves the mode of an existing file on replace', async () => {
+    fs.chmodSync(path.join(root, 'a.js'), 0o755);
+    const out = await run([
+      { op: 'replace', path: 'a.js', old: 'const b = 2;', new: 'const b = 3;' },
+    ]);
+    expect(out.status).toBe('ok');
+    expect(fs.statSync(path.join(root, 'a.js')).mode & 0o777).toBe(0o755);
+  });
+
   it('refuses an ambiguous match', async () => {
     const out = await run([{ op: 'replace', path: 'dup.js', old: 'x', new: 'y' }]);
     expect(out.status).toBe('plan-failed');
@@ -306,6 +322,30 @@ describe('batch atomicity', () => {
     ]);
     expect(out.status).toBe('apply-failed');
     expect(read('a.js')).toBe('const a = 1;\nconst b = 2;\nconst a2 = 1;\n');
+  });
+
+  it('restores the original mode when rolling back a failed batch', async () => {
+    fs.chmodSync(path.join(root, 'a.js'), 0o755);
+    const out = await run([
+      { op: 'write', path: 'a.js', text: 'q\nq\n', overwrite: true },
+      { op: 'replace', path: 'a.js', old: 'q', new: 'z' },
+    ]);
+    expect(out.status).toBe('apply-failed');
+    expect(read('a.js')).toBe('const a = 1;\nconst b = 2;\nconst a2 = 1;\n');
+    expect(fs.statSync(path.join(root, 'a.js')).mode & 0o777).toBe(0o755);
+  });
+
+  it('restores the mode of a deleted file on rollback', async () => {
+    fs.chmodSync(path.join(root, 'dup.js'), 0o700);
+    const out = await run([
+      { op: 'delete', path: 'dup.js' },
+      { op: 'write', path: 'bad.txt', text: 'a\0b' },
+    ]);
+    expect(out.status).toBe('apply-failed');
+    expect(exists('dup.js')).toBe(true);
+    expect(read('dup.js')).toBe('x\nx\nx\n');
+    expect(fs.statSync(path.join(root, 'dup.js')).mode & 0o777).toBe(0o700);
+    expect(exists('bad.txt')).toBe(false);
   });
 
   it('applies nothing when any op fails planning', async () => {

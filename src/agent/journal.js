@@ -44,6 +44,9 @@ export class Journal {
     const seq = String(++this.seq).padStart(4, '0');
     const snap = path.join(this.snapDir, `${seq}-${path.basename(abs)}`);
     fs.copyFileSync(abs, snap);
+    // copyFileSync does not preserve the source's mode, and rollback restores files
+    // from these snapshots — without this, a rolled-back executable comes back 0644.
+    fs.chmodSync(snap, stat.mode);
     return snap;
   }
 
@@ -95,8 +98,19 @@ export class Journal {
   static atomicWrite(abs, data) {
     const dir = path.dirname(abs);
     fs.mkdirSync(dir, { recursive: true });
+
+    // The temp file is a brand-new inode; without an explicit mode it would be born
+    // with 0644 and rename would strip an executable or private file's bits.
+    let mode;
+    try {
+      const st = fs.statSync(abs);
+      if (st.isFile()) mode = st.mode;
+    } catch {
+      /* new file: openSync default respects the umask */
+    }
+
     const tmp = path.join(dir, `.davai-${crypto.randomBytes(6).toString('hex')}.tmp`);
-    const fd = fs.openSync(tmp, 'w');
+    const fd = fs.openSync(tmp, 'w', mode);
     try {
       fs.writeSync(fd, data);
       fs.fsyncSync(fd);
@@ -149,8 +163,10 @@ function undoEntry(e) {
   switch (e.op) {
     case 'write':
     case 'replace':
-      if (e.pre) fs.copyFileSync(e.pre, e.path);
-      else if (!e.existed) rmrf(e.path); // we created it; remove it
+      if (e.pre) {
+        fs.copyFileSync(e.pre, e.path);
+        fs.chmodSync(e.path, fs.statSync(e.pre).mode);
+      } else if (!e.existed) rmrf(e.path); // we created it; remove it
       return;
 
     case 'delete':
@@ -158,6 +174,7 @@ function undoEntry(e) {
       else if (e.pre) {
         fs.mkdirSync(path.dirname(e.path), { recursive: true });
         fs.copyFileSync(e.pre, e.path);
+        fs.chmodSync(e.path, fs.statSync(e.pre).mode);
       }
       return;
 
@@ -174,7 +191,10 @@ function undoEntry(e) {
         fs.mkdirSync(path.dirname(e.from), { recursive: true });
         fs.renameSync(e.to, e.from);
       }
-      if (e.pre) fs.copyFileSync(e.pre, e.to);
+      if (e.pre) {
+        fs.copyFileSync(e.pre, e.to);
+        fs.chmodSync(e.to, fs.statSync(e.pre).mode);
+      }
       return;
 
     default:

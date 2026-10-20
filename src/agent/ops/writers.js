@@ -114,7 +114,9 @@ export function opMove(op, ctx) {
     // order is the deliberate part — copy first, remove second — so an interruption
     // leaves the file at both paths rather than neither. A duplicate is recoverable
     // and the journal's `copied` flag still rolls it back; a loss would not be.
+    const srcIsFile = fs.statSync(from).isFile();
     fs.cpSync(from, to, { recursive: true });
+    if (srcIsFile) fs.chmodSync(to, fs.statSync(from).mode);
     fs.rmSync(from, { recursive: true, force: true });
     copied = true;
   }

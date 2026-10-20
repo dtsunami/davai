@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "jsx": "react",
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "maxNodeModuleJsDepth": 0,
+    "forceConsistentCasingInFileNames": true,
+    "strict": false,
+    "noImplicitAny": false
+  },
+  "include": ["bin/**/*.js", "src/**/*.js", "scripts/**/*.js"],
+  "exclude": ["node_modules", "naten", "docs"]
+}
