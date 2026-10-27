@@ -35,6 +35,23 @@ const LOWER_EFFORT = { max: 'high', xhigh: 'high', high: 'medium', medium: 'low'
 const MAX_EFFORT_DEMOTIONS = 2;
 
 /**
+ * Degeneracy guard. Every other brake in this file is a step-boundary check, so a
+ * generation that collapses into a repeating cycle runs until max_tokens or until the
+ * operator presses esc — paid for at the full output rate the whole way.
+ *
+ * WINDOW is the tail examined, PROBE the hook used to find the previous occurrence of
+ * that tail, MAX_PERIOD the longest cycle treated as degenerate, and CHECK_EVERY how
+ * much new text may arrive between checks. The guard therefore trips after roughly
+ * WINDOW + CHECK_EVERY characters of repetition, not at the first one: a brake that
+ * fires on three identical lines would fire on legitimate output.
+ */
+const REPEAT_WINDOW = 2048;
+const REPEAT_PROBE = 64;
+const REPEAT_MAX_PERIOD = 512;
+const REPEAT_MIN_REPEATS = 4;
+const REPEAT_CHECK_EVERY = 1024;
+
+/**
  * First-person intent phrasing. A turn that ends on one of these and carries no ops is
  * an announcement, not an answer.
  */
@@ -105,6 +122,12 @@ export class Agent extends EventEmitter {
     };
     /** Operator text typed mid-run, applied at the next step boundary. */
     this.steers = [];
+    /**
+     * Set by the degeneracy guard when it aborts a turn. The abort itself goes through
+     * cancel(), so this is how run() tells a runaway generation from an operator's esc.
+     * @type {{period: number, repeats: number, unit: string, channel: string, turn: number}|null}
+     */
+    this.degenerate = null;
     /** How many of each event was emitted, and how many went nowhere. */
     this.eventCounts = {};
     this.unretiredEvents = {};
@@ -243,6 +266,7 @@ export class Agent extends EventEmitter {
   async run(input) {
     if (this.busy) throw new Error('agent is already running');
     this.busy = true;
+    this.degenerate = null;
     this.controller = new AbortController();
 
     try {
@@ -277,6 +301,21 @@ export class Agent extends EventEmitter {
 
         const turn = await this.#streamTurn();
         if (turn.cancelled) {
+          // An abort the guard caused, not one the operator asked for. Reported as an
+          // error because nothing ran and the turn's output is garbage, and named so the
+          // operator does not read it as a cancellation they do not remember making.
+          if (this.degenerate) {
+            const d = this.degenerate;
+            this.log.event('repetition-stop', d);
+            this.emit('error', {
+              message:
+                `The model's output collapsed into a repeating ${d.period}-character cycle ` +
+                `(${d.channel}, ~${d.repeats} repeats) and the turn was stopped before it ` +
+                `spent the rest of its output budget. Nothing was executed — ` +
+                `see /stream ${d.turn} for what it produced.`,
+            });
+            return;
+          }
           this.emit('cancelled');
           return;
         }
@@ -497,7 +536,14 @@ export class Agent extends EventEmitter {
     for (let demotion = 0; ; demotion++) {
       const turn = await this.#streamOnce(provider, messages, attemptBase);
       attemptBase += turn.attempts || 1;
-      if (turn.cancelled) return turn;
+      // A cancelled turn is still billed for everything that streamed before the abort.
+      // Returning without accounting reported a killed turn as free — $0.0000 in the
+      // footer after a minute of output. Best-effort by nature: a provider that only
+      // sends usage at the end of the stream sends none at all on a mid-stream abort.
+      if (turn.cancelled) {
+        if (turn.usage) this.#accountUsage(turn.usage);
+        return turn;
+      }
 
       const { text, thinking, usage, stop, toolCalls, ttftMs, durationMs } = turn;
       // Billed whatever happens next: a demoted retry pays for both attempts.
@@ -627,6 +673,9 @@ export class Agent extends EventEmitter {
     // `provider-retry` transcript entry carry it per attempt.
     let ttftMs;
     let durationMs;
+    // How much of the text channel the degeneracy guard has already seen, so the check
+    // runs once per CHECK_EVERY characters rather than once per delta.
+    const checked = { text: 0 };
     for (; ; attempt++) {
       // Opened before the request: from here on, everything streamed reaches disk as it
       // arrives rather than at turn end (session/stream.js).
@@ -650,6 +699,10 @@ export class Agent extends EventEmitter {
               text += ev.delta;
               this.log.stream?.write('text', ev.delta);
               this.emit('text', ev.delta);
+              if (text.length - checked.text >= REPEAT_CHECK_EVERY) {
+                checked.text = text.length;
+                this.#guardRepetition('text', text);
+              }
               break;
             case 'thinking':
               thinking += ev.delta;
@@ -682,7 +735,7 @@ export class Agent extends EventEmitter {
         // Whatever streamed before the failure is otherwise lost: the assistant event
         // below is never reached, and the UI drops the partial turn on cancel.
         this.#logPartial(err?.cancelled ? 'cancelled' : 'error', text, thinking, err);
-        if (err?.cancelled) return { cancelled: true, text, attempts: attempt + 1 };
+        if (err?.cancelled) return { cancelled: true, text, usage, attempts: attempt + 1 };
         // Retry only a transient failure that produced nothing: re-sending after the
         // model has already streamed half an answer would duplicate it. A 429 with
         // "limit: 0" is marked unretryable upstream precisely so it lands here.
@@ -698,7 +751,8 @@ export class Agent extends EventEmitter {
           message: err.message,
         });
         this.log.event('provider-retry', { attempt: attempt + 1, waitMs, message: err.message });
-        if (!(await this.#wait(waitMs))) return { cancelled: true, text, attempts: attempt + 1 };
+        if (!(await this.#wait(waitMs)))
+          return { cancelled: true, text, usage, attempts: attempt + 1 };
       }
     }
 
@@ -715,6 +769,29 @@ export class Agent extends EventEmitter {
       ttftMs,
       durationMs,
     };
+  }
+
+  /**
+   * Stop a turn whose output has collapsed into a repeating cycle.
+   *
+   * The abort goes through cancel() so the existing teardown applies unchanged: the
+   * partial text is logged, the stream record is closed as cancelled, and the ledger
+   * never sees the garbage. run() reads `degenerate` to say why. Stopping the run
+   * rather than retrying the turn is deliberate — a model that has started cycling has
+   * usually lost the thread of the task, and the operator is the right one to decide
+   * what to do about it.
+   */
+  #guardRepetition(channel, buf) {
+    if (this.degenerate) return;
+    const hit = detectRepetition(buf);
+    if (!hit) return;
+    this.degenerate = { period: hit.period, repeats: hit.repeats, channel, turn: this.stats.turns };
+    this.emit('warning', {
+      message:
+        `output is repeating a ${hit.period}-character cycle — stopping the turn ` +
+        `(${JSON.stringify(hit.unit.slice(0, 40))})`,
+    });
+    this.cancel();
   }
 
   /**
@@ -945,6 +1022,34 @@ function firstLine(text) {
  * Erring either way is cheap: a false positive spends one extra turn, and a miss
  * leaves today's behaviour, where the request is silently dropped.
  */
+/**
+ * Spot a runaway generation: the tail of the stream is one short unit repeated.
+ *
+ * Cheap by construction, because it runs mid-stream. The last PROBE characters are
+ * looked for one more time earlier in the window; the gap between the two occurrences
+ * is the only candidate period worth testing, and one string comparison decides whether
+ * the whole window really is that unit repeated. That is a `lastIndexOf` and a slice
+ * compare per call, rather than a scan over every possible period.
+ *
+ * Exact periodicity over the full window is required on purpose. Approximate matching
+ * would catch a few more cases and would also fire on legitimate repetitive output —
+ * a long table, a generated list — where the cost of a false positive is a killed turn.
+ *
+ * @returns {{period: number, repeats: number, unit: string}|null}
+ */
+export function detectRepetition(text) {
+  if (text.length < REPEAT_WINDOW) return null;
+  const tail = text.slice(-REPEAT_WINDOW);
+  const probe = tail.slice(-REPEAT_PROBE);
+  const at = tail.lastIndexOf(probe, tail.length - REPEAT_PROBE - 1);
+  if (at < 0) return null;
+  const period = tail.length - REPEAT_PROBE - at;
+  if (period < 1 || period > REPEAT_MAX_PERIOD) return null;
+  if (tail.length / period < REPEAT_MIN_REPEATS) return null;
+  if (tail.slice(period) !== tail.slice(0, -period)) return null;
+  return { period, repeats: Math.floor(tail.length / period), unit: tail.slice(-period) };
+}
+
 function stalled(prose) {
   const text = (prose || '').trim();
   if (!text) return true;
