@@ -14,6 +14,7 @@
  * @property {number} context         max input tokens
  * @property {number} maxOutput
  * @property {boolean} vision
+ * @property {boolean} [video]      accepts video input (Gemini natively; nothing else)
  * @property {boolean} effort         supports an effort/reasoning level
  * @property {boolean} thinking       supports adaptive thinking
  * @property {number|null} inputPrice  $ per 1M input tokens, null when unknown
@@ -107,6 +108,7 @@ export const MODELS = [
     context: 1_000_000,
     maxOutput: 64_000,
     vision: true,
+    video: true,
     effort: false,
     thinking: true,
     inputPrice: 1.25,
@@ -119,6 +121,7 @@ export const MODELS = [
     context: 1_000_000,
     maxOutput: 64_000,
     vision: true,
+    video: true,
     effort: false,
     thinking: true,
     inputPrice: 0.3,
@@ -291,6 +294,9 @@ export function resolveModel(provider, id) {
     context: 200_000,
     maxOutput: 32_000,
     vision: true,
+    // An unrecognized Gemini id is still served by the adapter that can carry video, so
+    // the capability follows the provider rather than the id. refineModel narrows it.
+    video: provider === 'gemini',
     effort: provider === 'anthropic' || provider === 'openai' || provider === 'openrouter',
     thinking: provider !== 'grok',
     inputPrice: null,
@@ -339,6 +345,10 @@ export function parseOpenRouterModel(raw) {
     vision: Array.isArray(modalities)
       ? modalities.includes('image')
       : /vision|claude|gpt-4|gpt-5|gemini/i.test(raw.id),
+    // OpenRouter lists a `video` input modality, but routing a video through it does not
+    // mean davai can send one: the request still goes out in Chat-Completions shape,
+    // which has no video part. Only the native Gemini adapter can carry it.
+    video: false,
     effort: hasReasoning,
     thinking: hasReasoning,
     inputPrice,
@@ -411,6 +421,14 @@ export async function refineModel(spec, { apiKey, baseURL, fetchImpl } = {}) {
       /* offline or custom proxy without /models — keep conservative defaults */
     }
     return spec;
+  }
+
+  // Every Gemini generation model since 1.5 takes video on the same inlineData envelope,
+  // and the models endpoint does not report input modalities — so this is derived from
+  // the family rather than read. Embedding and image-generation endpoints are excluded
+  // because they are not chat models at all.
+  if (spec.provider === 'gemini') {
+    spec.video = !/embedding|imagen|image-generation|aqa|veo/i.test(spec.id);
   }
 
   // Gemini's models list carries the real limits — the one provider besides Anthropic

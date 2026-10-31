@@ -941,7 +941,8 @@ async function viewSegment(id) {
   try {
     const d = await api(`/api/context/segment/${id}`);
     $('ctx-seg-title').textContent = `#${d.id} · ${d.type} · ${d.label} · ${fmtTokens(d.tokens)}`;
-    $('ctx-seg-body').textContent = d.text || (d.image ? '(image content)' : '');
+    $('ctx-seg-body').textContent =
+      d.text || (d.image ? '(image content)' : d.video ? '(video content)' : '');
     $('ctx-segment').hidden = false;
   } catch (e) {
     pushEntry({ type: 'error', message: e.message });
@@ -1067,6 +1068,7 @@ function modelRow(m) {
         m.inputPrice == null ? 'price n/a' : `$${m.inputPrice} / $${m.outputPrice} per Mtok`),
     );
     if (m.vision) meta.appendChild(el('span', 'tag', 'vision'));
+    if (m.video) meta.appendChild(el('span', 'tag', 'video'));
     if (m.effort || m.thinking) meta.appendChild(el('span', 'tag', 'reasoning'));
     if (m.maxOutput) meta.appendChild(el('span', 'muted', `${fmtTokens(m.maxOutput)} out`));
   }

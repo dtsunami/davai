@@ -134,6 +134,56 @@ describe('images', () => {
   });
 });
 
+describe('video', () => {
+  it('warns instead of attaching when the model has no video support', async () => {
+    session.sandbox = { resolveForRead: (p) => `/tmp/${p}` };
+    await build()('summarize @clip.mp4');
+    const warning = pushed.find((p) => p.type === 'warning');
+    expect(warning?.message).toMatch(/does not accept video/);
+    expect(session.ledger.add).not.toHaveBeenCalled();
+  });
+
+  it('gates on video, not vision — a vision-only model still refuses', async () => {
+    session.cfg.model = { id: 'gpt-5.1', vision: true, video: false };
+    session.sandbox = { resolveForRead: (p) => `/tmp/${p}` };
+    await build()('summarize @clip.mp4');
+    expect(pushed.find((p) => p.type === 'warning')?.message).toMatch(/does not accept video/);
+    expect(session.ledger.add).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The substituted text is what the model must receive. An earlier cut ran the agent on
+   * the pre-video string, so `[video: clip.mp4]` was dropped and the prompt arrived with
+   * a bare `@clip.mp4` the model had no way to resolve.
+   */
+  it('runs the agent on the text with the ref substituted', async () => {
+    session.cfg.model = { id: 'gemini-3-pro-preview', vision: true, video: false };
+    session.sandbox = { resolveForRead: (p) => `/tmp/${p}` };
+    await build()('summarize @clip.mp4');
+    expect(session.agent.ran).toEqual(['summarize [video: clip.mp4]']);
+  });
+
+  it('attaches an @-prefixed YouTube URL by reference, holding no bytes', async () => {
+    session.cfg.model = { id: 'gemini-3-pro-preview', vision: true, video: true };
+    session.sandbox = { resolveForRead: (p) => `/tmp/${p}` };
+    await build()('summarize @https://youtu.be/dQw4w9WgXcQ');
+    expect(session.ledger.add).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'paste',
+        label: 'youtube https://youtu.be/dQw4w9WgXcQ',
+        video: expect.objectContaining({ uri: 'https://youtu.be/dQw4w9WgXcQ' }),
+      }),
+    );
+  });
+
+  it('refuses a YouTube URL on a model without video, like a local file', async () => {
+    session.sandbox = { resolveForRead: (p) => `/tmp/${p}` };
+    await build()('summarize @https://youtu.be/dQw4w9WgXcQ');
+    expect(pushed.find((p) => p.type === 'warning')?.message).toMatch(/does not accept video/);
+    expect(session.ledger.add).not.toHaveBeenCalled();
+  });
+});
+
 describe('pastes', () => {
   it('adds referenced pastes to context before the prompt', async () => {
     session.pastes = {

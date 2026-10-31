@@ -19,6 +19,22 @@ import { StreamLog } from './stream.js';
 /** Anything that looks like a credential is redacted on the way in. */
 const SECRET = /\b(sk-[A-Za-z0-9_-]{16,}|xai-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{20,})\b/g;
 
+/**
+ * A base URL reduced to origin + path. Credentials are sometimes carried in a query
+ * string (`?token=…`, `?key=…`), and `redact` above only catches known key prefixes and
+ * key-ish property names — neither of which fires on a URL in a plain string field.
+ * Dropping the query entirely is cheaper than enumerating the ways a secret hides in one.
+ */
+export function safeEndpoint(url) {
+  if (!url) return null;
+  try {
+    const u = new URL(String(url));
+    return `${u.origin}${u.pathname}`.replace(/\/$/, '');
+  } catch {
+    return '(unparseable)';
+  }
+}
+
 export function redact(value) {
   if (typeof value === 'string') return value.replace(SECRET, '<redacted>');
   if (Array.isArray(value)) return value.map(redact);
@@ -51,6 +67,12 @@ export class SessionLog {
       startedAt: new Date().toISOString(),
       cwd: cfg.cwd,
       provider: cfg.provider,
+      // Which server received the request. The adapters resolve this per provider and it
+      // is absent from the transcript otherwise, so a session against a proxy was
+      // indistinguishable from one against the vendor. Query strings are dropped: a
+      // base URL is a place where a token is sometimes smuggled, and `redact` only
+      // matches known key shapes and key-ish property names.
+      baseURL: safeEndpoint(cfg.baseURL),
       model: cfg.model.id,
       effort: cfg.effort,
       roDirs: cfg.roDirs,

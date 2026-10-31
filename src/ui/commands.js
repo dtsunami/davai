@@ -10,6 +10,7 @@ import { checkForks, stampFork, snapshot, hashText } from '../agent/promptfork.j
 import { runShell } from '../agent/ops/shell.js';
 import { gateShell } from '../agent/ops/executor.js';
 import { loadImage, clipboardImage } from '../context/images.js';
+import { loadVideo, youtubeRef, isYouTubeUrl } from '../context/video.js';
 import { listSessions } from '../session/log.js';
 import { readStream } from '../session/stream.js';
 import { runCompact } from '../context/manage.js';
@@ -22,6 +23,8 @@ const HELP = `Commands
   /context            context breakdown (also ctrl+g)
   /artifacts          artifacts from this session (also ctrl+a)
   /image [path]       attach an image (no path = clipboard, Windows)
+  /video <path>       attach a video (Gemini only)
+  /youtube <url>      attach a YouTube video; add minutes to cost it accurately
   /compact            compact the context now
   /sessions           recent sessions
   /stream [n]         streamed reasoning + text for a turn, read back from disk
@@ -453,6 +456,82 @@ export async function handleCommand(text, deps) {
       } catch (err) {
         push({ type: 'error', message: err.message });
       }
+      return { handled: true };
+    }
+
+    case 'video': {
+      if (!cfg.model.video) {
+        push({
+          type: 'warning',
+          message:
+            `${cfg.model.id} does not accept video — only Gemini models take it natively. ` +
+            'Switch model with /model, or extract frames and use /image.',
+        });
+        return { handled: true };
+      }
+      if (!arg) {
+        // No clipboard branch: there is no "copy a video" the way there is for an image,
+        // and a path is the only sensible source.
+        push({ type: 'warning', message: 'usage: /video <path>' });
+        return { handled: true };
+      }
+      try {
+        const vid = loadVideo(arg, sandbox);
+        ledger.add({
+          type: 'paste',
+          label: `video ${vid.name} (${(vid.bytes / 1024 / 1024).toFixed(1)}MB)`,
+          role: 'user',
+          video: vid,
+        });
+        push({
+          type: 'notice',
+          message: `attached ${vid.name} (~${vid.tokens} tokens, estimated from file size)`,
+        });
+        refresh();
+      } catch (err) {
+        push({ type: 'error', message: err.message });
+      }
+      return { handled: true };
+    }
+
+    case 'youtube': {
+      if (!cfg.model.video) {
+        push({
+          type: 'warning',
+          message:
+            `${cfg.model.id} does not accept video — only Gemini models take it natively. ` +
+            'Switch model with /model.',
+        });
+        return { handled: true };
+      }
+      // "<url> [minutes]" — the duration is optional and only affects the context
+      // estimate, never what is sent.
+      const [url, mins] = (arg || '').split(/\s+/);
+      if (!url) {
+        push({ type: 'warning', message: 'usage: /youtube <url> [minutes]' });
+        return { handled: true };
+      }
+      if (!isYouTubeUrl(url)) {
+        push({
+          type: 'warning',
+          message: `${url} is not a YouTube URL. Use /video <path> for a local file.`,
+        });
+        return { handled: true };
+      }
+      const yt = youtubeRef(url, { minutes: Number(mins) });
+      ledger.add({
+        type: 'paste',
+        label: `youtube ${yt.uri}`,
+        role: 'user',
+        video: yt,
+      });
+      push({
+        type: 'notice',
+        message: yt.assumed
+          ? `attached ${yt.uri} (~${yt.tokens} tokens, assuming ${yt.minutes} minutes)`
+          : `attached ${yt.uri} (~${yt.tokens} tokens for ${yt.minutes} minutes)`,
+      });
+      refresh();
       return { handled: true };
     }
 

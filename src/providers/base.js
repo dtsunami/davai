@@ -16,7 +16,14 @@
  *                              (or a provider's own reason, passed through, e.g. tool_calls)
  *
  * A `message` is { role: 'user'|'assistant', content: Part[] } where a Part is
- * { type:'text', text } or { type:'image', mediaType, data }  (data = base64).
+ * { type:'text', text }, { type:'image', mediaType, data } or
+ * { type:'video', mediaType, data }  (data = base64).
+ *
+ * Only the Gemini adapter accepts a video part; the rest throw videoUnsupported() when
+ * they meet one. Video is gated on `cfg.model.video` before it ever reaches a ledger,
+ * so a throw here means the capability flag and the adapter disagree — which is a bug
+ * worth a loud failure rather than a request that silently omits the thing the prompt
+ * is asking about.
  */
 
 /**
@@ -66,6 +73,59 @@ export function textOf(message) {
 /** True when a message carries at least one image part. */
 export function hasImages(messages) {
   return messages.some((m) => (m.content || []).some((p) => p.type === 'image'));
+}
+
+/** True when a message carries at least one video part. */
+export function hasVideo(messages) {
+  return messages.some((m) => (m.content || []).some((p) => p.type === 'video'));
+}
+
+/**
+ * Describe the non-text parts of an outgoing request, payloads excluded.
+ *
+ * The transcript records the prompt text, so an attachment that was rejected by the
+ * provider leaves no trace of what was actually attached — the `[video: url]` substituted
+ * into the text proves a ref was *recognised*, not that a part was built from it or what
+ * shape it took. Logging the descriptor closes that gap for the cost of a few bytes a
+ * turn; logging the part itself would put a 10MB base64 blob in a jsonl file.
+ *
+ * Byte counts are derived from the base64 length rather than carried, because a ledger
+ * part keeps no file size once it is encoded.
+ *
+ * @param {{role: string, content: object[]}[]} messages
+ * @returns {{role: string, type: string, mediaType: string|null, uri?: string, bytes?: number}[]}
+ */
+export function describeParts(messages) {
+  const out = [];
+  for (const m of messages || []) {
+    for (const p of m.content || []) {
+      if (!p || p.type === 'text') continue;
+      out.push({
+        role: m.role,
+        type: p.type,
+        mediaType: p.mediaType ?? null,
+        // A part carries bytes or a URI, never both (context/ledger.js).
+        ...(p.uri ? { uri: p.uri } : {}),
+        ...(p.data ? { bytes: Math.floor((p.data.length * 3) / 4) } : {}),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Raised by every adapter except Gemini's when a video part reaches it.
+ *
+ * Deliberately not a silent drop. The alternative — omitting the part and sending the
+ * prompt anyway — produces a model confidently answering a question about a video it
+ * was never given, which is indistinguishable from a hallucination at the transcript.
+ */
+export function videoUnsupported(provider) {
+  return new ProviderError(
+    `${provider}: video input is not supported — only Gemini models take video natively. ` +
+      'Switch model, or extract frames and attach them as images.',
+    { provider },
+  );
 }
 
 /**

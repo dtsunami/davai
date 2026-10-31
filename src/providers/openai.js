@@ -17,7 +17,7 @@
  * loop runs any that hold a batch (agent/native.js) and logs every one.
  */
 import OpenAI from 'openai';
-import { OPENAI_EFFORT, OPENROUTER_EFFORT, wrapError } from './base.js';
+import { OPENAI_EFFORT, OPENROUTER_EFFORT, videoUnsupported, wrapError } from './base.js';
 
 export function createOpenAI({
   apiKey,
@@ -195,11 +195,13 @@ export function mergeToolCallDeltas(acc, deltas) {
 }
 
 function toOpenAIMessage(m) {
-  const parts = m.content.map((p) =>
-    p.type === 'image'
-      ? { type: 'image_url', image_url: { url: `data:${p.mediaType};base64,${p.data}` } }
-      : { type: 'text', text: p.text },
-  );
+  const parts = m.content.map((p) => {
+    if (p.type === 'image') {
+      return { type: 'image_url', image_url: { url: `data:${p.mediaType};base64,${p.data}` } };
+    }
+    if (p.type === 'video') throw videoUnsupported('openai');
+    return { type: 'text', text: p.text };
+  });
   // A text-only message is cheaper to send as a plain string.
   if (parts.every((p) => p.type === 'text')) {
     return { role: m.role, content: parts.map((p) => p.text).join('\n') };

@@ -10,6 +10,7 @@
  */
 import { handleCommand } from '../ui/commands.js';
 import { extractImageRefs, loadImage } from '../context/images.js';
+import { extractVideoRefs, loadVideo, youtubeRef } from '../context/video.js';
 
 /**
  * @param {object} opts
@@ -96,8 +97,66 @@ export function createDispatcher({ session, view }) {
       }
     }
 
-    push({ type: 'user', text: withoutImages });
+    // @path references to video, same shape — but gated on a different capability, since
+    // a vision model that cannot take video is the common case rather than the exception.
+    const { text: withoutMedia, videos, youtube } = extractVideoRefs(
+      withoutImages,
+      session.sandbox,
+    );
+    for (const url of youtube) {
+      if (!cfg.model.video) {
+        push({
+          type: 'warning',
+          message:
+            `${cfg.model.id} does not accept video — ${url} was not attached. ` +
+            'Only Gemini models take video natively.',
+        });
+        continue;
+      }
+      const yt = youtubeRef(url);
+      ledger.add({
+        type: 'paste',
+        label: `youtube ${yt.uri}`,
+        role: 'user',
+        video: yt,
+      });
+      push({
+        type: 'notice',
+        message:
+          `attached ${yt.uri} (~${yt.tokens} tokens, assuming ${yt.minutes} minutes — ` +
+          `use /youtube <url> <minutes> if that is wrong)`,
+      });
+    }
+
+    for (const ref of videos) {
+      if (!cfg.model.video) {
+        push({
+          type: 'warning',
+          message:
+            `${cfg.model.id} does not accept video — ${ref} was not attached. ` +
+            'Only Gemini models take video natively.',
+        });
+        continue;
+      }
+      try {
+        const vid = loadVideo(ref, session.sandbox);
+        ledger.add({
+          type: 'paste',
+          label: `video ${vid.name} (${(vid.bytes / 1024 / 1024).toFixed(1)}MB)`,
+          role: 'user',
+          video: vid,
+        });
+        push({
+          type: 'notice',
+          message: `attached ${vid.name} (~${vid.tokens} tokens, estimated from file size)`,
+        });
+      } catch (err) {
+        push({ type: 'warning', message: err.message });
+      }
+    }
+
+    push({ type: 'user', text: withoutMedia });
     onRunStart();
-    await agent.run(withoutImages);
+    await agent.run(withoutMedia);
   };
 }

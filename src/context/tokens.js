@@ -40,6 +40,33 @@ export function estimateImage(bytes) {
 }
 
 /**
+ * Gemini bills video by *duration*: 263 tokens per second of footage at the default
+ * media resolution, plus ~32/s when the audio track is read. Duration is the number we
+ * do not have — reading it means parsing container metadata, and the formats we accept
+ * put it in nine different places — so it is inferred from file size against an assumed
+ * bitrate.
+ *
+ * That inference is the weakest number in this file and it is deliberately visible
+ * rather than buried in a magic divisor: a 4K clip at 40 Mbit/s is over-estimated by
+ * ~20x, and a heavily-compressed screen recording under-estimated by similar. It is
+ * here because the alternative is pricing video at zero in the context pane, and video
+ * is the one attachment that can spend a six-figure token budget from a 10MB file.
+ * Reconciliation against the provider's reported usage corrects it after the first turn.
+ */
+const VIDEO_BYTES_PER_SECOND = 187_500; // ~1.5 Mbit/s, typical compressed 1080p
+export const VIDEO_TOKENS_PER_SECOND = 295; // 263 visual + ~32 audio
+
+export function estimateVideo(bytes) {
+  const seconds = bytes / VIDEO_BYTES_PER_SECOND;
+  return Math.max(VIDEO_TOKENS_PER_SECOND, Math.round(seconds * VIDEO_TOKENS_PER_SECOND));
+}
+
+/** Seconds of footage implied by a byte count, for labelling an attachment. */
+export function videoSeconds(bytes) {
+  return bytes / VIDEO_BYTES_PER_SECOND;
+}
+
+/**
  * Tracks the ratio between our estimate and the provider's reported count, so the
  * live bar converges on reality over a session instead of staying permanently wrong.
  */

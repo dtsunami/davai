@@ -10,7 +10,7 @@
  *    so caching it is the single largest cost lever available
  */
 import Anthropic from '@anthropic-ai/sdk';
-import { wrapError } from './base.js';
+import { videoUnsupported, wrapError } from './base.js';
 
 export function createAnthropic({ apiKey, model, maxTokens, effort, temperature, thinkingVisible }) {
   const client = new Anthropic({ apiKey, maxRetries: 3, timeout: 10 * 60 * 1000 });
@@ -110,11 +110,13 @@ export function createAnthropic({ apiKey, model, maxTokens, effort, temperature,
 function toAnthropicMessage(m) {
   return {
     role: m.role,
-    content: m.content.map((p) =>
-      p.type === 'image'
-        ? { type: 'image', source: { type: 'base64', media_type: p.mediaType, data: p.data } }
-        : { type: 'text', text: p.text },
-    ),
+    content: m.content.map((p) => {
+      if (p.type === 'image') {
+        return { type: 'image', source: { type: 'base64', media_type: p.mediaType, data: p.data } };
+      }
+      if (p.type === 'video') throw videoUnsupported('anthropic');
+      return { type: 'text', text: p.text };
+    }),
   };
 }
 

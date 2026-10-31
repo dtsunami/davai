@@ -211,4 +211,47 @@ describe('createOpenAIResponses request shape', () => {
       image_url: 'data:image/png;base64,AAAA',
     });
   });
+
+  /**
+   * A by-reference video has no bytes, so an adapter that only checked for `data` would
+   * sail past it and send a part with neither text nor image. The refusal is on the part
+   * type, not on its payload.
+   */
+  it('refuses a by-reference video the same as an uploaded one', async () => {
+    const client = spyClient();
+    const p = createOpenAIResponses({ model: 'gpt-5', maxTokens: 100, client });
+    await expect(
+      collect(
+        p.send({
+          system: 'S',
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'video', uri: 'https://youtu.be/dQw4w9WgXcQ' }],
+            },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/video input is not supported/);
+  });
+
+  /**
+   * A dropped video part would produce a model answering confidently about footage it
+   * never received, which reads as a hallucination rather than a configuration error.
+   * The throw is the feature.
+   */
+  it('refuses a video part rather than silently dropping it', async () => {
+    const client = spyClient();
+    const p = createOpenAIResponses({ model: 'gpt-5', maxTokens: 100, client });
+    await expect(
+      collect(
+        p.send({
+          system: 'S',
+          messages: [
+            { role: 'user', content: [{ type: 'video', mediaType: 'video/mp4', data: 'AAAA' }] },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/video input is not supported/);
+  });
 });

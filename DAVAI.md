@@ -73,6 +73,55 @@ and remote access.
   copy in `complete.js` is why `/stream` and `/prompts` reached the help text, the
   dispatcher and the browser but could not be tab-completed in the REPL.
 
+## Video input
+
+Gemini is the only provider davai can send video to, so `src/context/video.js` sits
+beside `images.js` rather than inside it, and `cfg.model.video` is a separate capability
+from `cfg.model.vision`.
+
+- **Video rides `inlineData`, exactly like an image.** That is why `gemini.js` has no
+  video branch — the part type widened and the wire shape did not. The other three
+  adapters `throw videoUnsupported()` instead. Dropping the part and sending the prompt
+  anyway would produce a model answering confidently about footage it never received,
+  which is indistinguishable from a hallucination in the transcript.
+- **`video` is not implied by `vision`.** A vision-capable model that cannot take video
+  is the common case, not the exception, so reusing the vision flag would have offered
+  video on every GPT and Claude model and failed at the adapter. The flag is seeded for
+  Gemini models, derived from the family in `refineModel` (the models endpoint reports no
+  input modalities), and forced `false` for OpenRouter — it lists a `video` input
+  modality, but routing through it still sends a Chat-Completions body with nowhere to
+  put the data.
+- **Video is billed by duration, images by pixels.** `estimateVideo` infers seconds from
+  file size against an assumed bitrate, which is the weakest number in `tokens.js` and is
+  written to be visibly so. It is there because the alternative is pricing video at zero
+  in the context pane, and video is the one attachment that can spend a six-figure token
+  budget from a 10MB file. The ledger takes the loader's figure rather than re-deriving
+  it from the base64 length, which would bill a 40k-token clip like a 1600-token image.
+  Calibration against reported usage corrects it after the first turn.
+- **The cap is the request's, not the file's.** Inline data limits the whole request to
+  20MB, so a file is checked at 18MB — a video that only just fits alone would otherwise
+  push the request over as soon as there was a conversation attached to it. Larger files
+  are the Files API's job, which is a separate upload-and-poll flow davai does not
+  implement; the error says so rather than letting the upload fail.
+- `extractVideoRefs` runs after `extractImageRefs` and the agent runs on the text both
+  have substituted. Running it on the pre-video string dropped `[video: clip.mp4]` and
+  sent a bare `@clip.mp4` the model could not resolve; `test/dispatch.test.js` pins it.
+- **A YouTube video is referenced, not uploaded.** `fileData.fileUri` rather than
+  `inlineData.data` — Gemini's backend fetches it, so it is the one part davai sends
+  without holding its bytes, and every byte-derived rule above is inapplicable to it. The
+  mime type is omitted deliberately: asserting `video/mp4` for a stream we have never
+  seen is a claim we cannot support. A ledger part carries `data` or `uri`, never both,
+  and the adapters refuse on the part *type* — an adapter checking for `data` would wave
+  a by-reference video through and send a part with neither text nor image in it.
+- **The `@` is required for a URL too.** A link pasted into a sentence almost always
+  means "let us discuss this", not "watch this and bill me for an hour of footage". An
+  attachment costing tens of thousands of tokens must not be triggerable by accident, so
+  a URL opts in exactly as a path does.
+- **A YouTube duration is unknowable from here**, so `/youtube <url> [minutes]` takes one
+  and the notice says whether it used the operator's figure or assumed ten. Nothing about
+  the request changes either way — it only moves the context estimate, which is otherwise
+  wrong by whatever the real runtime is.
+
 ## Perf plots
 
 The same measurements in three resolutions: a hand-drawn canvas sparkline in the header,

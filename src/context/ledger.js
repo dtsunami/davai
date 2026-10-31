@@ -5,7 +5,7 @@
  * addressable segments — which turns "granular context management and display" into
  * a table render rather than a feature.
  */
-import { estimate, estimateImage, TokenCalibrator } from './tokens.js';
+import { estimate, estimateImage, estimateVideo, TokenCalibrator } from './tokens.js';
 
 /** Segment types, in the order they appear in the prompt. */
 export const TYPES = [
@@ -32,7 +32,7 @@ let nextId = 1;
  * @property {number} tokens
  * @property {boolean} pinned
  * @property {number} createdAt
- * @property {{type:'text',text:string}|{type:'image',mediaType:string,data:string}} part
+ * @property {{type:'text',text:string}|{type:'image'|'video',mediaType:string,data:string}} part
  */
 
 export class Ledger {
@@ -88,16 +88,30 @@ export class Ledger {
 
   /**
    * @param {{type: string, label: string, role?: 'user'|'assistant', text?: string,
-   *          image?: {mediaType: string, data: string}, pinned?: boolean}} spec
+   *          image?: {mediaType: string, data: string},
+   *          video?: {mediaType: string, data: string, tokens?: number},
+   *          pinned?: boolean}} spec
    * @returns {Segment}
    */
   add(spec) {
-    const part = spec.image
-      ? { type: 'image', mediaType: spec.image.mediaType, data: spec.image.data }
+    const media = spec.image || spec.video;
+    const mediaKind = spec.image ? 'image' : spec.video ? 'video' : null;
+    // A video is either inline bytes or a URI the provider fetches itself; a part carries
+    // one or the other, never both, and the adapters switch on which is present.
+    const part = media
+      ? media.uri
+        ? { type: mediaKind, mediaType: media.mediaType ?? null, uri: media.uri }
+        : { type: mediaKind, mediaType: media.mediaType, data: media.data }
       : { type: 'text', text: spec.text ?? '' };
-    const tokens = spec.image
-      ? estimateImage(Buffer.byteLength(spec.image.data, 'base64'))
-      : estimate(part.text);
+    // A video's cost comes from its duration, which the loader has already inferred;
+    // re-deriving it from the base64 length here would discard that and bill a 40k-token
+    // clip like a 1600-token image. A by-reference video has no bytes to fall back on.
+    const tokens = spec.video
+      ? (spec.video.tokens ??
+        (spec.video.data ? estimateVideo(Buffer.byteLength(spec.video.data, 'base64')) : 0))
+      : spec.image
+        ? estimateImage(Buffer.byteLength(spec.image.data, 'base64'))
+        : estimate(part.text);
 
     const seg = {
       id: nextId++,

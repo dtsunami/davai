@@ -104,6 +104,7 @@ export function serializeModel(m) {
     context: m.context ?? null,
     maxOutput: m.maxOutput ?? null,
     vision: Boolean(m.vision),
+    video: Boolean(m.video),
     effort: Boolean(m.effort),
     thinking: Boolean(m.thinking),
     inputPrice: m.inputPrice ?? null,

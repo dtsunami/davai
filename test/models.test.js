@@ -121,12 +121,12 @@ describe('serializeModel', () => {
   it('reduces a spec to the fields a view renders', () => {
     const out = serializeModel({
       id: 'x/y', label: 'Y', context: 1000, maxOutput: 100,
-      vision: true, effort: false, thinking: true,
+      vision: true, video: false, effort: false, thinking: true,
       inputPrice: 1, outputPrice: 2, secret: 'dropped',
     });
     expect(out).toEqual({
       id: 'x/y', label: 'Y', context: 1000, maxOutput: 100,
-      vision: true, effort: false, thinking: true,
+      vision: true, video: false, effort: false, thinking: true,
       inputPrice: 1, outputPrice: 2, remoteOnly: false, unverified: false,
     });
   });

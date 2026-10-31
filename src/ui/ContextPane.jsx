@@ -62,7 +62,7 @@ export function ContextPane({ ledger, width, onChange, onClose }) {
 
   if (viewing !== null) {
     const seg = viewing === 0 ? { part: { type: 'text', text: ledger.system } } : ledger.get(viewing);
-    const text = seg?.part?.type === 'text' ? seg.part.text : '(binary or image content)';
+    const text = seg?.part?.type === 'text' ? seg.part.text : `(${seg?.part?.type || 'binary'} content)`;
     const lines = text.split('\n').slice(0, 40);
     return (
       <Box flexDirection="column" borderStyle="round" borderColor={colors.accent} paddingX={1}>

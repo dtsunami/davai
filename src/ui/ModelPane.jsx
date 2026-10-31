@@ -276,6 +276,7 @@ export function ModelPane({ session, onClose, push }) {
                           : `$${m.inputPrice}/$${m.outputPrice} per Mtok`}
                       </Text>
                       <Text color={colors.dim}>{m.vision ? '  vision' : ''}</Text>
+                      <Text color={colors.dim}>{m.video ? '  video' : ''}</Text>
                     </>
                   )}
                 </Box>

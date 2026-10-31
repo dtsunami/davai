@@ -433,6 +433,7 @@ export function createWebServer({
       role: seg.role,
       text: seg.part?.type === 'text' ? seg.part.text : null,
       image: seg.part?.type === 'image',
+      video: seg.part?.type === 'video',
     });
   }
 

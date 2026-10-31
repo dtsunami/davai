@@ -14,7 +14,7 @@ import { DEFAULT_PROMPTS, opsResultPrompt, repairPrompt, steerPrompt } from './p
 import { describeNative, nativeCallPrompt, resolveNativeCalls, salvageNote } from './native.js';
 import { compact } from '../context/compact.js';
 import { costOf, isPriceEstimated } from '../config/models.js';
-import { billedInput } from '../providers/base.js';
+import { billedInput, describeParts } from '../providers/base.js';
 
 const MAX_REPAIRS = 2;
 const MAX_STEPS = 60;
@@ -437,8 +437,14 @@ export class Agent extends EventEmitter {
       });
     } catch (err) {
       if (err?.cancelled) this.emit('cancelled');
-      else this.emit('error', { message: err.message, detail: err.stack });
-      this.log.event('error', { message: err.message });
+      // A ProviderError's `detail` is the unwrapped response body; a stack is only
+      // informative for a bug on this side. Prefer the former where it exists.
+      else this.emit('error', { message: err.message, detail: err.detail || err.stack });
+      this.log.event('error', {
+        message: err.message,
+        ...(err?.status ? { status: err.status } : {}),
+        ...(err?.detail ? { detail: err.detail } : {}),
+      });
     } finally {
       this.busy = false;
       this.controller = null;
@@ -633,6 +639,18 @@ export class Agent extends EventEmitter {
       this.log.stream?.begin(this.stats.turns, attemptBase + attempt);
       const requestAt = Date.now();
       let firstDeltaAt = null;
+      // Logged per attempt, before the request: an attachment the provider rejects is
+      // otherwise invisible here, since the transcript carries the substituted prompt
+      // text and not the parts built from it.
+      const outgoingMedia = describeParts(messages);
+      if (outgoingMedia.length) {
+        this.log.event('request-media', {
+          attempt: attemptBase + attempt,
+          provider: this.cfg?.provider,
+          model: this.cfg?.model?.id,
+          parts: outgoingMedia,
+        });
+      }
       try {
         for await (const ev of provider.send({
           system: this.ledger.system,
@@ -679,6 +697,21 @@ export class Agent extends EventEmitter {
           status: err?.cancelled ? 'cancelled' : 'error',
           ...(err?.message ? { error: err.message } : {}),
         });
+        // The full provider response, beside the request that drew it. `message` is
+        // condensed to 300 chars by wrapError and the nested original lives in `detail`,
+        // which nothing logged until now — on a rejected attachment that is exactly where
+        // the reason sits.
+        if (!err?.cancelled) {
+          this.log.event('provider-error', {
+            attempt: attemptBase + attempt,
+            message: err?.message,
+            ...(err?.status ? { status: err.status } : {}),
+            ...(err?.retryable != null ? { retryable: err.retryable } : {}),
+            ...(err?.detail ? { detail: err.detail } : {}),
+            ...(err?.requestMedia ? { requestMedia: err.requestMedia } : {}),
+            ...(outgoingMedia.length ? { ledgerMedia: outgoingMedia } : {}),
+          });
+        }
         // Whatever streamed before the failure is otherwise lost: the assistant event
         // below is never reached, and the UI drops the partial turn on cancel.
         this.#logPartial(err?.cancelled ? 'cancelled' : 'error', text, thinking, err);

@@ -18,7 +18,7 @@
  *    own history every turn and never uses previous_response_id, so it opts out.
  */
 import OpenAI from 'openai';
-import { OPENAI_EFFORT, wrapError } from './base.js';
+import { OPENAI_EFFORT, videoUnsupported, wrapError } from './base.js';
 
 export function createOpenAIResponses({
   apiKey,
@@ -179,6 +179,7 @@ function toResponsesItem(m) {
       if (p.type === 'image') {
         return { type: 'input_image', image_url: `data:${p.mediaType};base64,${p.data}` };
       }
+      if (p.type === 'video') throw videoUnsupported('openai');
       return { type: assistant ? 'output_text' : 'input_text', text: p.text };
     }),
   };

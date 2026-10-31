@@ -305,7 +305,7 @@ describe('routes', () => {
     // Serialized, not raw: a 300-model payload has no business carrying internals.
     expect(Object.keys(d.models[0]).sort()).toEqual([
       'context', 'effort', 'id', 'inputPrice', 'label', 'maxOutput',
-      'outputPrice', 'remoteOnly', 'thinking', 'unverified', 'vision',
+      'outputPrice', 'remoteOnly', 'thinking', 'unverified', 'video', 'vision',
     ]);
   });
 
