@@ -87,6 +87,18 @@ describe('replaySegments', () => {
     expect(specs[3].text).toContain('git status');
   });
 
+  it('restores assistant thinking from transcript events', () => {
+    const dir = writeSession('cccc444445', {
+      startedAt: '2026-09-04T11:00:00.000Z',
+      events: [
+        { type: 'user', text: 'ping' },
+        { type: 'assistant', text: 'pong', thinking: 'let me reply pong' },
+      ],
+    });
+    const specs = replaySegments(dir);
+    expect(specs[1].thinking).toBe('let me reply pong');
+  });
+
   it('synthesizes op-result text for transcripts written before it was logged', () => {
     const dir = writeSession('dddd555555', {
       startedAt: '2026-09-05T10:00:00.000Z',

@@ -138,6 +138,11 @@ function parseEnvelope(text) {
     return JSON.parse(text);
   } catch (first) {
     const relaxed = text
+      // A lone pseudo-XML tag on its own line. Some models leak their own output
+      // parser's scaffolding into the text channel — Beam emits `</rfl:parameter>`
+      // after the envelope — and an envelope is not worth discarding over a stray tag
+      // no op could ever reference. Only in the relaxed pass, so valid JSON is untouched.
+      .replace(/^[ \t]*<\/?[A-Za-z][A-Za-z0-9_.:-]*(?:[ \t][^\n<>]*)?\/?>[ \t]*$/gm, '')
       .replace(/^\s*```[a-z_]*\s*$/gim, '')
       .replace(/\/\/[^\n"]*$/gm, '')
       .replace(/,(\s*[}\]])/g, '$1');
@@ -217,34 +222,48 @@ export function parseDaOps(body) {
 
 /**
  * Full extraction from an assistant turn.
- * @returns {{ops: object[]|null, parseError: string|null, artifacts: Block[], prose: string}}
+ * @returns {{ops: object[]|null, parseError: string|null, artifacts: Block[], prose: string,
+ *   recovered: string|null}}
  */
 export function extract(text) {
   const { blocks, prose } = scanBlocks(text);
   const opBlocks = blocks.filter((b) => b.kind === 'da_ops');
   const artifacts = blocks.filter((b) => b.kind === 'artifact');
 
-  if (!opBlocks.length) return { ops: null, parseError: null, artifacts, prose };
-
-  if (opBlocks.some((b) => b.unterminated)) {
-    return {
-      ops: null,
-      parseError:
-        'a da_ops block was never closed — the response was probably cut off. ' +
-        'Resend the complete block.',
-      artifacts,
-      prose,
-    };
+  if (!opBlocks.length) {
+    return { ops: null, parseError: null, artifacts, prose, recovered: null };
   }
 
+  // An unclosed fence is *usually* a cut-off response, but it is not proof of one. A
+  // model whose own output parser leaks — Beam ends a batch with `</rfl:parameter>` and
+  // swallows the closing fence with it — sends a complete envelope and no ```. Parsing
+  // first and judging afterwards costs nothing on the truncated path and is the
+  // difference between a batch that runs and three repair rounds that end the request.
+  //
   // More than one block per turn is a protocol violation, but merging them is the
   // charitable read and keeps the session moving.
   const merged = [];
   try {
     for (const b of opBlocks) merged.push(...parseDaOps(b.body));
   } catch (err) {
-    return { ops: null, parseError: err.message, artifacts, prose };
+    const cut = opBlocks.some((b) => b.unterminated);
+    return {
+      ops: null,
+      parseError: cut
+        ? 'a da_ops block was never closed — the response was probably cut off. ' +
+          'Resend the complete block.'
+        : err.message,
+      artifacts,
+      prose,
+      recovered: null,
+    };
   }
 
-  return { ops: merged, parseError: null, artifacts, prose };
+  return {
+    ops: merged,
+    parseError: null,
+    artifacts,
+    prose,
+    recovered: opBlocks.some((b) => b.unterminated) ? 'no closing fence' : null,
+  };
 }

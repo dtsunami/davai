@@ -88,6 +88,7 @@ export class Ledger {
 
   /**
    * @param {{type: string, label: string, role?: 'user'|'assistant', text?: string,
+   *          thinking?: string,
    *          image?: {mediaType: string, data: string},
    *          video?: {mediaType: string, data: string, tokens?: number},
    *          pinned?: boolean}} spec
@@ -122,6 +123,7 @@ export class Ledger {
       pinned: spec.pinned ?? PROTECTED.has(spec.type),
       createdAt: Date.now(),
       part,
+      ...(spec.thinking ? { thinking: spec.thinking } : {}),
     };
     this.segments.push(seg);
     return seg;
@@ -181,8 +183,18 @@ export class Ledger {
     const out = [];
     for (const s of this.segments) {
       const last = out[out.length - 1];
-      if (last && last.role === s.role) last.content.push(s.part);
-      else out.push({ role: s.role, content: [s.part] });
+      if (last && last.role === s.role) {
+        last.content.push(s.part);
+        if (s.thinking) {
+          last.thinking = last.thinking ? `${last.thinking}\n\n${s.thinking}` : s.thinking;
+        }
+      } else {
+        out.push({
+          role: s.role,
+          content: [s.part],
+          ...(s.thinking ? { thinking: s.thinking } : {}),
+        });
+      }
     }
     // Every provider requires the conversation to open with a user turn.
     while (out.length && out[0].role !== 'user') out.shift();

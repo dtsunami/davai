@@ -164,6 +164,34 @@ describe('extract', () => {
     expect(out.parseError).toMatch(/never closed|cut off/);
   });
 
+  // Reflection's Beam leaks its own output-parser scaffolding into the text channel:
+  // a `</rfl:parameter>` after the envelope, which also swallows the closing fence.
+  // The envelope itself is complete, so the batch must run rather than burn three
+  // repair rounds on a tag no op could ever reference.
+  it('ignores a stray pseudo-XML tag after the envelope', () => {
+    const out = extract(fence('da_ops', '{"ops":[{"op":"read","path":"a.js"}]}\n</rfl:parameter>'));
+    expect(out.parseError).toBeNull();
+    expect(out.ops).toEqual([{ op: 'read', path: 'a.js' }]);
+  });
+
+  it('runs an unclosed block whose envelope is complete, and says it did', () => {
+    const out = extract('```da_ops\n{"ops":[{"op":"read","path":"a.js"}]}\n</rfl:parameter>');
+    expect(out.ops).toHaveLength(1);
+    expect(out.parseError).toBeNull();
+    expect(out.recovered).toBe('no closing fence');
+  });
+
+  it('still reports a genuinely cut-off block as truncated, not as bad JSON', () => {
+    const out = extract('```da_ops\n{"ops":[{"op":"write","path":"a"');
+    expect(out.ops).toBeNull();
+    expect(out.parseError).toMatch(/cut off/);
+  });
+
+  it('leaves a closed, well-formed block unmarked', () => {
+    const out = extract(fence('da_ops', '{"ops":[{"op":"read","path":"a"}]}'));
+    expect(out.recovered).toBeNull();
+  });
+
   it('surfaces the JSON error message for repair', () => {
     const out = extract(fence('da_ops', '{"ops": [oops]}'));
     expect(out.parseError).toMatch(/not valid JSON/);

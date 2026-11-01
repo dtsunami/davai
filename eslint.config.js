@@ -7,6 +7,7 @@
  */
 import js from '@eslint/js';
 import globals from 'globals';
+import react from 'eslint-plugin-react';
 import reactHooks from 'eslint-plugin-react-hooks';
 
 export default [
@@ -51,7 +52,7 @@ export default [
 
   {
     files: ['**/*.jsx'],
-    plugins: { 'react-hooks': reactHooks },
+    plugins: { react, 'react-hooks': reactHooks },
     rules: {
       // Only the two classic hook rules. The plugin's newer React Compiler rules
       // (immutability, set-state-in-effect) are off on purpose: the panes mutate the
@@ -60,17 +61,16 @@ export default [
       // design, not a bug.
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
-      // esbuild rewrites JSX to React.createElement, which ESLint cannot see without
-      // the React plugin — so the import looks unused. Cheaper than adding the plugin.
-      'no-unused-vars': [
-        'error',
-        {
-          args: 'after-used',
-          argsIgnorePattern: '^_',
-          varsIgnorePattern: '^(_|React$)',
-          caughtErrors: 'none',
-        },
-      ],
+      // Core no-unused-vars never looks inside JSX, so a component referenced only as
+      // <Box/> reads as an unused import. These two rules are the entire reason
+      // eslint-plugin-react is a dependency; nothing else from it is enabled. The old
+      // `varsIgnorePattern: '^(_|React$)'` was a guess at the same problem that only
+      // covered the one identifier anybody had noticed — it hid 42 real reports behind
+      // an exemption for React alone. jsx-uses-react marks the import used under the
+      // classic runtime esbuild compiles to, so the base block's rule now applies to
+      // .jsx unchanged.
+      'react/jsx-uses-vars': 'error',
+      'react/jsx-uses-react': 'error',
     },
   },
 ];

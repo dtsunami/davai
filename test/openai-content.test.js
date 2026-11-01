@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { contentDeltas, createOpenAI, mergeToolCallDeltas } from '../src/providers/openai.js';
+import { contentDeltas, createOpenAI, mergeToolCallDeltas, toOpenAIMessage } from '../src/providers/openai.js';
 
 const all = (c) => [...contentDeltas(c)];
 
@@ -110,5 +110,29 @@ describe('createOpenAI stream end', () => {
     expect(length.at(-1)).toEqual({ t: 'stop', reason: 'max_tokens' });
     const stop = await run([{ choices: [{ delta: { content: 'a' }, finish_reason: 'stop' }] }]);
     expect(stop.at(-1)).toEqual({ t: 'stop', reason: 'end_turn' });
+  });
+
+  it('includes reasoning_content on assistant messages that carry thinking', () => {
+    expect(
+      toOpenAIMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'pong' }],
+        thinking: 'checked working dir',
+      }),
+    ).toEqual({
+      role: 'assistant',
+      content: 'pong',
+      reasoning_content: 'checked working dir',
+    });
+
+    expect(
+      toOpenAIMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: 'pong' }],
+      }),
+    ).toEqual({
+      role: 'assistant',
+      content: 'pong',
+    });
   });
 });

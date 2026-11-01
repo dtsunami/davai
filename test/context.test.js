@@ -58,6 +58,14 @@ describe('ledger', () => {
     expect(msgs[1].role).toBe('assistant');
   });
 
+  it('preserves assistant thinking on rendered messages', () => {
+    const l = makeLedger();
+    l.add({ type: 'user', label: 'q', role: 'user', text: 'ping' });
+    l.add({ type: 'assistant', label: 'a', role: 'assistant', text: 'pong', thinking: 'step 1' });
+    const msgs = l.toMessages();
+    expect(msgs[1].thinking).toBe('step 1');
+  });
+
   it('always opens with a user turn', () => {
     const l = new Ledger({ limit: 1000 });
     l.setSystem('s');

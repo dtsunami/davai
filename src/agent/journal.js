@@ -90,6 +90,10 @@ export class Journal {
       const dest = path.join(root, path.relative(absDir, f));
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(f, dest);
+      // Same reason as `snapshot`: restoreTree copies these back, so a mode lost here
+      // is a mode lost by the rollback. A deleted-then-restored bin/ full of scripts
+      // that come back 0644 is a working tree that no longer runs.
+      fs.chmodSync(dest, fs.statSync(f).mode);
     }
     return root;
   }
@@ -117,7 +121,17 @@ export class Journal {
     } finally {
       fs.closeSync(fd);
     }
-    fs.renameSync(tmp, abs);
+    renameOver(tmp, abs);
+    // openSync applies the umask to its mode argument, so a 0644 file preserved under a
+    // 0o077 umask would come back 0600. Restating the mode after the rename makes the
+    // preservation exact instead of umask-dependent.
+    if (mode !== undefined) {
+      try {
+        fs.chmodSync(abs, mode);
+      } catch {
+        /* a filesystem without modes is still better written than refused */
+      }
+    }
   }
 
   /**
@@ -154,6 +168,63 @@ function rmrf(p) {
   fs.rmSync(p, { recursive: true, force: true });
 }
 
+/** Windows refuses to open, replace or unlink a file carrying the read-only flag. */
+function locked(err, target) {
+  return (err.code === 'EPERM' || err.code === 'EACCES') && fs.existsSync(target);
+}
+
+/**
+ * Rename over a destination that may be read-only.
+ *
+ * POSIX rename ignores the target's permission bits entirely — the directory's write
+ * bit is what governs — so `fs.renameSync` was correct everywhere davai was tested and
+ * failed with EPERM on Windows, where the read-only flag lives on the file and blocks
+ * the replace. The effect was that `write --overwrite` and every `replace` simply did
+ * not work on a read-only file, and the batch died at apply time rather than planning.
+ *
+ * Unlock, retry, and put the flag back if the retry fails too: a rename that could not
+ * happen must not leave the target more writable than it found it.
+ */
+export function renameOver(from, to) {
+  try {
+    fs.renameSync(from, to);
+    return;
+  } catch (err) {
+    if (!locked(err, to)) throw err;
+    const before = fs.statSync(to).mode;
+    fs.chmodSync(to, 0o666);
+    try {
+      fs.renameSync(from, to);
+    } catch (again) {
+      try {
+        fs.chmodSync(to, before);
+      } catch {
+        /* best effort: the rename already failed, report that */
+      }
+      throw again;
+    }
+  }
+}
+
+/**
+ * Restore a file's bytes *and* mode from a snapshot.
+ *
+ * copyFileSync opens the destination for writing, which Windows refuses on a read-only
+ * file. Rolling back an edit to one therefore threw EPERM and left the batch half
+ * applied — the single failure mode rollback exists to prevent.
+ */
+function restoreFile(pre, dest) {
+  const mode = fs.statSync(pre).mode;
+  try {
+    fs.copyFileSync(pre, dest);
+  } catch (err) {
+    if (!locked(err, dest)) throw err;
+    fs.chmodSync(dest, 0o666);
+    fs.copyFileSync(pre, dest);
+  }
+  fs.chmodSync(dest, mode);
+}
+
 function restoreTree(snapRoot, dest) {
   rmrf(dest);
   fs.cpSync(snapRoot, dest, { recursive: true });
@@ -163,18 +234,15 @@ function undoEntry(e) {
   switch (e.op) {
     case 'write':
     case 'replace':
-      if (e.pre) {
-        fs.copyFileSync(e.pre, e.path);
-        fs.chmodSync(e.path, fs.statSync(e.pre).mode);
-      } else if (!e.existed) rmrf(e.path); // we created it; remove it
+      if (e.pre) restoreFile(e.pre, e.path);
+      else if (!e.existed) rmrf(e.path); // we created it; remove it
       return;
 
     case 'delete':
       if (e.preTree) restoreTree(e.preTree, e.path);
       else if (e.pre) {
         fs.mkdirSync(path.dirname(e.path), { recursive: true });
-        fs.copyFileSync(e.pre, e.path);
-        fs.chmodSync(e.path, fs.statSync(e.pre).mode);
+        restoreFile(e.pre, e.path);
       }
       return;
 
@@ -189,12 +257,9 @@ function undoEntry(e) {
         }
       } else if (fs.existsSync(e.to)) {
         fs.mkdirSync(path.dirname(e.from), { recursive: true });
-        fs.renameSync(e.to, e.from);
+        renameOver(e.to, e.from);
       }
-      if (e.pre) {
-        fs.copyFileSync(e.pre, e.to);
-        fs.chmodSync(e.to, fs.statSync(e.pre).mode);
-      }
+      if (e.pre) restoreFile(e.pre, e.to);
       return;
 
     default:

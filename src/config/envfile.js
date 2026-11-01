@@ -43,11 +43,26 @@ export function formatAssignment(name, value, prefix = '') {
   return `${prefix}${name}=${BARE.test(str) ? str : JSON.stringify(str)}`;
 }
 
-/** Split file text into lines, dropping the empty element a trailing newline leaves. */
+/**
+ * Split file text into lines, dropping the empty element a trailing newline leaves.
+ *
+ * A trailing `\r` is stripped, because every regex downstream in config/profiles.js is
+ * anchored with `$` and `.` does not match `\r` — a CRLF .env matched no sentinel and no
+ * assignment at all, so a Windows operator's provider blocks were invisible. The line
+ * ending is restored at write time (see `detectEol`), so normalizing here does not
+ * rewrite the file.
+ */
 export function toLines(text) {
-  const lines = text.length ? text.split('\n') : [];
+  const lines = (text.length ? text.split('\n') : []).map((l) =>
+    l.endsWith('\r') ? l.slice(0, -1) : l,
+  );
   if (lines.length && lines[lines.length - 1] === '') lines.pop();
   return lines;
+}
+
+/** The file's own line ending, so a rewrite preserves it rather than converting it. */
+export function detectEol(text) {
+  return text.includes('\r\n') ? '\r\n' : '\n';
 }
 
 /** The inverse of toLines: the file ends with exactly one newline, or is empty. */
@@ -92,11 +107,27 @@ export function writeEnvText(file, text) {
  * @param {(text: string) => string} transform
  * @returns {{file: string, changed: boolean, text: string}}
  */
+/**
+ * Convert text to one line ending. Idempotent on purpose: a caller may hand back text it
+ * read from the file unchanged — switchProfile's rollback does exactly that — and a
+ * naive `\n` → `\r\n` on already-CRLF text produces `\r\r\n`.
+ */
+export function toEol(text, eol) {
+  const lf = text.replace(/\r\n/g, '\n');
+  return eol === '\r\n' ? lf.replace(/\n/g, '\r\n') : lf;
+}
+
 export function editEnvFile(file, transform) {
-  const before = readEnvText(file);
-  const after = transform(before);
-  if (after !== before) writeEnvText(file, after);
-  return { file, changed: after !== before, text: after };
+  const raw = readEnvText(file);
+  const eol = detectEol(raw);
+  // The transform works in LF — config/profiles.js splits on '\n' and joins with it — so
+  // a CRLF file is normalized in and restored out. Without the round trip a no-op switch
+  // on Windows rewrote every line in the file, which is the opposite of the promise that
+  // switching back leaves it byte for byte identical.
+  const after = transform(toEol(raw, '\n'));
+  const out = toEol(after, eol);
+  if (out !== raw) writeEnvText(file, out);
+  return { file, changed: out !== raw, text: after };
 }
 
 /**
@@ -118,7 +149,9 @@ export function setEnvVars(file, updates) {
   const names = Object.keys(updates);
   if (!names.length) return { set: [], removed: [], file };
 
-  const lines = toLines(readEnvText(file));
+  const raw = readEnvText(file);
+  const eol = detectEol(raw);
+  const lines = toLines(raw);
 
   /** @type {Map<string, number[]>} every line index assigning each name */
   const seen = new Map();
@@ -155,7 +188,8 @@ export function setEnvVars(file, updates) {
     set.push(name);
   }
 
-  writeEnvText(file, joinLines(lines.filter((_, i) => !drop.has(i))));
+  const text = joinLines(lines.filter((_, i) => !drop.has(i)));
+  writeEnvText(file, toEol(text, eol));
 
   return { set, removed, file };
 }

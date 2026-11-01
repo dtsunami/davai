@@ -77,7 +77,19 @@ export function createOpenAI({
           try {
             stream = await client.chat.completions.create(params, { signal });
           } catch (retryErr) {
-            throw wrapError(retryErr, name);
+            // Both errors matter and neither subsumes the other: the first names the
+            // field that was just stripped, the second is whatever is wrong *besides*
+            // that. Reporting only the second is how a reasoning-hint rejection and a
+            // genuine bad-request became the same opaque line.
+            const e = wrapError(retryErr, name);
+            const first = wrapError(err, name);
+            if (first.message !== e.message) {
+              e.detail = [
+                `before stripping ${hint}: ${first.detail || first.message}`,
+                `after: ${e.detail || e.message}`,
+              ].join('\n---\n');
+            }
+            throw e;
           }
         } else {
           throw wrapError(err, name);
@@ -194,7 +206,7 @@ export function mergeToolCallDeltas(acc, deltas) {
   }
 }
 
-function toOpenAIMessage(m) {
+export function toOpenAIMessage(m) {
   const parts = m.content.map((p) => {
     if (p.type === 'image') {
       return { type: 'image_url', image_url: { url: `data:${p.mediaType};base64,${p.data}` } };
@@ -202,9 +214,13 @@ function toOpenAIMessage(m) {
     if (p.type === 'video') throw videoUnsupported('openai');
     return { type: 'text', text: p.text };
   });
+  // Some reasoning backends (e.g. Nebius serving reflection/beam-* on OpenRouter)
+  // require prior assistant turns to carry their reasoning back in `reasoning_content`
+  // and 400 when it is omitted.
+  const extra = m.role === 'assistant' && m.thinking ? { reasoning_content: m.thinking } : {};
   // A text-only message is cheaper to send as a plain string.
   if (parts.every((p) => p.type === 'text')) {
-    return { role: m.role, content: parts.map((p) => p.text).join('\n') };
+    return { role: m.role, content: parts.map((p) => p.text).join('\n'), ...extra };
   }
-  return { role: m.role, content: parts };
+  return { role: m.role, content: parts, ...extra };
 }

@@ -384,12 +384,16 @@ export class Agent extends EventEmitter {
         // own ops to reason about the results that follow. A batch that arrived as a
         // native call is not in the text, so its fenced equivalent is appended: the
         // model then sees both the request its results answer and the form to use.
+        // Reasoning is attached to the segment for Chat Completions backends (e.g.
+        // Nebius serving Beam via OpenRouter) that require `reasoning_content` on
+        // prior assistant turns and reject requests that drop it.
         this.ledger.add({
           type: 'assistant',
           label:
             firstLine(prose || turn.text) || (native.block ? 'native da_ops call' : 'assistant turn'),
           role: 'assistant',
           text: assistantText(turn.text, native),
+          ...(turn.thinking ? { thinking: turn.thinking } : {}),
         });
 
         if (parseError) {
@@ -410,6 +414,17 @@ export class Agent extends EventEmitter {
             text: repairPrompt(parseError, this.prompts),
           });
           continue;
+        }
+
+        // An unclosed fence around a complete envelope is a provider-side leak, not a
+        // truncated response — Beam emits a stray `</rfl:parameter>` and eats the
+        // closing fence with it. The batch parsed, so it runs; saying so keeps the
+        // transcript honest about what davai papered over.
+        if (fenced.recovered && ops) {
+          this.emit('warning', {
+            message: `da_ops block had ${fenced.recovered} — it parsed cleanly, so it was run anyway`,
+          });
+          this.log.event('parse-recovered', { reason: fenced.recovered });
         }
 
         repairs = 0;
@@ -615,7 +630,8 @@ export class Agent extends EventEmitter {
         durationMs,
         effort: this.cfg?.model?.effort ? effort : null,
       });
-      // Thinking is logged but never replayed: resume reads only `text` (session/resume.js).
+      // Logged alongside `text` so `session/resume.js` can restore it for providers that
+      // require `reasoning_content` on prior assistant turns.
       this.log.event('assistant', {
         text,
         ...(thinking ? { thinking } : {}),

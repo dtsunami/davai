@@ -185,7 +185,45 @@ export function unwrapError(err) {
   }
 
   retryAfterMs ??= retryDelayOf(err?.details) ?? secondsHintOf(message);
-  return { message: message.trim(), status, code, retryAfterMs, raw };
+  return { message: message.trim(), status, code, retryAfterMs, raw, upstream: upstreamOf(err) };
+}
+
+/**
+ * Dig the *routed* provider's rejection out of an OpenRouter error.
+ *
+ * OpenRouter is a proxy, so its `error.message` describes its own layer — "Provider
+ * returned error" — and the upstream's actual sentence is a JSON string parked in
+ * `error.metadata.raw`. The OpenAI SDK builds `err.message` from `error.message` alone,
+ * so unwrapError's walk never reaches the metadata and the one clause that says *why*
+ * the request was rejected is discarded before it ever reaches the transcript.
+ *
+ * Returns null for every other provider, which carries no metadata envelope.
+ *
+ * @returns {{provider?: string, message: string}|null}
+ */
+function upstreamOf(err) {
+  // `err.error` is the SDK's parsed body; the string form is the fallback for an error
+  // that was re-thrown or logged and re-read.
+  const meta =
+    err?.error?.metadata ??
+    tryParse(String(err?.message || '').replace(/^\d+\s+/, ''))?.error?.metadata;
+  if (!meta || typeof meta !== 'object') return null;
+
+  const provider = typeof meta.provider_name === 'string' ? meta.provider_name : undefined;
+  const raw = meta.raw;
+  let message = '';
+  if (typeof raw === 'string') {
+    const parsed = tryParse(raw);
+    const body = parsed?.error ?? parsed;
+    message = typeof body?.message === 'string' ? body.message : raw;
+  } else if (raw && typeof raw === 'object') {
+    const body = raw.error ?? raw;
+    message = typeof body?.message === 'string' ? body.message : JSON.stringify(raw);
+  }
+
+  message = message.trim();
+  if (!message && !provider) return null;
+  return { provider, message };
 }
 
 /** google.rpc.RetryInfo, when the API bothered to send one. */
@@ -232,9 +270,12 @@ export function wrapError(err, provider) {
     return e;
   }
 
-  const { message, status, retryAfterMs, raw } = unwrapError(err);
+  const { message, status, retryAfterMs, raw, upstream } = unwrapError(err);
   let retryable = status === 408 || status === 409 || status === 429 || status >= 500;
-  let msg = `${provider}: ${condense(message)}`;
+  // A proxy's own message is a routing-layer placeholder. When the upstream said
+  // something, that is the sentence the operator needs.
+  const primary = upstream?.message || message;
+  let msg = `${provider}: ${condense(primary)}`;
 
   if (status === 401) msg = `${provider}: authentication failed — check your API key`;
   else if (status === 403) msg = `${provider}: permission denied — the key lacks access to this model`;
@@ -255,11 +296,14 @@ export function wrapError(err, provider) {
     }
   } else if (status >= 500) {
     const kind = status === 503 ? 'service unavailable' : 'server error';
-    msg = `${provider}: ${kind} (${status}) — ${condense(message)}`;
+    msg = `${provider}: ${kind} (${status}) — ${condense(primary)}`;
   }
+  // Which backend produced it: on a router the same model id can reach several, and
+  // "works on one, 400s on another" is otherwise invisible from the transcript.
+  if (upstream?.provider) msg += ` [upstream: ${upstream.provider}]`;
 
   const e = new ProviderError(msg, { status, retryable, provider });
   e.retryAfterMs = retryAfterMs;
-  e.detail = raw === message ? undefined : raw;
+  e.detail = raw === primary ? undefined : raw;
   return e;
 }

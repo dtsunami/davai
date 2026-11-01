@@ -259,6 +259,16 @@ DAVAI_OPENAI_API_KEY=sk-...
   moment there are.
 - Secrets are masked in `session/profiles.js`, not at the view: `profileState` is what
   crosses to the bus and the browser, and `blockState` returns raw values by design.
+- **The text layer works in LF; the file keeps its own line ending.** Every regex in
+  `config/profiles.js` is anchored with `$`, and `.` does not match `\r`, so a CRLF
+  `.env` matched no sentinel and no assignment at all — a Windows operator's blocks were
+  not mis-parsed, they were invisible, and the pane said "no `#---#` blocks in this
+  .env" about a file with nine of them. `toLines` strips the `\r` and `editEnvFile`
+  restores the file's ending through `toEol`, which is idempotent because
+  `switchProfile`'s rollback hands back text it read from disk unchanged and a naive
+  `\n` → `\r\n` on that would write `\r\r\n`. Normalizing without restoring would have
+  been worse than the bug: every switch would rewrite all 107 lines of a CRLF file and
+  break the byte-for-byte round trip the whole design rests on.
 
 ## Providers and keys
 
@@ -313,11 +323,62 @@ that has collapsed, where the remaining budget buys nothing but garbage.
   after a minute of output reported `$0.0000`. Best-effort by nature: a provider that
   only sends usage at the end of a stream sends none at all on a mid-stream abort.
 
+## A model that leaks its own parser
+
+Some models emit the scaffolding of their serving stack into the text channel.
+Reflection's Beam (via OpenRouter/SGLang) closes a batch with a bare
+`</rfl:parameter>` — the `rfl:` prefix is Reflection's own pseudo-XML, and the leak
+takes the closing fence with it.
+
+- **An unclosed fence is evidence of truncation, not proof of it.** `extract` now parses
+  first and judges afterwards: if the envelope is complete, the batch runs and the turn
+  reports `recovered: 'no closing fence'`; only a body that also fails to parse is called
+  cut off. Before, three `read` ops that were perfectly good JSON cost three repair
+  rounds and ended the request — at `max` effort on a 1M-context model, several dollars
+  to accomplish nothing.
+- **The tolerant pass drops a lone pseudo-XML tag**, and only the tolerant pass. Valid
+  JSON never reaches it, so nothing legitimate is rewritten; a tag alone on a line can
+  never be part of an envelope, and a payload block's contents are already split out
+  before `parseEnvelope` sees anything, so a `</div>` inside a file being written is
+  untouched.
+- **The recovery is announced.** A `warning` on the turn, `parse-recovered` in the
+  session log. Silently papering over a provider's malformed output is how you stop
+  noticing that a model has stopped speaking the protocol.
+
 ## Testing
 
 `npm test` — vitest. The ops engine, sandbox and parser are tested against temp
 directories with no model calls; UI tests render Ink into a fake stdout. The server
 tests bind an ephemeral port and speak real HTTP and SSE against a fake agent.
+
+### File modes, and the one bit Windows has
+
+Windows exposes a single permission bit through the POSIX layer: the read-only flag.
+`chmod 0o755` reads back `0o666`, `chmod 0o700` reads back `0o666`, and only `0o444`
+survives the round trip. Four tests asserting `mode & 0o777 === 0o755` were therefore
+testing libuv's emulation rather than davai's behaviour, and failed on Windows for a
+reason that had nothing to do with the code under test.
+
+- **The promise is relative, not absolute.** Not "the file is 0755 afterwards" but
+  "whatever the filesystem recorded before the op, it records after it".
+  `test/helpers/modes.js` asserts that by reading the mode back after `chmod` instead of
+  assuming the requested one took, so the same test is meaningful on both platforms —
+  the executable bit on Linux, the read-only flag on Windows.
+- **`describe.skipIf(win32)` would have been the wrong fix.** Skipping is right for the
+  genuinely POSIX-only distinctions (`0o755`, `0o700`), and those are marked
+  `it.runIf(POSIX_MODES)`. But the read-only cases run everywhere, and they had to,
+  because chasing these assertions turned up two real Windows bugs the old tests could
+  never have caught: Windows refuses to **rename over** a read-only file (POSIX governs
+  that by the *directory's* write bit, so `write --overwrite`, `replace` and
+  `move --overwrite` all died with EPERM at apply time) and refuses to **copy onto**
+  one (so rollback threw and left the batch half-applied — precisely the failure
+  rollback exists to prevent). `renameOver` and `restoreFile` in `journal.js` unlock,
+  retry and restore the flag; both were verified to fail the new tests when reverted.
+- **`atomicWrite` restates the mode after the rename**, because `openSync` applies the
+  umask to its mode argument — a 0644 file preserved under a 0o077 umask came back 0600.
+- **`snapshotTree` chmods each copied file.** `copyFileSync` does not carry the mode, and
+  rollback restores from those copies, so a deleted-and-restored `bin/` came back 0644
+  and no longer ran. `snapshot` already did this; the tree path did not.
 
 `test/events.test.js` greps the front ends for their subscriptions, so an event that is
 emitted and never consumed fails the build. If you change how listeners are registered,

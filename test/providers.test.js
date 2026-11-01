@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createOpenAIResponses, translateStream } from '../src/providers/openai-responses.js';
-import { OPENAI_EFFORT } from '../src/providers/base.js';
+import { OPENAI_EFFORT, unwrapError, wrapError } from '../src/providers/base.js';
 
 /** Collect a davai event stream. */
 async function collect(iter) {
@@ -253,5 +253,63 @@ describe('createOpenAIResponses request shape', () => {
         }),
       ),
     ).rejects.toThrow(/video input is not supported/);
+  });
+});
+
+/**
+ * OpenRouter is a proxy: its own `error.message` describes the routing layer, and the
+ * upstream's sentence is a JSON string in `error.metadata.raw`. Surfacing only the
+ * outer one turns every distinct upstream rejection into the same "Provider returned
+ * error" line, which is unactionable — the operator cannot tell a bad parameter from a
+ * dead backend from an unsupported model.
+ */
+describe('openrouter error unwrapping', () => {
+  /** The shape the OpenAI SDK hands us for a routed 400. */
+  function routedError(rawBody, provider = 'Fireworks') {
+    const err = new Error('400 Provider returned error');
+    err.status = 400;
+    err.error = {
+      message: 'Provider returned error',
+      code: 400,
+      metadata: { provider_name: provider, raw: rawBody },
+    };
+    return err;
+  }
+
+  it('prefers the upstream sentence over the router placeholder', () => {
+    const err = routedError(
+      JSON.stringify({ error: { message: 'reasoning.effort is not supported for this model' } }),
+    );
+    const wrapped = wrapError(err, 'openrouter');
+    expect(wrapped.message).toContain('reasoning.effort is not supported');
+    expect(wrapped.message).not.toContain('Provider returned error');
+  });
+
+  it('names the backend that rejected it', () => {
+    const wrapped = wrapError(routedError('{"error":{"message":"bad request"}}'), 'openrouter');
+    expect(wrapped.message).toContain('[upstream: Fireworks]');
+  });
+
+  it('falls back to the raw string when it is not JSON', () => {
+    const wrapped = wrapError(routedError('upstream connection timed out'), 'openrouter');
+    expect(wrapped.message).toContain('upstream connection timed out');
+  });
+
+  it('keeps the full body in detail', () => {
+    const wrapped = wrapError(routedError('{"error":{"message":"bad request"}}'), 'openrouter');
+    expect(wrapped.detail).toBeTruthy();
+  });
+
+  it('reports no upstream for a plain provider error', () => {
+    const err = new Error('400 Bad Request');
+    err.status = 400;
+    expect(unwrapError(err).upstream).toBeNull();
+  });
+
+  it('leaves a non-routed message unchanged', () => {
+    const err = new Error('400 you must provide a model parameter');
+    err.status = 400;
+    const wrapped = wrapError(err, 'openai');
+    expect(wrapped.message).toBe('openai: 400 you must provide a model parameter');
   });
 });

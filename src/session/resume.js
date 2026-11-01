@@ -63,7 +63,13 @@ export function replaySegments(dir) {
         // The assistant text still carries its da_ops block verbatim, which is what
         // lets the model reason about the results that follow it.
         if (ev.text) {
-          specs.push({ type: 'assistant', label: 'assistant', role: 'assistant', text: ev.text });
+          specs.push({
+            type: 'assistant',
+            label: 'assistant',
+            role: 'assistant',
+            text: ev.text,
+            ...(ev.thinking ? { thinking: ev.thinking } : {}),
+          });
         }
         break;
 

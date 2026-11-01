@@ -7,6 +7,14 @@ import { DaIgnore } from '../src/agent/daignore.js';
 import { Journal } from '../src/agent/journal.js';
 import { normalizeBatch, normalizeOp } from '../src/agent/ops/schema.js';
 import { executeBatch } from '../src/agent/ops/executor.js';
+import {
+  POSIX_MODES,
+  DISTINCT,
+  modeOf,
+  setMode,
+  unlock,
+  expectModePreserved,
+} from './helpers/modes.js';
 
 let root;
 let ctx;
@@ -142,11 +150,31 @@ describe('write', () => {
     expect(read('a.js')).toBe('x');
   });
 
-  it('preserves the mode of an existing file on overwrite', async () => {
-    fs.chmodSync(path.join(root, 'a.js'), 0o755);
-    const out = await run([{ op: 'write', path: 'a.js', text: 'x', overwrite: true }]);
+  // Asserted against the mode the filesystem settled on, not the one we asked for:
+  // Windows keeps only a read-only flag, so chmod 0o755 reads back 0o666 and a literal
+  // 0o755 assertion tests libuv's emulation rather than davai's behaviour.
+  it.runIf(POSIX_MODES)('preserves an executable bit on overwrite', async () => {
+    const f = path.join(root, 'a.js');
+    const out = await expectModePreserved(f, 0o755, () =>
+      run([{ op: 'write', path: 'a.js', text: 'x', overwrite: true }]),
+    );
     expect(out.status).toBe('ok');
-    expect(fs.statSync(path.join(root, 'a.js')).mode & 0o777).toBe(0o755);
+    expect(read('a.js')).toBe('x');
+  });
+
+  // The Windows half of the same promise, and the one that was actually broken: the
+  // read-only flag blocks rename-over, so overwrite died with EPERM at apply time.
+  it('overwrites a read-only file and leaves it read-only', async () => {
+    const f = path.join(root, 'a.js');
+    try {
+      const out = await expectModePreserved(f, DISTINCT, () =>
+        run([{ op: 'write', path: 'a.js', text: 'x', overwrite: true }]),
+      );
+      expect(out.status).toBe('ok');
+      expect(read('a.js')).toBe('x');
+    } finally {
+      unlock(f);
+    }
   });
 });
 
@@ -234,13 +262,26 @@ describe('replace', () => {
     expect(read('a.js')).toContain('const b = 3;');
   });
 
-  it('preserves the mode of an existing file on replace', async () => {
-    fs.chmodSync(path.join(root, 'a.js'), 0o755);
-    const out = await run([
-      { op: 'replace', path: 'a.js', old: 'const b = 2;', new: 'const b = 3;' },
-    ]);
+  it.runIf(POSIX_MODES)('preserves an executable bit on replace', async () => {
+    const f = path.join(root, 'a.js');
+    const out = await expectModePreserved(f, 0o755, () =>
+      run([{ op: 'replace', path: 'a.js', old: 'const b = 2;', new: 'const b = 3;' }]),
+    );
     expect(out.status).toBe('ok');
-    expect(fs.statSync(path.join(root, 'a.js')).mode & 0o777).toBe(0o755);
+    expect(read('a.js')).toContain('const b = 3;');
+  });
+
+  it('replaces in a read-only file and leaves it read-only', async () => {
+    const f = path.join(root, 'a.js');
+    try {
+      const out = await expectModePreserved(f, DISTINCT, () =>
+        run([{ op: 'replace', path: 'a.js', old: 'const b = 2;', new: 'const b = 3;' }]),
+      );
+      expect(out.status).toBe('ok');
+      expect(read('a.js')).toContain('const b = 3;');
+    } finally {
+      unlock(f);
+    }
   });
 
   it('refuses an ambiguous match', async () => {
@@ -324,28 +365,115 @@ describe('batch atomicity', () => {
     expect(read('a.js')).toBe('const a = 1;\nconst b = 2;\nconst a2 = 1;\n');
   });
 
-  it('restores the original mode when rolling back a failed batch', async () => {
-    fs.chmodSync(path.join(root, 'a.js'), 0o755);
-    const out = await run([
-      { op: 'write', path: 'a.js', text: 'q\nq\n', overwrite: true },
-      { op: 'replace', path: 'a.js', old: 'q', new: 'z' },
-    ]);
+  it.runIf(POSIX_MODES)('restores an executable bit when rolling back', async () => {
+    const f = path.join(root, 'a.js');
+    const out = await expectModePreserved(f, 0o755, () =>
+      run([
+        { op: 'write', path: 'a.js', text: 'q\nq\n', overwrite: true },
+        { op: 'replace', path: 'a.js', old: 'q', new: 'z' },
+      ]),
+    );
     expect(out.status).toBe('apply-failed');
     expect(read('a.js')).toBe('const a = 1;\nconst b = 2;\nconst a2 = 1;\n');
-    expect(fs.statSync(path.join(root, 'a.js')).mode & 0o777).toBe(0o755);
   });
 
-  it('restores the mode of a deleted file on rollback', async () => {
-    fs.chmodSync(path.join(root, 'dup.js'), 0o700);
+  // Rollback copies the snapshot back over the live file, which Windows refuses on a
+  // read-only target. This is the failure rollback exists to prevent, so it is the one
+  // case worth running on both platforms.
+  it('rolls back an edit to a read-only file, bytes and mode', async () => {
+    const f = path.join(root, 'a.js');
+    try {
+      const out = await expectModePreserved(f, DISTINCT, () =>
+        run([
+          { op: 'write', path: 'a.js', text: 'q\nq\n', overwrite: true },
+          { op: 'replace', path: 'a.js', old: 'q', new: 'z' },
+        ]),
+      );
+      expect(out.status).toBe('apply-failed');
+      expect(out.rollbackFailures ?? []).toEqual([]);
+      expect(read('a.js')).toBe('const a = 1;\nconst b = 2;\nconst a2 = 1;\n');
+    } finally {
+      unlock(f);
+    }
+  });
+
+  it.runIf(POSIX_MODES)('restores a private mode on a deleted file', async () => {
+    const f = path.join(root, 'dup.js');
+    const out = await expectModePreserved(f, 0o700, () =>
+      run([
+        { op: 'delete', path: 'dup.js' },
+        { op: 'write', path: 'bad.txt', text: 'a\0b' },
+      ]),
+    );
+    expect(out.status).toBe('apply-failed');
+    expect(read('dup.js')).toBe('x\nx\nx\n');
+    expect(exists('bad.txt')).toBe(false);
+  });
+
+  it('restores a read-only deleted file, bytes and mode', async () => {
+    const f = path.join(root, 'dup.js');
+    try {
+      const out = await expectModePreserved(f, DISTINCT, () =>
+        run([
+          { op: 'delete', path: 'dup.js' },
+          { op: 'write', path: 'bad.txt', text: 'a\0b' },
+        ]),
+      );
+      expect(out.status).toBe('apply-failed');
+      expect(exists('dup.js')).toBe(true);
+      expect(read('dup.js')).toBe('x\nx\nx\n');
+      expect(exists('bad.txt')).toBe(false);
+    } finally {
+      unlock(f);
+    }
+  });
+
+  it('moves onto a read-only destination when told to overwrite', async () => {
+    const dst = path.join(root, 'dup.js');
+    try {
+      setMode(dst, DISTINCT);
+      const out = await run([{ op: 'move', from: 'a.js', to: 'dup.js', overwrite: true }]);
+      expect(out.status).toBe('ok');
+      expect(read('dup.js')).toMatch(/const a = 1/);
+      expect(exists('a.js')).toBe(false);
+    } finally {
+      unlock(dst);
+    }
+  });
+
+  it('restores a read-only file clobbered by a move, on rollback', async () => {
+    const dst = path.join(root, 'dup.js');
+    try {
+      const out = await expectModePreserved(dst, DISTINCT, () =>
+        run([
+          { op: 'move', from: 'a.js', to: 'dup.js', overwrite: true },
+          { op: 'write', path: 'bad.txt', text: 'a\0b' },
+        ]),
+      );
+      expect(out.status).toBe('apply-failed');
+      expect(read('dup.js')).toBe('x\nx\nx\n');
+      expect(read('a.js')).toMatch(/const a = 1/);
+      expect(exists('bad.txt')).toBe(false);
+    } finally {
+      unlock(dst);
+    }
+  });
+
+  it('keeps the snapshot of a read-only tree restorable', async () => {
+    const inner = path.join(root, 'src', 'index.js');
+    const before = setMode(inner, DISTINCT);
     const out = await run([
-      { op: 'delete', path: 'dup.js' },
+      { op: 'delete', path: 'src', recursive: true },
       { op: 'write', path: 'bad.txt', text: 'a\0b' },
     ]);
-    expect(out.status).toBe('apply-failed');
-    expect(exists('dup.js')).toBe(true);
-    expect(read('dup.js')).toBe('x\nx\nx\n');
-    expect(fs.statSync(path.join(root, 'dup.js')).mode & 0o777).toBe(0o700);
-    expect(exists('bad.txt')).toBe(false);
+    try {
+      expect(out.status).toBe('apply-failed');
+      expect(exists('src/index.js')).toBe(true);
+      expect(read('src/index.js')).toBe('export const hi = () => "hi";\n');
+      expect(modeOf(inner)).toBe(before);
+    } finally {
+      unlock(inner);
+    }
   });
 
   it('applies nothing when any op fails planning', async () => {

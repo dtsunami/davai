@@ -7,7 +7,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { Journal } from '../journal.js';
+import { Journal, renameOver } from '../journal.js';
 
 export function opWrite(op, ctx) {
   const abs = ctx.sandbox.resolveForWrite(op.path);
@@ -104,7 +104,11 @@ export function opMove(op, ctx) {
 
   let copied = false;
   try {
-    fs.renameSync(from, to);
+    // renameOver, not renameSync: a read-only destination blocks the replace on Windows
+    // even though the directory is writable, so `move --overwrite` onto one failed with
+    // EPERM at apply time. The moved file keeps the *source's* mode either way, which is
+    // what a rename means.
+    renameOver(from, to);
   } catch (err) {
     if (err.code !== 'EXDEV') throw err;
     // Cross-device: copy then unlink. The journal must record which path was taken
