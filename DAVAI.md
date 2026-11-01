@@ -286,6 +286,33 @@ DAVAI_OPENAI_API_KEY=sk-...
 - A secret never reaches the bus. `/api/keys` broadcasts `maskKey`'s description only;
   the value would otherwise sit in the SSE backlog and replay to every attached browser.
 
+## Brakes on a running turn
+
+Every other limit in `agent/loop.js` — `MAX_EMPTY`, `MAX_REPAIRS`, `MAX_NUDGES`,
+`MAX_STEPS`, `#overBudget` — is tested at a step boundary, which is the right place for
+all of them: the request in flight is already paid for. The exception is a generation
+that has collapsed, where the remaining budget buys nothing but garbage.
+
+- **A repeating cycle stops the turn.** `detectRepetition` examines the tail of the text
+  channel every `REPEAT_CHECK_EVERY` characters: find the previous occurrence of the last
+  64 characters, take the gap as the only candidate period, and confirm the whole window
+  really is that unit repeated. One `lastIndexOf` and one slice compare per call, because
+  it runs mid-stream. Exact periodicity is required on purpose — approximate matching
+  would also fire on a long generated table, and a false positive kills a turn.
+- **Text only, not thinking.** A model re-deriving the same fact loops in its reasoning
+  routinely and still writes a good answer; that case is already handled by the effort
+  demotion in `#streamTurn`. `test/empty-turn.test.js` streams 50k identical characters
+  of thinking and must still reach the blowout path.
+- **The guard aborts through `cancel()`** so the existing teardown applies unchanged: the
+  partial text goes to `assistant-partial`, the stream record closes as `cancelled`, and
+  the ledger never sees the garbage. `agent.degenerate` is how `run()` tells it from an
+  operator's esc, and it reports an `error` rather than `cancelled` — a cancellation the
+  operator did not ask for reads as davai losing the turn.
+- **A cancelled turn is still billed.** `#streamOnce` carries `usage` out of the abort
+  path and `#streamTurn` accounts it before returning. Without that, killing a runaway
+  after a minute of output reported `$0.0000`. Best-effort by nature: a provider that
+  only sends usage at the end of a stream sends none at all on a mid-stream abort.
+
 ## Testing
 
 `npm test` — vitest. The ops engine, sandbox and parser are tested against temp
