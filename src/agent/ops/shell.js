@@ -8,6 +8,12 @@ import { spawn } from 'node:child_process';
 import { openChannel, SUDO_FN, callsSudoNonInteractive } from '../askpass.js';
 
 const MAX_OUTPUT = 100_000;
+/**
+ * How long after killing the process tree we wait for pipes to hit EOF on their own.
+ * If an orphaned descendant escaped the group/tree and still holds stdout or stderr open,
+ * we destroy the pipes and settle anyway so a cancelled or timed-out command never hangs.
+ */
+const KILL_GRACE_MS = 1500;
 
 const WIN = process.platform === 'win32';
 
@@ -23,12 +29,29 @@ const NEEDS_TTY = new RegExp(
 const SUDO_N_REFUSED = /sudo: a password is required/i;
 
 /**
- * @param {{cmd: string, killed: boolean, code: number|null, stdout: string, stderr: string,
+ * @param {{cmd: string, killed: boolean, killReason?: 'timeout'|'cancel'|null,
+ *   durationMs: number, code: number|null, stdout: string, stderr: string,
  *   timeout: number, sudoReady?: boolean}} r
  */
-function noteFor({ cmd, killed, code, stdout, stderr, timeout, sudoReady = false }) {
+function noteFor({
+  cmd,
+  killed,
+  killReason = null,
+  durationMs,
+  code,
+  stdout,
+  stderr,
+  timeout,
+  sudoReady = false,
+}) {
   const notes = [];
-  if (killed) notes.push(`killed after ${Math.round(timeout / 1000)}s (timeout or cancel)`);
+  if (killed) {
+    notes.push(
+      killReason === 'cancel'
+        ? `killed after ${Math.round(durationMs / 1000)}s (cancelled by operator)`
+        : `killed after ${Math.round(timeout / 1000)}s (timeout)`,
+    );
+  }
   // Both streams, any exit code: `sudo -n -l 2>&1 | head` exits 0 with the refusal in
   // stdout, and that is the case that once led the model to declare sudo impossible.
   if (callsSudoNonInteractive(cmd) && SUDO_N_REFUSED.test(`${stdout}\n${stderr}`)) {
@@ -115,8 +138,67 @@ export async function runShell(op, ctx, { secret } = {}) {
  * @param {{sandbox: any, shellTimeout: number, signal?: AbortSignal}} ctx
  * @param {{prefix?: string, env?: Record<string, string>, sudoReady?: boolean}} [extra]
  */
+function killTree(child) {
+  if (WIN) {
+    if (child.pid) {
+      try {
+        // child.kill() on Windows terminates only cmd.exe, leaving descendants (e.g. a
+        // hung test runner) alive and holding the inherited stdout/stderr pipes open so
+        // `close` never fires. taskkill /T /F terminates the whole process tree.
+        const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+        killer.on('error', () => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* already exited */
+          }
+        });
+        killer.unref();
+        return;
+      } catch {
+        /* fall through to direct kill */
+      }
+    }
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* already exited */
+    }
+    return;
+  }
+
+  try {
+    // detached made the shell a process-group leader, so take its children with it:
+    // killing only sh left e.g. a test runner holding the pipes open, and `close`
+    // did not fire until it exited on its own.
+    process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      /* already exited */
+    }
+  }
+}
+
 function spawnShell(op, ctx, extra = {}) {
   const cwd = op.cwd ? ctx.sandbox.resolveForWrite(op.cwd) : ctx.sandbox.writeRoot;
+
+  if (ctx.signal?.aborted) {
+    return Promise.resolve({
+      cmd: op.cmd,
+      cwd: ctx.sandbox.rel(cwd),
+      exitCode: null,
+      durationMs: 0,
+      stdout: '',
+      stderr: '',
+      cancelled: true,
+      note: 'killed after 0s (cancelled by operator)',
+    });
+  }
 
   return new Promise((resolve) => {
     const started = Date.now();
@@ -142,7 +224,11 @@ function spawnShell(op, ctx, extra = {}) {
     let stdout = '';
     let stderr = '';
     let killed = false;
+    /** @type {'timeout'|'cancel'|null} */
+    let killReason = null;
     let truncated = false;
+    let settled = false;
+    let graceTimer = null;
 
     const cap = (buf, chunk) => {
       if (buf.length >= MAX_OUTPUT) {
@@ -159,36 +245,26 @@ function spawnShell(op, ctx, extra = {}) {
       stderr = cap(stderr, d.toString());
     });
 
-    const kill = () => {
-      killed = true;
-      try {
-        // detached made the shell a process-group leader, so take its children with it:
-        // killing only sh left e.g. a test runner holding the pipes open, and `close`
-        // did not fire until it exited on its own.
-        if (WIN) child.kill('SIGKILL');
-        else process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        child.kill('SIGKILL');
-      }
-    };
-
-    const timer = setTimeout(kill, ctx.shellTimeout);
-    const onAbort = kill;
-    ctx.signal?.addEventListener('abort', onAbort, { once: true });
-
     const finish = (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(graceTimer);
       ctx.signal?.removeEventListener('abort', onAbort);
+      const durationMs = Date.now() - started;
       resolve({
         cmd: op.cmd,
         cwd: ctx.sandbox.rel(cwd),
         exitCode: code,
-        durationMs: Date.now() - started,
+        durationMs,
         stdout: stdout.slice(0, MAX_OUTPUT),
         stderr: stderr.slice(0, MAX_OUTPUT),
+        ...(killReason === 'cancel' ? { cancelled: true } : {}),
         ...noteFor({
           cmd: op.cmd,
           killed,
+          killReason,
+          durationMs,
           code,
           stdout,
           stderr,
@@ -199,12 +275,38 @@ function spawnShell(op, ctx, extra = {}) {
       });
     };
 
+    const kill = (reason) => {
+      if (!killed) {
+        killed = true;
+        killReason = reason;
+      }
+      killTree(child);
+      if (!graceTimer && !settled) {
+        graceTimer = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.unref?.();
+          finish(child.exitCode);
+        }, KILL_GRACE_MS);
+      }
+    };
+
+    const timer = setTimeout(() => kill('timeout'), ctx.shellTimeout);
+    const onAbort = () => kill('cancel');
+    if (ctx.signal?.aborted) onAbort();
+    else ctx.signal?.addEventListener('abort', onAbort, { once: true });
+
     child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      clearTimeout(graceTimer);
+      ctx.signal?.removeEventListener('abort', onAbort);
       resolve({
         cmd: op.cmd,
         cwd: ctx.sandbox.rel(cwd),
         exitCode: -1,
+        durationMs: Date.now() - started,
         error: err.message,
         stdout,
         stderr,

@@ -329,9 +329,15 @@ function renderEntry(e) {
       const out = e.outcome || {};
       const ok = out.status === 'ok';
       const rows = ok ? (out.results || []).filter((r) => r.result && MUTATING.has(r.op)) : out.errors || [];
+      const tail =
+        out.status === 'plan-failed'
+          ? 'nothing was applied'
+          : rows.some((err) => err.op === 'shell')
+            ? 'stopped at the shell op; earlier file changes kept'
+            : 'changes rolled back';
       const head = ok
         ? `✓ applied · ${rows.length || (out.results || []).length} result${rows.length === 1 ? '' : 's'}`
-        : `✗ ${rows.length} error${rows.length === 1 ? '' : 's'} — nothing was applied`;
+        : `✗ ${rows.length} error${rows.length === 1 ? '' : 's'} — ${tail}`;
       const d = fold(`opsres ${ok ? 'ok' : 'fail'}`, head, !ok);
       if (ok) {
         for (const r of rows) d.appendChild(el('div', 'op-ok', summarize(r)));

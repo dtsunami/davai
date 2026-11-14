@@ -77,8 +77,22 @@ export async function executeBatch(ops, ctx) {
 
   // --- pass 2: shell ops, serially, each behind approval ---
   for (const i of shellQueue) {
+    if (ctx.signal?.aborted) {
+      return {
+        status: 'apply-failed',
+        results,
+        errors: [{ index: i, op: 'shell', message: 'cancelled by operator' }],
+      };
+    }
     const op = ops[i];
     const decision = await gateShell(op, i, ctx);
+    if (ctx.signal?.aborted) {
+      return {
+        status: 'apply-failed',
+        results,
+        errors: [{ index: i, op: 'shell', message: 'cancelled by operator' }],
+      };
+    }
     if (decision.failed) {
       return {
         status: 'apply-failed',
@@ -112,7 +126,7 @@ export async function executeBatch(ops, ctx) {
     // sudo asked twice in one process: the password it was given is stale, so drop it.
     if (out.sudo?.refused) ctx.sudo?.forget();
     const result = decision.auth ? { ...out, auth: decision.auth } : out;
-    const ok = out.exitCode === 0;
+    const ok = !out.cancelled && out.exitCode === 0;
     results.push({ index: i, op: 'shell', ok, result });
     if (!ok) {
       return {
@@ -122,7 +136,9 @@ export async function executeBatch(ops, ctx) {
           {
             index: i,
             op: 'shell',
-            message: `command exited ${out.exitCode}${out.error ? `: ${out.error}` : ''}`,
+            message: out.cancelled
+              ? 'cancelled by operator'
+              : `command exited ${out.exitCode}${out.error ? `: ${out.error}` : ''}`,
           },
         ],
       };

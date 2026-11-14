@@ -678,3 +678,54 @@ describe('context pane', () => {
     app.unmount();
   });
 });
+
+describe('escape cancellation', () => {
+  it('cancels a running ops batch on Escape and returns cleanly on cancelled event', async () => {
+    let cancelCalls = 0;
+    session.agent.cancel = () => {
+      cancelCalls++;
+    };
+    const stdout = fakeStdout();
+    const stdin = fakeStdin();
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    session.agent.emit('turn-start');
+    session.agent.emit('turn-end', { text: 'running tests', ttftMs: 10, durationMs: 20, effort: 'high' });
+    session.agent.emit('ops-parsed', [{ op: 'shell', cmd: 'pytest -v' }]);
+    await waitForText(stdout, 'running 1 op');
+
+    stdin.write('\u001b');
+    await flush();
+    expect(cancelCalls).toBe(1);
+    await waitForText(stdout, 'cancelling');
+
+    session.agent.emit('cancelled');
+    await waitForText(stdout, 'cancelled');
+    app.unmount();
+  });
+
+  it('aborts an in-flight operator sh command on Escape', async () => {
+    const ctl = new AbortController();
+    session.shellController = ctl;
+    const stdout = fakeStdout();
+    const stdin = fakeStdin();
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    stdin.write('\u001b');
+    await flush();
+    expect(ctl.signal.aborted).toBe(true);
+    app.unmount();
+  });
+});

@@ -53,13 +53,29 @@ export function findSession(home, id) {
  */
 export function replaySegments(dir) {
   const specs = [];
+  let pendingOps = null;
+
+  const flushInterruptedOps = () => {
+    if (!pendingOps) return;
+    const ops = pendingOps;
+    pendingOps = null;
+    specs.push({
+      type: 'op-result',
+      label: 'batch interrupted',
+      role: 'user',
+      text: synthesizeInterruptedOps(ops),
+    });
+  };
+
   for (const ev of readTranscript(dir)) {
     switch (ev.type) {
       case 'user':
+        flushInterruptedOps();
         if (ev.text) specs.push({ type: 'user', label: 'user', role: 'user', text: ev.text });
         break;
 
       case 'assistant':
+        flushInterruptedOps();
         // The assistant text still carries its da_ops block verbatim, which is what
         // lets the model reason about the results that follow it.
         if (ev.text) {
@@ -73,7 +89,12 @@ export function replaySegments(dir) {
         }
         break;
 
+      case 'ops':
+        if (Array.isArray(ev.ops) && ev.ops.length) pendingOps = ev.ops;
+        break;
+
       case 'ops-result':
+        pendingOps = null;
         specs.push({
           type: 'op-result',
           label: ev.label || `batch ${ev.status || 'result'}`,
@@ -108,7 +129,27 @@ export function replaySegments(dir) {
         break;
     }
   }
+  flushInterruptedOps();
   return specs;
+}
+
+/**
+ * A transcript with `ops` and no matching `ops-result` ended mid-batch (crash, SIGKILL,
+ * or a hung command that forced the terminal closed). Tell the resumed model what was in
+ * flight so it verifies disk state instead of blindly re-applying file edits.
+ */
+function synthesizeInterruptedOps(ops) {
+  const lines = [
+    'Batch interrupted — the previous session ended while these ops were running, so no ops-result was recorded:',
+  ];
+  ops.forEach((o, i) => {
+    const detail = o.path || o.cmd || (o.from ? `${o.from} -> ${o.to}` : '');
+    lines.push(`  [${i}] ${o.op}${detail ? `: ${detail}` : ''}`);
+  });
+  lines.push(
+    'Earlier file changes in this batch may already be applied on disk — read files to verify before re-applying.',
+  );
+  return lines.join('\n');
 }
 
 /**

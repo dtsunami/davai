@@ -765,3 +765,79 @@ describe('transcript records every model output', () => {
     expect(logged.some((e) => e.type === 'assistant-partial')).toBe(false);
   });
 });
+
+describe('cancelling a stuck shell op mid-batch', () => {
+  it('kills the hung shell op on agent.cancel(), preserves earlier file edits, and recovers for the next turn', async () => {
+    const logged = [];
+    deps.log = { ...deps.log, event: (type, data = {}) => logged.push({ type, ...data }) };
+
+    const hangScript = path.join(root, 'hang.mjs');
+    fs.writeFileSync(
+      hangScript,
+      'process.stdout.write("running test_sse...\\n"); setInterval(() => {}, 1000);\n',
+    );
+    const shellCmd = 'node hang.mjs';
+
+    const batchTurn =
+      'Applying fix and running tests.\n```da_ops\n' +
+      JSON.stringify({
+        ops: [
+          { op: 'replace', path: 'index.js', old: 'export const x = 1;', new: 'export const x = 2;' },
+          { op: 'shell', cmd: shellCmd },
+        ],
+      }) +
+      '\n```';
+
+    const provider = stubProvider([batchTurn, 'Fixed the blocking socket deadlock.']);
+    const { agent, ledger } = makeAgent(provider);
+
+    let cancelledCount = 0;
+    agent.on('cancelled', () => {
+      cancelledCount++;
+    });
+    agent.on('approval-request', ({ respond }) => {
+      respond({ allow: true });
+      setTimeout(() => agent.cancel(), 300);
+    });
+
+    await agent.run('fix sse and test');
+
+    expect(cancelledCount).toBe(1);
+    expect(agent.busy).toBe(false);
+    // Earlier file edit in the batch remains applied on disk.
+    expect(fs.readFileSync(path.join(root, 'index.js'), 'utf8')).toContain('export const x = 2;');
+    // Partial stdout + cancellation note are recorded in the ledger so the next prompt is grounded.
+    const opSeg = ledger.segments.find((s) => s.type === 'op-result');
+    expect(opSeg).toBeDefined();
+    expect(opSeg.part.text).toContain('running test_sse...');
+    expect(opSeg.part.text).toContain('cancelled by operator');
+    expect(logged.some((e) => e.type === 'ops-result')).toBe(true);
+
+    // Session is recoverable: the next operator request runs cleanly on the same agent & ledger.
+    let doneProse = null;
+    agent.on('done', ({ prose }) => {
+      doneProse = prose;
+    });
+    await agent.run('test_sse hung, fix it');
+    expect(doneProse).toBe('Fixed the blocking socket deadlock.');
+  });
+
+  it('aborts cleanly if agent.cancel() is called while awaiting shell approval', async () => {
+    const batchTurn = '```da_ops\n{"ops": [{"op": "shell", "cmd": "echo hi"}]}\n```';
+    const provider = stubProvider([batchTurn]);
+    const { agent } = makeAgent(provider);
+
+    let cancelled = false;
+    agent.on('cancelled', () => {
+      cancelled = true;
+    });
+    agent.on('approval-request', () => {
+      // Simulate browser /api/cancel while approval prompt is still unanswered.
+      setTimeout(() => agent.cancel(), 20);
+    });
+
+    await agent.run('say hi');
+    expect(cancelled).toBe(true);
+    expect(agent.busy).toBe(false);
+  });
+});

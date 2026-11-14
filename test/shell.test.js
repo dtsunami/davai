@@ -60,3 +60,83 @@ describe.skipIf(process.platform === 'win32')('shell op isolation', () => {
     expect(r.durationMs).toBeLessThan(4000);
   });
 });
+
+describe('shell cancellation and process-tree kill (all platforms)', () => {
+  /**
+   * Write a script that spawns a grandchild Node process inheriting stdout/stderr pipes
+   * and hanging for 60s — reproducing `cmd.exe -> pytest.exe -> python.exe` on Windows.
+   */
+  function writeTreeHangScript() {
+    const childScript = path.join(base, 'grandchild.mjs');
+    const parentScript = path.join(base, 'parent.mjs');
+    fs.writeFileSync(
+      childScript,
+      [
+        'process.stdout.write(`GRANDCHILD_PID=${process.pid}\\n`);',
+        'setInterval(() => {}, 1000);',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      parentScript,
+      [
+        'import { spawn } from "node:child_process";',
+        `const c = spawn(process.execPath, [${JSON.stringify(childScript)}], { stdio: "inherit" });`,
+        'c.on("exit", (code) => process.exit(code ?? 0));',
+        'setInterval(() => {}, 1000);',
+      ].join('\n'),
+    );
+    return 'node parent.mjs';
+  }
+
+  function isAlive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  it('kills the full descendant tree and resolves promptly on AbortSignal cancel', async () => {
+    const cmd = writeTreeHangScript();
+    const ctl = new AbortController();
+
+    setTimeout(() => ctl.abort(), 350);
+    const r = await runShell({ cmd }, { ...ctx, shellTimeout: 60_000, signal: ctl.signal });
+
+    expect(r.cancelled).toBe(true);
+    expect(r.note).toMatch(/cancelled by operator/);
+    expect(r.stdout).toMatch(/GRANDCHILD_PID=\d+/);
+    expect(r.durationMs).toBeLessThan(5000);
+
+    const m = /GRANDCHILD_PID=(\d+)/.exec(r.stdout);
+    const grandchildPid = Number(m[1]);
+    // Give OS process teardown a brief moment to finalize handle table cleanup.
+    const deadline = Date.now() + 2000;
+    while (isAlive(grandchildPid) && Date.now() < deadline) {
+      await new Promise((res) => setTimeout(res, 25));
+    }
+    expect(isAlive(grandchildPid)).toBe(false);
+  });
+
+  it('kills the full descendant tree on shellTimeout too', async () => {
+    const cmd = writeTreeHangScript();
+    const r = await runShell({ cmd }, { ...ctx, shellTimeout: 350 });
+
+    expect(r.cancelled).toBeUndefined();
+    expect(r.note).toMatch(/killed.*timeout/);
+    expect(r.durationMs).toBeLessThan(5000);
+  });
+
+  it('returns cancelled immediately without spawning when signal is already aborted', async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    const marker = path.join(base, 'never-created.txt');
+    const r = await runShell(
+      { cmd: `${JSON.stringify(process.execPath)} -e "require('fs').writeFileSync(${JSON.stringify(marker)}, 'x')"` },
+      { ...ctx, signal: ctl.signal },
+    );
+    expect(r.cancelled).toBe(true);
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+});

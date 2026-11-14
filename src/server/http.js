@@ -148,6 +148,7 @@ export function createWebServer({
     if (req.method === 'POST' && url.pathname === '/api/submit') return postSubmit(req, res);
     if (req.method === 'POST' && url.pathname === '/api/approve') return postApprove(req, res);
     if (req.method === 'POST' && url.pathname === '/api/cancel') {
+      session.shellController?.abort();
       session.agent.cancel();
       return json(res, { ok: true });
     }

@@ -118,6 +118,30 @@ describe('replaySegments', () => {
     expect(seg.text).toContain('! [1] shell: exit 1');
   });
 
+  it('synthesizes an interrupted op-result when a session died mid-batch with no ops-result', () => {
+    const dir = writeSession('dddd666666', {
+      startedAt: '2026-09-05T11:00:00.000Z',
+      events: [
+        { type: 'user', text: 'fix and run pytest' },
+        { type: 'assistant', text: '```da_ops\n{"ops":[...]}\n```' },
+        {
+          type: 'ops',
+          ops: [
+            { op: 'replace', path: 'src/http.py' },
+            { op: 'shell', cmd: 'pytest -v' },
+          ],
+        },
+      ],
+    });
+
+    const specs = replaySegments(dir);
+    expect(specs.map((s) => s.type)).toEqual(['user', 'assistant', 'op-result']);
+    expect(specs[2].label).toBe('batch interrupted');
+    expect(specs[2].text).toContain('replace: src/http.py');
+    expect(specs[2].text).toContain('shell: pytest -v');
+    expect(specs[2].text).toMatch(/read files to verify/i);
+  });
+
   it('is empty for a session with no transcript', () => {
     const dir = path.join(home, 'sessions', 'nothing-here');
     fs.mkdirSync(dir, { recursive: true });

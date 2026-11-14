@@ -154,11 +154,18 @@ export async function handleCommand(text, deps) {
       return { handled: true };
     }
 
-    const out = await runShell(
-      gate.op,
-      { sandbox, shellTimeout: cfg.shellTimeout },
-      { secret: gate.secret },
-    );
+    const ctl = new AbortController();
+    session.shellController = ctl;
+    let out;
+    try {
+      out = await runShell(
+        gate.op,
+        { sandbox, shellTimeout: cfg.shellTimeout, signal: ctl.signal },
+        { secret: gate.secret },
+      );
+    } finally {
+      if (session.shellController === ctl) session.shellController = null;
+    }
     // sudo asked twice in one process: the cached password is stale.
     if (out.sudo?.refused) agent?.sudo?.forget();
 

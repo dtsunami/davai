@@ -961,7 +961,22 @@ export class Agent extends EventEmitter {
   /** The UI answers this; headless mode supplies its own policy. */
   #requestApproval(op, index, extra) {
     return new Promise((resolve) => {
-      this.emit('approval-request', { op, index, ...extra, respond: resolve });
+      const signal = this.controller?.signal;
+      if (signal?.aborted) {
+        resolve({ allow: false, reason: 'cancelled' });
+        return;
+      }
+      let settled = false;
+      const finish = (decision) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', onAbort);
+        resolve(decision);
+      };
+      const req = { op, index, ...extra, respond: finish };
+      const onAbort = () => req.respond({ allow: false, reason: 'cancelled' });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      this.emit('approval-request', req);
     });
   }
 

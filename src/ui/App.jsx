@@ -201,6 +201,7 @@ export function App({ session, initialInput }) {
     const onError = (e) => {
       throughput.endTurn();
       push({ type: 'error', message: e.message, detail: e.detail });
+      setApproval(null);
       setBusy(false);
       setStatus(null);
       stopMeter();
@@ -208,6 +209,7 @@ export function App({ session, initialInput }) {
     const onWarning = (w) => push({ type: 'warning', message: w.message });
     const onDone = () => {
       throughput.endTurn();
+      setApproval(null);
       setBusy(false);
       setStatus(null);
       setStats({ ...agent.stats });
@@ -222,6 +224,7 @@ export function App({ session, initialInput }) {
       setLive('');
       clearThinking();
       push({ type: 'notice', message: 'cancelled' });
+      setApproval(null);
       setBusy(false);
       setStatus(null);
       stopMeter();
@@ -390,11 +393,23 @@ export function App({ session, initialInput }) {
 
       if (key.escape) {
         if (pane) return setPane(null);
-        if (busy) agent.cancel();
+        if (session.shellController) {
+          session.shellController.abort();
+          return;
+        }
+        if (busy) {
+          setStatus('cancelling');
+          agent.cancel();
+        }
         return;
       }
       if (key.ctrl && input === 'c') {
-        if (busy) {
+        if (session.shellController) {
+          session.shellController.abort();
+          return;
+        }
+        if (busy && !agent.controller?.signal?.aborted) {
+          setStatus('cancelling');
           agent.cancel();
           return;
         }
