@@ -777,6 +777,7 @@ export function createWebServer({
       if (err) return json(res, { error: err.message }, 400);
       const ok = bus.resolveApproval(String(data?.id || ''), {
         allow: Boolean(data?.allow),
+        ...(data?.cmd ? { cmd: String(data.cmd) } : {}),
         ...(data?.secret ? { secret: String(data.secret) } : {}),
       });
       // Already answered, most likely from the REPL or another tab. Not an error.

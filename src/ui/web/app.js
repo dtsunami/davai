@@ -2086,12 +2086,29 @@ function showApproval(req) {
 
 function renderApproval(req) {
   state.pendingApproval = req;
-  $('approval-cmd').textContent = req.op?.cmd || '(unknown command)';
+  const rawCmd = req.op?.cmd || '';
+  $('approval-cmd').textContent = rawCmd || '(unknown command)';
+  $('approval-cmd').hidden = false;
+  const edit = $('approval-edit');
+  edit.hidden = true;
+  edit.value = rawCmd;
+  $('approve-edit').hidden = Boolean(req.operator);
   const secret = $('approval-secret');
   secret.hidden = !req.sudo;
   secret.value = '';
   $('approval').hidden = false;
   (req.sudo ? secret : $('approve-yes')).focus();
+}
+
+function startApprovalEdit() {
+  if (!state.pendingApproval) return;
+  const edit = $('approval-edit');
+  if (!edit.hidden) return;
+  $('approval-cmd').hidden = true;
+  edit.hidden = false;
+  $('approve-edit').hidden = true;
+  edit.focus();
+  edit.setSelectionRange(edit.value.length, edit.value.length);
 }
 
 /**
@@ -2115,8 +2132,12 @@ function hideApproval(id) {
 async function answer(allow) {
   const req = state.pendingApproval;
   if (!req) return;
+  const edit = $('approval-edit');
   const secret = $('approval-secret');
+  const editedCmd = !edit.hidden ? edit.value.trim() : '';
+  if (allow && !edit.hidden && !editedCmd) return;
   const body = { id: req.id, allow };
+  if (allow && !edit.hidden && editedCmd !== (req.op?.cmd || '')) body.cmd = editedCmd;
   if (allow && req.sudo && secret.value) body.secret = secret.value;
   secret.value = '';
   hideApproval();
@@ -2286,7 +2307,19 @@ function bind() {
   $('send').onclick = send;
   $('cancel').onclick = () => api('/api/cancel', {}).catch(() => {});
   $('approve-yes').onclick = () => answer(true);
+  $('approve-edit').onclick = startApprovalEdit;
   $('approve-no').onclick = () => answer(false);
+  $('approval-edit').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); answer(true); }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      $('approval-edit').hidden = true;
+      $('approval-cmd').hidden = false;
+      $('approve-edit').hidden = false;
+      $('approve-yes').focus();
+    }
+  });
   $('approval-secret').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); answer(true); }
   });

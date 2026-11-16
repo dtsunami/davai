@@ -8,6 +8,8 @@ import {
   applyModelChange,
 } from '../session/models.js';
 import { colors, glyphs, formatTokens } from './theme.js';
+import { HighlightedInput } from './highlight.jsx';
+import { useLineEditor } from './editor.js';
 
 /**
  * /model (req 15): shows what's available and lets you change it live.
@@ -29,6 +31,12 @@ export function ModelPane({ session, onClose, push }) {
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState(() => session.modelSearch || '');
   useEffect(() => { delete session.modelSearch; }, [session]);
+  useEffect(() => {
+    session._paneEditing = searching;
+    return () => {
+      session._paneEditing = false;
+    };
+  }, [session, searching]);
   const [, force] = useState(0);
 
   // Browsing a provider is not switching to it: the model list is shown, and the switch
@@ -122,6 +130,7 @@ export function ModelPane({ session, onClose, push }) {
       return;
     }
     setBrowsing(next);
+    searchEditor.setBuffer('', 0);
     setQuery('');
     setSearching(false);
     setLoading(true);
@@ -144,67 +153,71 @@ export function ModelPane({ session, onClose, push }) {
       .finally(() => setLoading(false));
   };
 
-  useInput((input, key) => {
-    if (searching) {
-      if (key.escape) {
-        if (query) setQuery('');
-        setSearching(false);
-        return;
+  const searchEditor = useLineEditor({
+    initialValue: query,
+    isActive: searching,
+    multiline: false,
+    onChange: (next) => setQuery(next.value),
+    onSubmit: (val) => {
+      if (rows[sel]) applyModel(rows[sel].id);
+      else if (val.trim()) applyModel(val.trim());
+    },
+    onEscape: () => {
+      if (query) {
+        searchEditor.setBuffer('', 0);
+        setQuery('');
       }
-      if (key.return) {
-        if (rows[sel]) applyModel(rows[sel].id);
-        else if (query.trim()) applyModel(query.trim());
-        return;
-      }
-      if (key.upArrow) return setSel((s) => Math.max(0, s - 1));
-      if (key.downArrow) return setSel((s) => Math.min(Math.max(0, rows.length - 1), s + 1));
-      if (key.backspace || key.delete) {
-        setQuery((prev) => prev.slice(0, -1));
-        return;
-      }
-      if (input && !key.ctrl && !key.meta) {
-        setQuery((prev) => prev + input);
-      }
-      return;
-    }
-
-    if (key.escape || input === 'q') return onClose();
-    if (key.tab) return setTab((t) => (t === 'models' ? 'settings' : 'models'));
-    if (key.upArrow || input === 'k') return setSel((s) => Math.max(0, s - 1));
-    if (key.downArrow || input === 'j')
-      return setSel((s) => Math.min(Math.max(0, rows.length - 1), s + 1));
-    if (key.leftArrow) return cycleProvider(-1);
-    if (key.rightArrow) return cycleProvider(1);
-
-    if (input === '/' && tab === 'models') {
-      setSearching(true);
-      return;
-    }
-
-    if (input === 'r' && tab === 'models') {
-      refreshModels();
-      return;
-    }
-
-    if (input === 's') {
-      setPersist((p) => !p);
-      return;
-    }
-
-    // A provider with no key cannot be switched to, and the pane is where an operator
-    // notices that. `enter` on it opens the one place that fixes it.
-    if (input === 'K' || (key.return && !cfg.keys?.[browsing])) {
-      session.keysProvider = browsing;
-      onClose();
-      push({ type: 'notice', message: `/keys ${browsing} — add a key to use it` });
-      return;
-    }
-
-    if (key.return) {
-      if (tab === 'models' && rows[sel]) applyModel(rows[sel].id);
-      else if (tab === 'settings' && rows[sel]) applyEffort(rows[sel]);
-    }
+      setSearching(false);
+    },
+    onEffect: (effect) => {
+      if (effect.type === 'up') setSel((s) => Math.max(0, s - 1));
+      else if (effect.type === 'down') setSel((s) => Math.min(Math.max(0, rows.length - 1), s + 1));
+      else if (effect.type === 'ctrl' && effect.key === 'c') setSearching(false);
+    },
   });
+
+  useInput(
+    (input, key) => {
+      if (key.escape || input === 'q') return onClose();
+      if (key.tab) return setTab((t) => (t === 'models' ? 'settings' : 'models'));
+      if (key.upArrow || input === 'k') return setSel((s) => Math.max(0, s - 1));
+      if (key.downArrow || input === 'j')
+        return setSel((s) => Math.min(Math.max(0, rows.length - 1), s + 1));
+      if (key.leftArrow) return cycleProvider(-1);
+      if (key.rightArrow) return cycleProvider(1);
+
+      if (input === '/' && tab === 'models') {
+        searchEditor.setBuffer(query, query.length);
+        setSearching(true);
+        return;
+      }
+
+      if (input === 'r' && tab === 'models') {
+        refreshModels();
+        return;
+      }
+
+      if (input === 's') {
+        setPersist((p) => !p);
+        return;
+      }
+
+      // A provider with no key cannot be switched to, and the pane is where an operator
+      // notices that. `enter` on it opens the one place that fixes it.
+      if (input === 'K' || (key.return && !cfg.keys?.[browsing])) {
+        session.keysProvider = browsing;
+        onClose();
+        push({ type: 'notice', message: `/keys ${browsing} — add a key to use it` });
+        return;
+      }
+
+      if (key.return) {
+        if (tab === 'models' && rows[sel]) applyModel(rows[sel].id);
+        else if (tab === 'settings' && rows[sel]) applyEffort(rows[sel]);
+      }
+    },
+    { isActive: !searching },
+  );
 
   // Scroll window around `sel` so 300+ OpenRouter models can be browsed smoothly.
   const pageSize = 14;
@@ -241,9 +254,13 @@ export function ModelPane({ session, onClose, push }) {
 
       {tab === 'models' && (searching || query) ? (
         <Box marginTop={1}>
-          <Text color={colors.accent}>filter/id: </Text>
-          <Text>{query}</Text>
-          {searching ? <Text inverse> </Text> : null}
+          <HighlightedInput
+            value={searching ? searchEditor.value : query}
+            cursor={searching ? searchEditor.cursor : query.length}
+            hideCursor={!searching}
+            mode="plain"
+            prefix={<Text color={colors.accent}>filter/id: </Text>}
+          />
           {!rows.length && query.trim() ? (
             <Text color={colors.dim}>
               {'  '}(enter to use custom id &quot;{query.trim()}&quot;)

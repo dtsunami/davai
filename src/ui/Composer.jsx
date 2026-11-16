@@ -1,154 +1,101 @@
-import React, { useState, useCallback } from 'react';
-import { Box, Text, useInput } from 'ink';
+import React, { useState, useEffect } from 'react';
+import { Box, Text } from 'ink';
 import { colors, glyphs } from './theme.js';
 import { completeInput } from './complete.js';
-import { looksLikePaste } from '../context/pastes.js';
+import { HighlightedInput } from './highlight.jsx';
+import { useLineEditor } from './editor.js';
+
+/** Control keys owned by App.jsx or Composer mode-switching rather than readline. */
+const COMPOSER_RESERVED_CTRL = new Set(['g', 't', 's', 'c']);
 
 /**
- * Input composer: multiline, history, @path completion, bracketed paste (req 14),
- * and shell mode (req 13).
- *
- * Ink's own TextInput does not give us paste capture or completion, so the line
- * editor is hand-rolled on top of raw key events.
+ * Input composer: shell-grade cursor movement, multiline editing, history + ctrl+r
+ * reverse search, Tab / Shift+Tab completion, live syntax highlighting, bracketed
+ * paste (req 14), and shell mode (req 13).
  */
-export function Composer({ onSubmit, session, busy }) {
+export function Composer({ onSubmit, session, busy, active = true }) {
   const { pastes } = session;
-  const [value, setValue] = useState('');
-  const [cursor, setCursor] = useState(0);
-  // Seeded from $DAVAI_HOME/history.jsonl, so the up arrow reaches past this session.
-  const [history, setHistory] = useState(() => session.history?.all() ?? []);
-  const [histIndex, setHistIndex] = useState(-1);
   const [shellMode, setShellMode] = useState(false);
-  const [hint, setHint] = useState('');
 
-  const insert = useCallback(
-    (text) => {
-      setValue((v) => v.slice(0, cursor) + text + v.slice(cursor));
-      setCursor((c) => c + text.length);
+  const editor = useLineEditor({
+    initialHistory: session.history?.all() ?? [],
+    isActive: active,
+    multiline: true,
+    enableHistory: true,
+    enableSearch: true,
+    reservedCtrl: COMPOSER_RESERVED_CTRL,
+    onKeystroke: () => session.throughput?.recordKeystroke?.(),
+    complete: (val, cur) =>
+      completeInput(val, cur, session, { mode: 'composer', shellMode }),
+    onPaste: (raw, { insert }) => {
+      const captured = pastes.capture(raw);
+      if (captured) {
+        insert(captured.placeholder, `paste#${captured.n} stored — it expands when you submit`);
+        return true;
+      }
+      // Single line with a trailing break: insert literally without submitting.
+      insert(raw.replace(/[\r\n]+/g, ' ').trimEnd());
+      return true;
     },
-    [cursor],
-  );
-
-  const submit = useCallback(() => {
-    const text = value;
-    if (!text.trim()) return;
-    setHistory((h) => [...h, text]);
-    setHistIndex(-1);
-    setValue('');
-    setCursor(0);
-    setHint('');
-    onSubmit(shellMode && !text.startsWith('sh ') ? `sh ${text}` : text);
-  }, [value, shellMode, onSubmit]);
-
-  useInput(
-    (input, key) => {
-      session.throughput?.recordKeystroke?.();
-      // --- bracketed paste ---
-      // A burst arriving as one chunk with line breaks is a paste, not typing.
-      if (looksLikePaste(input)) {
-        const captured = pastes.capture(input);
-        if (captured) {
-          insert(captured.placeholder);
-          setHint(`paste#${captured.n} stored — it expands when you submit`);
-          return;
-        }
-        // One line with a trailing break: paste the text, drop the break, and do not
-        // submit — the operator pasted, they did not press Enter.
-        insert(input.replace(/[\r\n]+/g, ' ').trimEnd());
-        return;
-      }
-
-      if (key.return) {
-        // Shift+Enter (and Alt+Enter) insert a newline instead of submitting.
-        if (key.shift || key.meta) {
-          insert('\n');
-          return;
-        }
-        submit();
-        return;
-      }
-
-      if (key.tab) {
-        const completed = completeInput(value, cursor, session);
-        if (completed) {
-          setValue(completed.value);
-          setCursor(completed.cursor);
-          setHint(completed.hint || '');
-        }
-        return;
-      }
-
-      if (key.ctrl && input === 's') {
+    onSubmit: (text) => {
+      if (!text.trim()) return;
+      editor.pushHistory(text);
+      editor.setBuffer('', 0);
+      onSubmit(shellMode && !text.startsWith('sh ') ? `sh ${text}` : text);
+    },
+    onEffect: (effect) => {
+      if (effect.type === 'ctrl' && effect.key === 's') {
         setShellMode((s) => !s);
-        return;
       }
-
-      if (key.upArrow) {
-        if (!history.length) return;
-        const i = histIndex === -1 ? history.length - 1 : Math.max(0, histIndex - 1);
-        setHistIndex(i);
-        setValue(history[i]);
-        setCursor(history[i].length);
-        return;
-      }
-      if (key.downArrow) {
-        if (histIndex === -1) return;
-        const i = histIndex + 1;
-        if (i >= history.length) {
-          setHistIndex(-1);
-          setValue('');
-          setCursor(0);
-        } else {
-          setHistIndex(i);
-          setValue(history[i]);
-          setCursor(history[i].length);
-        }
-        return;
-      }
-
-      if (key.leftArrow) return setCursor((c) => Math.max(0, c - 1));
-      if (key.rightArrow) return setCursor((c) => Math.min(value.length, c + 1));
-
-      if (key.backspace || key.delete) {
-        if (cursor === 0) return;
-        setValue((v) => v.slice(0, cursor - 1) + v.slice(cursor));
-        setCursor((c) => Math.max(0, c - 1));
-        return;
-      }
-
-      if (key.ctrl && input === 'u') {
-        setValue('');
-        setCursor(0);
-        return;
-      }
-      if (key.ctrl && input === 'a') return; // reserved: artifacts pane
-      if (key.ctrl && input === 't') return; // reserved: throughput pane
-      if (key.ctrl && input === 'e') return setCursor(value.length);
-
-      // Ignore remaining control chords so they don't land in the buffer.
-      if (key.ctrl || key.meta || key.escape) return;
-
-      if (input) insert(input);
     },
-    // Active while busy too: that is what makes steering possible. esc and ctrl+c are
-    // handled by App's own handler, which runs regardless.
-    { isActive: true },
-  );
+    onChange: (next) => {
+      session._composerHasText = Boolean(next.value.length);
+    },
+  });
+
+  useEffect(() => {
+    session._composerHasText = Boolean(editor.value.length);
+    session._clearComposer = () => {
+      if (!editor.value.length && !editor.search) return false;
+      editor.setBuffer('', 0);
+      return true;
+    };
+    return () => {
+      session._composerHasText = false;
+      delete session._clearComposer;
+    };
+  }, [session, editor]);
+
+  if (!active) return null;
 
   const prompt = shellMode ? '$' : glyphs.prompt;
   const promptColor = shellMode ? colors.warn : busy ? colors.warn : colors.accent;
-  const display = value.length ? value : '';
+  const { value, cursor, hint, search } = editor;
 
   return (
     <Box flexDirection="column" paddingX={1} marginTop={1}>
-      <Box>
-        <Text color={promptColor} bold>
-          {prompt}{' '}
+      <HighlightedInput
+        value={value}
+        cursor={cursor}
+        // Hide the cursor during a run until the operator starts typing a steer.
+        hideCursor={busy && !value}
+        mode="composer"
+        shellMode={shellMode}
+        sandbox={session.sandbox}
+        prefix={
+          <Text color={promptColor} bold>
+            {prompt}{' '}
+          </Text>
+        }
+      />
+      {search ? (
+        <Text color={colors.accent}>
+          {'  '}bck-i-search: &quot;{search.query}&quot;
+          <Text color={colors.dim}>
+            {search.matchIndex >= 0 ? '' : ' (no match)'} · ctrl+r older · tab/→ edit · enter send · esc cancel
+          </Text>
         </Text>
-        {/* The cursor stays hidden during a run until the operator starts typing a
-            steer, so a stray block does not sit under the streaming answer. */}
-        <Text>{renderWithCursor(display, cursor, busy && !value)}</Text>
-      </Box>
+      ) : null}
       {hint ? <Text color={colors.dim}>  {hint}</Text> : null}
       {busy && value.trim() && !shellMode ? (
         <Text color={colors.dim}>  enter steers the run in progress</Text>
@@ -157,19 +104,5 @@ export function Composer({ onSubmit, session, busy }) {
         <Text color={colors.dim}>  shell mode — output is added to context (ctrl+s to exit)</Text>
       ) : null}
     </Box>
-  );
-}
-
-function renderWithCursor(value, cursor, hidden) {
-  if (hidden) return value;
-  const before = value.slice(0, cursor);
-  const at = value[cursor] ?? ' ';
-  const after = value.slice(cursor + 1);
-  return (
-    <>
-      <Text>{before}</Text>
-      <Text inverse>{at}</Text>
-      <Text>{after}</Text>
-    </>
   );
 }

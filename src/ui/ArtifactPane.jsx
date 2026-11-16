@@ -1,7 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { colors, glyphs } from './theme.js';
 import { suggestName } from '../context/artifacts.js';
+import { completeInput } from './complete.js';
+import { HighlightedInput } from './highlight.jsx';
+import { useLineEditor } from './editor.js';
 
 /**
  * Artifacts (req 7): every non-da_ops fenced block, copyable to the clipboard or
@@ -9,54 +12,74 @@ import { suggestName } from '../context/artifacts.js';
  */
 export function ArtifactPane({ artifacts, session, width, onClose, push }) {
   const [sel, setSel] = useState(Math.max(0, artifacts.items.length - 1));
-  const [saving, setSaving] = useState(null);
+  const [isSaving, setIsSaving] = useState(false);
   const [preview, setPreview] = useState(false);
 
   const items = artifacts.items;
   const current = items[sel];
 
-  useInput((input, key) => {
-    if (saving !== null) {
-      if (key.escape) return setSaving(null);
-      if (key.return) {
-        try {
-          const r = artifacts.save(current.n, saving, {
-            sandbox: session.sandbox,
-            journal: session.journal,
-          });
-          push({
-            type: 'notice',
-            message: `artifact #${current.n} ${glyphs.arrow} ${r.path}${r.overwrote ? ' (overwrote)' : ''}`,
-          });
-          setSaving(null);
-          onClose();
-        } catch (err) {
-          push({ type: 'error', message: err.message });
-          setSaving(null);
-        }
+  useEffect(() => {
+    if (!session) return undefined;
+    session._paneEditing = isSaving;
+    return () => {
+      session._paneEditing = false;
+    };
+  }, [session, isSaving]);
+
+  const pathEditor = useLineEditor({
+    initialValue: '',
+    isActive: isSaving,
+    multiline: false,
+    complete: (val, cur) => completeInput(val, cur, session, { mode: 'path' }),
+    onSubmit: (dest) => {
+      if (!dest.trim() || !current) return;
+      try {
+        const r = artifacts.save(current.n, dest.trim(), {
+          sandbox: session.sandbox,
+          journal: session.journal,
+        });
+        push({
+          type: 'notice',
+          message: `artifact #${current.n} ${glyphs.arrow} ${r.path}${r.overwrote ? ' (overwrote)' : ''}`,
+        });
+        setIsSaving(false);
+        onClose();
+      } catch (err) {
+        push({ type: 'error', message: err.message });
+        setIsSaving(false);
+      }
+    },
+    onEscape: () => setIsSaving(false),
+    onEffect: (effect) => {
+      if (effect.type === 'ctrl' && effect.key === 'c') setIsSaving(false);
+    },
+  });
+
+  useInput(
+    (input, key) => {
+      if (key.escape || input === 'q') return onClose();
+      if (!items.length) return;
+      if (key.upArrow || input === 'k') return setSel((s) => Math.max(0, s - 1));
+      if (key.downArrow || input === 'j') return setSel((s) => Math.min(items.length - 1, s + 1));
+      if (input === 'v' || key.return) return setPreview((p) => !p);
+      if (input === 's') {
+        const suggested = suggestName(current);
+        pathEditor.setBuffer(suggested, suggested.length);
+        setIsSaving(true);
         return;
       }
-      if (key.backspace || key.delete) return setSaving((s) => s.slice(0, -1));
-      if (input && !key.ctrl && !key.meta) return setSaving((s) => s + input);
-      return;
-    }
-
-    if (key.escape || input === 'q') return onClose();
-    if (!items.length) return;
-    if (key.upArrow || input === 'k') return setSel((s) => Math.max(0, s - 1));
-    if (key.downArrow || input === 'j') return setSel((s) => Math.min(items.length - 1, s + 1));
-    if (input === 'v' || key.return) return setPreview((p) => !p);
-    if (input === 's') return setSaving(suggestName(current));
-    if (input === 'c') {
-      artifacts
-        .copy(current.n)
-        .then(() => {
-          push({ type: 'notice', message: `artifact #${current.n} copied to clipboard` });
-          onClose();
-        })
-        .catch((err) => push({ type: 'error', message: err.message }));
-    }
-  });
+      if (input === 'c') {
+        artifacts
+          .copy(current.n)
+          .then(() => {
+            push({ type: 'notice', message: `artifact #${current.n} copied to clipboard` });
+            onClose();
+          })
+          .catch((err) => push({ type: 'error', message: err.message }));
+      }
+    },
+    { isActive: !isSaving },
+  );
 
   if (!items.length) {
     return (
@@ -102,11 +125,19 @@ export function ArtifactPane({ artifacts, session, width, onClose, push }) {
         </Box>
       ) : null}
 
-      {saving !== null ? (
-        <Box marginTop={1}>
-          <Text color={colors.accent}>save as: </Text>
-          <Text>{saving}</Text>
-          <Text inverse> </Text>
+      {isSaving ? (
+        <Box marginTop={1} flexDirection="column">
+          <HighlightedInput
+            value={pathEditor.value}
+            cursor={pathEditor.cursor}
+            mode="path"
+            sandbox={session?.sandbox}
+            prefix={<Text color={colors.accent}>save as: </Text>}
+          />
+          {pathEditor.hint ? <Text color={colors.dim}>  {pathEditor.hint}</Text> : null}
+          <Text color={colors.dim}>
+            enter save {glyphs.bullet} tab complete path {glyphs.bullet} esc cancel
+          </Text>
         </Box>
       ) : (
         <Box marginTop={1}>
@@ -118,7 +149,6 @@ export function ArtifactPane({ artifacts, session, width, onClose, push }) {
     </Box>
   );
 }
-
 
 function firstLine(text, max) {
   const l = text.split('\n').find((x) => x.trim()) || '';

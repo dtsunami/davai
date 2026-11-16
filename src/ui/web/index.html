@@ -202,9 +202,11 @@
         <div class="approval-body">
           <p class="approval-label">shell command wants to run</p>
           <pre id="approval-cmd"></pre>
+          <input id="approval-edit" type="text" autocomplete="off" spellcheck="false" hidden />
           <input id="approval-secret" type="password" placeholder="sudo password" hidden />
           <div class="approval-actions">
             <button id="approve-yes" class="ok">approve</button>
+            <button id="approve-edit">edit</button>
             <button id="approve-no" class="no">deny</button>
           </div>
         </div>

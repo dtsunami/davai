@@ -42,14 +42,15 @@ const HELP = `Commands
 
 Keys
   esc                 cancel the running turn, or close a pane
-  ctrl+t              token/s and ttft pane (per turn, per model, vs context)
-  ctrl+g              context pane
-  ctrl+a              artifacts pane
+  ←/→, ctrl+←/→       move by character or shell word (also alt+b / alt+f)
+  home/end, ctrl+a/e  jump to start / end of line (ctrl+a on empty opens artifacts)
+  ctrl+w, alt+d       kill word backward / forward (ctrl+k / ctrl+u kill line, ctrl+y yank)
+  ctrl+r              reverse incremental history search
+  tab / shift+tab     complete & cycle commands, subcommands, scripts, and paths
   ctrl+s              toggle shell mode
-  ctrl+u              clear the input line
-  tab                 complete @paths and /commands
+  ctrl+t / ctrl+g     throughput pane / context pane
   shift+enter         newline instead of submit
-  ctrl+c twice        quit
+  ctrl+c              clear input line (twice on empty quits)
 
 Input
   @path/to/file       tab-completes against the working directory

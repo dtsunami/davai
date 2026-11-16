@@ -507,14 +507,19 @@ details.art > summary::-webkit-details-marker { display: none; }
   width: 100%;
 }
 .approval-label { color: var(--yellow); margin: 0 0 8px; }
-.approval-body pre {
+.approval-body pre,
+.approval-body input {
+  width: 100%;
   margin: 0 0 12px;
   padding: 10px;
   background: var(--bg);
+  border: 1px solid var(--line);
   border-radius: 4px;
   overflow-x: auto;
   color: var(--fg);
+  font: inherit;
 }
+.approval-body input:focus { outline: none; border-color: var(--cyan); }
 .approval-actions { display: flex; gap: 8px; }
 
 /* --- composer --- */

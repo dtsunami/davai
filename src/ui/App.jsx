@@ -392,7 +392,7 @@ export function App({ session, initialInput }) {
       if (approval) return; // the approval pane owns input while open
 
       if (key.escape) {
-        if (pane) return setPane(null);
+        if (pane) return; // the open pane owns escape (sub-inputs cancel before closing)
         if (session.shellController) {
           session.shellController.abort();
           return;
@@ -413,6 +413,12 @@ export function App({ session, initialInput }) {
           agent.cancel();
           return;
         }
+        // Like a shell: Ctrl+C on a non-empty prompt discards the line first; Ctrl+C on
+        // an empty prompt arms exit.
+        if (!pane && session._clearComposer?.()) {
+          setExitArmed(false);
+          return;
+        }
         if (exitArmed) {
           log.close('exit');
           exit();
@@ -423,7 +429,11 @@ export function App({ session, initialInput }) {
         return;
       }
       if (key.ctrl && input === 'g') return setPane(pane === 'context' ? null : 'context');
-      if (key.ctrl && input === 'a') return setPane(pane === 'artifacts' ? null : 'artifacts');
+      // When text is being edited in the composer or a pane input, Ctrl+A moves the
+      // cursor to the start of the line (readline). On an empty prompt it opens Artifacts.
+      if (key.ctrl && input === 'a' && !session._paneEditing && (pane || !session._composerHasText)) {
+        return setPane(pane === 'artifacts' ? null : 'artifacts');
+      }
       if (key.ctrl && input === 't') return setPane(pane === 'tps' ? null : 'tps');
     },
     { isActive: true },
@@ -471,6 +481,7 @@ export function App({ session, initialInput }) {
       {approval ? (
         <ApprovalPane
           request={approval}
+          session={session}
           onRespond={(decision) => {
             // Set before respond(): the bus publishes approval-resolved synchronously
             // from inside it, and the listener above must know this answer was ours.
@@ -533,7 +544,7 @@ export function App({ session, initialInput }) {
         />
       ) : null}
 
-      {!approval && !pane ? <Composer onSubmit={submit} session={session} busy={busy} /> : null}
+      <Composer onSubmit={submit} session={session} busy={busy} active={!approval && !pane} />
 
       <StatusBar
         cfg={cfg}
