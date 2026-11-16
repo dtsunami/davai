@@ -354,23 +354,32 @@ describe('move', () => {
 });
 
 describe('batch atomicity', () => {
-  it('rolls back earlier writes when a later op fails at apply time', async () => {
-    // Both ops pass planning; the second fails during apply because the planner
-    // could not pre-verify uniqueness after the first op rewrote the file.
+  it('pre-validates sequential edits to the same file in the planner overlay', async () => {
     const out = await run([
       { op: 'write', path: 'a.js', text: 'q\nq\n', overwrite: true },
       { op: 'replace', path: 'a.js', old: 'q', new: 'z' },
     ]);
+    expect(out.status).toBe('plan-failed');
+    expect(out.errors[0].message).toMatch(/occurs 2 times/);
+    expect(read('a.js')).toBe('const a = 1;\nconst b = 2;\nconst a2 = 1;\n');
+  });
+
+  it('rolls back earlier writes when a later op fails post-write verification at apply time', async () => {
+    const out = await run([
+      { op: 'write', path: 'a.js', text: 'modified\n', overwrite: true },
+      { op: 'write', path: 'bad.txt', text: 'a\0b' },
+    ]);
     expect(out.status).toBe('apply-failed');
     expect(read('a.js')).toBe('const a = 1;\nconst b = 2;\nconst a2 = 1;\n');
+    expect(exists('bad.txt')).toBe(false);
   });
 
   it.runIf(POSIX_MODES)('restores an executable bit when rolling back', async () => {
     const f = path.join(root, 'a.js');
     const out = await expectModePreserved(f, 0o755, () =>
       run([
-        { op: 'write', path: 'a.js', text: 'q\nq\n', overwrite: true },
-        { op: 'replace', path: 'a.js', old: 'q', new: 'z' },
+        { op: 'write', path: 'a.js', text: 'modified\n', overwrite: true },
+        { op: 'write', path: 'bad.txt', text: 'a\0b' },
       ]),
     );
     expect(out.status).toBe('apply-failed');
@@ -385,8 +394,8 @@ describe('batch atomicity', () => {
     try {
       const out = await expectModePreserved(f, DISTINCT, () =>
         run([
-          { op: 'write', path: 'a.js', text: 'q\nq\n', overwrite: true },
-          { op: 'replace', path: 'a.js', old: 'q', new: 'z' },
+          { op: 'write', path: 'a.js', text: 'modified\n', overwrite: true },
+          { op: 'write', path: 'bad.txt', text: 'a\0b' },
         ]),
       );
       expect(out.status).toBe('apply-failed');
@@ -546,5 +555,113 @@ describe('shell segregation', () => {
     });
     expect(out.status).toBe('apply-failed');
     expect(out.errors[0].message).toMatch(/exited 3/);
+  });
+});
+
+describe('multi-hunk and regex replace, virtual overlay, grep out modes, and soft-fail reads', () => {
+  it('applies multi-hunk edits in order on a single replace op', async () => {
+    const out = await run([
+      {
+        op: 'replace',
+        path: 'a.js',
+        edits: [
+          { old: 'const a = 1;', new: 'const a = 10;' },
+          { old: 'const b = 2;', new: 'const b = 20;\nconst c = 30;' },
+        ],
+      },
+    ]);
+    expect(out.status).toBe('ok');
+    expect(read('a.js')).toBe('const a = 10;\nconst b = 20;\nconst c = 30;\nconst a2 = 1;\n');
+    expect(out.results[0].result).toMatchObject({ occurrences: 2, hunks: 2, delta: 1 });
+  });
+
+  it('rejects at plan time if a second hunk in edits is ambiguous or missing', async () => {
+    const out = await run([
+      {
+        op: 'replace',
+        path: 'a.js',
+        edits: [
+          { old: 'const a = 1;', new: 'const a = 10;' },
+          { old: 'does not exist', new: 'nope' },
+        ],
+      },
+    ]);
+    expect(out.status).toBe('plan-failed');
+    expect(out.errors[0].message).toMatch(/edits\[1\]: "old" text not found/);
+    expect(read('a.js')).toBe('const a = 1;\nconst b = 2;\nconst a2 = 1;\n');
+  });
+
+  it('supports regex replace with capture groups and uniqueness enforcement', async () => {
+    const bad = await run([
+      { op: 'replace', path: 'a.js', regex: true, old: 'const (a\\d?) = 1;', new: 'let $1 = 9;' },
+    ]);
+    expect(bad.status).toBe('plan-failed');
+    expect(bad.errors[0].message).toMatch(/matches 2 times/);
+
+    const ok = await run([
+      {
+        op: 'replace',
+        path: 'a.js',
+        regex: true,
+        all: true,
+        old: 'const (a\\d?) = (\\d+);',
+        new: 'let $1 = $20;',
+      },
+    ]);
+    expect(ok.status).toBe('ok');
+    expect(read('a.js')).toBe('let a = 10;\nconst b = 2;\nlet a2 = 10;\n');
+  });
+
+  it('pre-validates move -> replace and write -> replace chains in memory', async () => {
+    const bad = await run([
+      { op: 'move', from: 'dup.js', to: 'moved.js' },
+      { op: 'replace', path: 'moved.js', old: 'x', new: 'y' },
+    ]);
+    expect(bad.status).toBe('plan-failed');
+    expect(bad.errors[0].message).toMatch(/occurs 3 times/);
+    expect(exists('dup.js')).toBe(true);
+    expect(exists('moved.js')).toBe(false);
+
+    const ok = await run([
+      { op: 'move', from: 'a.js', to: 'moved.js' },
+      { op: 'replace', path: 'moved.js', old: 'const b = 2;', new: 'const b = 99;' },
+    ]);
+    expect(ok.status).toBe('ok');
+    expect(read('moved.js')).toContain('const b = 99;');
+  });
+
+  it('supports grep out="files" and out="count"', async () => {
+    const filesOut = await run([{ op: 'grep', path: '.', pattern: 'const', out: 'files' }]);
+    expect(filesOut.status).toBe('ok');
+    expect(filesOut.results[0].result.files.sort()).toEqual(['a.js', 'src/index.js']);
+
+    const countOut = await run([{ op: 'grep', path: '.', pattern: 'const', out: 'count' }]);
+    expect(countOut.status).toBe('ok');
+    expect(countOut.results[0].result).toMatchObject({ count: 4, filesMatched: 2 });
+  });
+
+  it('soft-fails a missing path or out-of-range start line in a multi-read exploration batch', async () => {
+    const out = await run([
+      { op: 'read', path: 'a.js', lines: [1, 1] },
+      { op: 'read', path: 'missing.js' },
+      { op: 'read', path: 'a.js', lines: [50, 80] },
+    ]);
+    expect(out.status).toBe('ok');
+    expect(out.results[0]).toMatchObject({ ok: true, result: { content: 'const a = 1;' } });
+    expect(out.results[1]).toMatchObject({ ok: false, error: expect.stringMatching(/does not exist/) });
+    expect(out.results[2]).toMatchObject({
+      ok: true,
+      result: { content: '', note: expect.stringMatching(/file has only 4 lines/) },
+    });
+  });
+
+  it('still hard-fails a missing read when the batch includes a mutating op', async () => {
+    const out = await run([
+      { op: 'read', path: 'a.js' },
+      { op: 'read', path: 'missing.js' },
+      { op: 'write', path: 'out.txt', text: 'nope' },
+    ]);
+    expect(out.status).toBe('plan-failed');
+    expect(exists('out.txt')).toBe(false);
   });
 });

@@ -120,6 +120,10 @@ export function resolveNativeCalls(calls, text, { fenced = false } = {}) {
 export function toFencedBlock(ops) {
   const payloads = [];
   const lift = (value) => {
+    if (Array.isArray(value)) return value.map(lift);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, lift(v)]));
+    }
     // A string with a payload marker line of its own stays inline: lifting it would
     // end the payload early.
     if (typeof value !== 'string' || !value.includes('\n') || /^--davai:/m.test(value)) {

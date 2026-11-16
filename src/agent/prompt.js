@@ -50,10 +50,10 @@ Every payload block you open must be referenced by an op and closed with
 |---|---|---|
 | \`read\` | \`path\`, \`lines\`? | \`lines\` is \`[min, max]\`, 1-indexed and inclusive |
 | \`list\` | \`path\`, \`max\`? | directory contents |
-| \`grep\` | \`path\`, \`pattern\`, \`regex\`?, \`max\`? | literal unless \`"regex": true\` |
+| \`grep\` | \`path\`, \`pattern\`, \`regex\`?, \`out\`?, \`max\`? | literal unless \`"regex": true\`; \`"out": "files"\` or \`"count"\` saves tokens |
 | \`glob\` | \`path\`, \`pattern\`, \`max\`? | e.g. \`"**/*.js"\` |
 | \`write\` | \`path\`, \`text\`, \`overwrite\`? | fails on an existing file unless \`"overwrite": true\` |
-| \`replace\` | \`path\`, \`old\`, \`new\`, \`all\`? | fails unless \`old\` occurs exactly once, or \`"all": true\` |
+| \`replace\` | \`path\`, \`old\`/\`new\` or \`edits\`, \`all\`?, \`regex\`? | \`edits: [{"old","new","all"?,"regex"?}, ...]\` applies hunks in order |
 | \`delete\` | \`path\`, \`recursive\`? | directories need \`"recursive": true\` |
 | \`move\` | \`from\`, \`to\`, \`overwrite\`? | rename or relocate |
 | \`shell\` | \`cmd\`, \`cwd\`? | pauses for human approval; use sparingly |

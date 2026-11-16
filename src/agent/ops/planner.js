@@ -7,23 +7,53 @@
  */
 import fs from 'node:fs';
 import { OPS } from './schema.js';
-import { alignNewlines, countOccurrences } from './writers.js';
+import { simulateReplace } from './writers.js';
 
 /**
  * @param {object[]} ops  normalized ops
  * @param {{sandbox: any}} ctx
- * @returns {{errors: {index: number, op: string, message: string}[], needsApproval: number[]}}
+ * @returns {{
+ *   errors: {index: number, op: string, message: string}[],
+ *   softErrors: Map<number, string>,
+ *   needsApproval: number[]
+ * }}
  */
 export function planBatch(ops, ctx) {
   const errors = [];
+  /**
+   * Read-only target misses in a pure-exploration batch (no mutating ops). When a model
+   * batches 10 reads and guesses 1 path wrong, soft-failing that single item lets the
+   * other 9 succeed in one round-trip instead of rejecting the entire batch. A single-op
+   * batch or any batch containing a mutation stays strictly all-or-nothing.
+   * @type {Map<number, string>}
+   */
+  const softErrors = new Map();
   const needsApproval = [];
+  const hasMutating = ops.some((o) => OPS[o.op]?.mutating);
+  const canSoftFailReads = !hasMutating && ops.length > 1;
 
-  // Track the batch's own intended effects so we can catch self-conflicts before
-  // any of them happen. Values: 'written' | 'deleted' | 'moved-away'.
+  // Track the batch's own intended effects AND virtual file contents so sequential ops
+  // on the same path (write -> replace, replace -> replace, move -> replace) are
+  // pre-validated in memory before touching disk.
+  // Status values: 'written' | 'deleted' | 'moved-away'.
   /** @type {Map<string, string>} */
   const pending = new Map();
+  /** @type {Map<string, string|null>} null when content is non-UTF8/directory */
+  const overlay = new Map();
 
   const fail = (i, op, message) => errors.push({ index: i, op: op.op, message });
+  const failReader = (i, op, message) => {
+    if (canSoftFailReads) softErrors.set(i, message);
+    else fail(i, op, message);
+  };
+
+  /** Read virtual UTF-8 content for `abs`, populating from disk on first touch. */
+  const readVirtual = (abs) => {
+    if (overlay.has(abs)) return overlay.get(abs);
+    const text = fs.readFileSync(abs, 'utf8');
+    overlay.set(abs, text);
+    return text;
+  };
 
   ops.forEach((op, i) => {
     const spec = OPS[op.op];
@@ -35,19 +65,22 @@ export function planBatch(ops, ctx) {
         case 'list':
         case 'grep':
         case 'glob': {
+          // Sandbox / .daignore violations still throw SandboxError below, which only
+          // soft-fails in a multi-op read-only batch so one ignored path doesn't nuke 9 reads.
           const abs = ctx.sandbox.resolveForRead(op.path);
           if (pending.get(abs) === 'deleted' || pending.get(abs) === 'moved-away') {
             return fail(i, op, `${ctx.sandbox.rel(abs)} is removed earlier in this batch`);
           }
-          if (!fs.existsSync(abs)) {
-            return fail(i, op, `${ctx.sandbox.rel(abs)} does not exist`);
+          const createdEarlier = pending.get(abs) === 'written';
+          if (!createdEarlier && !fs.existsSync(abs)) {
+            return failReader(i, op, `${ctx.sandbox.rel(abs)} does not exist`);
           }
-          const isDir = fs.statSync(abs).isDirectory();
+          const isDir = !createdEarlier && fs.statSync(abs).isDirectory();
           if (op.op === 'read' && isDir) {
-            return fail(i, op, `${ctx.sandbox.rel(abs)} is a directory — use "list"`);
+            return failReader(i, op, `${ctx.sandbox.rel(abs)} is a directory — use "list"`);
           }
           if ((op.op === 'list' || op.op === 'glob') && !isDir) {
-            return fail(i, op, `${ctx.sandbox.rel(abs)} is not a directory`);
+            return failReader(i, op, `${ctx.sandbox.rel(abs)} is not a directory`);
           }
           if (op.op === 'grep' && op.regex) {
             try {
@@ -61,8 +94,8 @@ export function planBatch(ops, ctx) {
 
         case 'write': {
           const abs = ctx.sandbox.resolveForWrite(op.path);
-          const existsNow = fs.existsSync(abs) && pending.get(abs) !== 'deleted';
-          const willExist = existsNow || pending.get(abs) === 'written';
+          const existsOnDisk = fs.existsSync(abs) && pending.get(abs) !== 'deleted' && pending.get(abs) !== 'moved-away';
+          const willExist = existsOnDisk || pending.get(abs) === 'written';
           if (willExist && !op.overwrite) {
             return fail(
               i,
@@ -70,45 +103,31 @@ export function planBatch(ops, ctx) {
               `${ctx.sandbox.rel(abs)} already exists — set "overwrite": true to replace it`,
             );
           }
-          if (existsNow && fs.statSync(abs).isDirectory()) {
+          if (existsOnDisk && fs.statSync(abs).isDirectory()) {
             return fail(i, op, `${ctx.sandbox.rel(abs)} is a directory`);
           }
           pending.set(abs, 'written');
+          overlay.set(abs, op.text);
           return;
         }
 
         case 'replace': {
           const abs = ctx.sandbox.resolveForWrite(op.path);
+          const rel = ctx.sandbox.rel(abs);
           if (pending.get(abs) === 'deleted' || pending.get(abs) === 'moved-away') {
-            return fail(i, op, `${ctx.sandbox.rel(abs)} is removed earlier in this batch`);
+            return fail(i, op, `${rel} is removed earlier in this batch`);
           }
-          if (!fs.existsSync(abs)) {
-            return fail(i, op, `${ctx.sandbox.rel(abs)} does not exist`);
+          const createdEarlier = pending.get(abs) === 'written';
+          if (!createdEarlier && !fs.existsSync(abs)) {
+            return fail(i, op, `${rel} does not exist`);
           }
-          if (fs.statSync(abs).isDirectory()) {
-            return fail(i, op, `${ctx.sandbox.rel(abs)} is a directory`);
+          if (!createdEarlier && fs.statSync(abs).isDirectory()) {
+            return fail(i, op, `${rel} is a directory`);
           }
-          // An earlier op in this batch may have changed the content; in that case we
-          // cannot pre-verify uniqueness, and the executor's re-check is the guard.
-          if (pending.get(abs) !== 'written') {
-            const content = fs.readFileSync(abs, 'utf8');
-            const n = countOccurrences(content, alignNewlines(content, op.old));
-            if (n === 0) {
-              return fail(
-                i,
-                op,
-                `"old" text not found in ${ctx.sandbox.rel(abs)}. ` +
-                  `Read the file and copy the exact text, including indentation.`,
-              );
-            }
-            if (n > 1 && !op.all) {
-              return fail(
-                i,
-                op,
-                `"old" text occurs ${n} times in ${ctx.sandbox.rel(abs)} — ` +
-                  `include more surrounding context to make it unique, or set "all": true`,
-              );
-            }
+          const content = readVirtual(abs);
+          if (content !== null) {
+            const { updated } = simulateReplace(content, op, rel);
+            overlay.set(abs, updated);
           }
           pending.set(abs, 'written');
           return;
@@ -119,10 +138,11 @@ export function planBatch(ops, ctx) {
           if (pending.get(abs) === 'deleted' || pending.get(abs) === 'moved-away') {
             return fail(i, op, `${ctx.sandbox.rel(abs)} is already removed in this batch`);
           }
-          if (!fs.existsSync(abs)) {
+          const createdEarlier = pending.get(abs) === 'written';
+          if (!createdEarlier && !fs.existsSync(abs)) {
             return fail(i, op, `${ctx.sandbox.rel(abs)} does not exist`);
           }
-          if (fs.statSync(abs).isDirectory() && !op.recursive) {
+          if (!createdEarlier && fs.statSync(abs).isDirectory() && !op.recursive) {
             return fail(
               i,
               op,
@@ -133,6 +153,7 @@ export function planBatch(ops, ctx) {
             return fail(i, op, 'refusing to delete the working directory itself');
           }
           pending.set(abs, 'deleted');
+          overlay.delete(abs);
           return;
         }
 
@@ -142,13 +163,15 @@ export function planBatch(ops, ctx) {
           if (pending.get(from) === 'deleted' || pending.get(from) === 'moved-away') {
             return fail(i, op, `${ctx.sandbox.rel(from)} is removed earlier in this batch`);
           }
-          if (!fs.existsSync(from)) {
+          const fromCreated = pending.get(from) === 'written';
+          if (!fromCreated && !fs.existsSync(from)) {
             return fail(i, op, `${ctx.sandbox.rel(from)} does not exist`);
           }
           if (from === ctx.sandbox.writeRoot) {
             return fail(i, op, 'refusing to move the working directory itself');
           }
-          const destExists = fs.existsSync(to) && pending.get(to) !== 'deleted';
+          const destOnDisk = fs.existsSync(to) && pending.get(to) !== 'deleted' && pending.get(to) !== 'moved-away';
+          const destExists = destOnDisk || pending.get(to) === 'written';
           if (destExists && !op.overwrite) {
             return fail(
               i,
@@ -156,6 +179,16 @@ export function planBatch(ops, ctx) {
               `${ctx.sandbox.rel(to)} already exists — set "overwrite": true to replace it`,
             );
           }
+          // Carry virtual file content across the move so a subsequent `replace` on `to`
+          // in the same batch validates against the moved file's real bytes.
+          if (fromCreated) {
+            overlay.set(to, overlay.get(from) ?? null);
+          } else if (fs.statSync(from).isFile()) {
+            overlay.set(to, readVirtual(from));
+          } else {
+            overlay.set(to, null);
+          }
+          overlay.delete(from);
           pending.set(from, 'moved-away');
           pending.set(to, 'written');
           return;
@@ -171,10 +204,15 @@ export function planBatch(ops, ctx) {
           return fail(i, op, `unhandled op "${op.op}"`);
       }
     } catch (err) {
-      // SandboxError and unexpected fs errors both land here.
-      fail(i, op, err.message);
+      // SandboxError (.daignore / outside jail) on one item of a multi-op pure-read
+      // batch soft-fails just that op so the rest of the exploration batch runs.
+      if (canSoftFailReads && err?.name === 'SandboxError' && !spec.mutating) {
+        failReader(i, op, err.message);
+      } else {
+        fail(i, op, err.message);
+      }
     }
   });
 
-  return { errors, needsApproval };
+  return { errors, softErrors, needsApproval };
 }

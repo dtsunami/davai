@@ -8,10 +8,14 @@
 export const OPS = {
   read: { mutating: false, required: ['path'], optional: ['lines'] },
   list: { mutating: false, required: ['path'], optional: ['max'] },
-  grep: { mutating: false, required: ['path', 'pattern'], optional: ['regex', 'max'] },
+  grep: { mutating: false, required: ['path', 'pattern'], optional: ['regex', 'max', 'out'] },
   glob: { mutating: false, required: ['path', 'pattern'], optional: ['max'] },
   write: { mutating: true, required: ['path', 'text'], optional: ['overwrite'] },
-  replace: { mutating: true, required: ['path', 'old', 'new'], optional: ['all'] },
+  replace: {
+    mutating: true,
+    required: ['path'],
+    optional: ['old', 'new', 'all', 'regex', 'edits'],
+  },
   delete: { mutating: true, required: ['path'], optional: ['recursive'] },
   move: { mutating: true, required: ['from', 'to'], optional: ['overwrite'] },
   shell: { mutating: true, required: ['cmd'], optional: ['cwd'], needsApproval: true },
@@ -122,7 +126,43 @@ function validateTypes(o, index) {
     }
     if (o.lines[0] > o.lines[1]) bad('"lines" min must be <= max');
   }
-  if (o.op === 'replace' && o.old === '') bad('"old" must not be empty');
+  if (o.out !== undefined && !['lines', 'files', 'count'].includes(o.out)) {
+    bad('"out" must be "lines", "files", or "count"');
+  }
+  if (o.op === 'replace') {
+    const hasEdits = o.edits !== undefined;
+    const hasSingle = o.old !== undefined || o.new !== undefined;
+    if (hasEdits && hasSingle) {
+      bad('specify either "old"/"new" or "edits", not both');
+    }
+    if (!hasEdits) {
+      if (o.old === undefined || o.old === null) bad('missing required field "old" (or "edits")');
+      if (o.new === undefined || o.new === null) bad('missing required field "new" (or "edits")');
+      if (o.old === '') bad('"old" must not be empty');
+    } else {
+      if (!Array.isArray(o.edits) || o.edits.length === 0) {
+        bad('"edits" must be a non-empty array of {"old", "new"} hunks');
+      }
+      o.edits.forEach((h, hi) => {
+        if (!h || typeof h !== 'object' || Array.isArray(h)) {
+          bad(`edits[${hi}] must be an object`);
+        }
+        for (const k of Object.keys(h)) {
+          if (!['old', 'new', 'all', 'regex'].includes(k)) {
+            bad(`edits[${hi}] has unknown field "${k}". Allowed: old, new, all, regex`);
+          }
+        }
+        if (!str(h.old) || h.old === '') bad(`edits[${hi}].old must be a non-empty string`);
+        if (!str(h.new)) bad(`edits[${hi}].new must be a string`);
+        if (h.all !== undefined && typeof h.all !== 'boolean') {
+          bad(`edits[${hi}].all must be a boolean`);
+        }
+        if (h.regex !== undefined && typeof h.regex !== 'boolean') {
+          bad(`edits[${hi}].regex must be a boolean`);
+        }
+      });
+    }
+  }
   if (o.op === 'move' && o.from === o.to) bad('"from" and "to" are the same path');
 }
 

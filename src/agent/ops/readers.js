@@ -45,9 +45,13 @@ export function opRead(op, ctx) {
     from = op.lines[0];
     to = Math.min(op.lines[1], allLines.length);
     if (from > allLines.length) {
-      throw new Error(
-        `${ctx.sandbox.rel(abs)} has ${allLines.length} lines; requested start ${from}`,
-      );
+      return {
+        path: ctx.sandbox.rel(abs),
+        lines: [from, allLines.length],
+        totalLines: allLines.length,
+        content: '',
+        note: `file has only ${allLines.length} lines (requested start ${from})`,
+      };
     }
   }
   const slice = allLines.slice(from - 1, to).join('\n');
@@ -125,7 +129,11 @@ function* walkFiles(root, ctx, budget = { n: 20000 }) {
 
 export function opGrep(op, ctx) {
   const abs = ctx.sandbox.resolveForRead(op.path);
-  const max = Math.min(op.max || MAX_MATCHES, MAX_MATCHES);
+  const mode = op.out || 'lines';
+  const max = Math.min(
+    op.max || (mode === 'files' ? MAX_ENTRIES : MAX_MATCHES),
+    mode === 'files' ? MAX_ENTRIES : MAX_MATCHES,
+  );
 
   let test;
   if (op.regex) {
@@ -146,11 +154,17 @@ export function opGrep(op, ctx) {
   const stat = fs.statSync(abs);
   const files = stat.isDirectory() ? walkFiles(abs, ctx) : [abs];
   const matches = [];
+  const matchedFiles = [];
+  let count = 0;
   let scanned = 0;
   let capped = false;
 
   for (const file of files) {
-    if (matches.length >= max) {
+    if (mode === 'files' && matchedFiles.length >= max) {
+      capped = true;
+      break;
+    }
+    if (mode === 'lines' && matches.length >= max) {
       capped = true;
       break;
     }
@@ -163,19 +177,49 @@ export function opGrep(op, ctx) {
     if (isProbablyBinary(buf)) continue;
     scanned++;
     const lines = buf.toString('utf8').split(/\r?\n/);
+    let fileMatched = false;
     for (let i = 0; i < lines.length; i++) {
-      if (matches.length >= max) {
+      if (mode === 'lines' && matches.length >= max) {
         capped = true;
         break;
       }
       if (test(lines[i])) {
-        matches.push({
-          path: ctx.sandbox.rel(file),
-          line: i + 1,
-          text: lines[i].length > 400 ? lines[i].slice(0, 400) + '…' : lines[i],
-        });
+        fileMatched = true;
+        count++;
+        if (mode === 'files') break;
+        if (mode === 'lines') {
+          matches.push({
+            path: ctx.sandbox.rel(file),
+            line: i + 1,
+            text: lines[i].length > 400 ? lines[i].slice(0, 400) + '…' : lines[i],
+          });
+        }
       }
     }
+    if (fileMatched) matchedFiles.push(ctx.sandbox.rel(file));
+  }
+
+  if (mode === 'files') {
+    return {
+      pattern: op.pattern,
+      regex: !!op.regex,
+      out: 'files',
+      root: ctx.sandbox.rel(abs),
+      filesScanned: scanned,
+      files: matchedFiles,
+      ...(capped ? { note: `stopped at ${max} files` } : {}),
+    };
+  }
+  if (mode === 'count') {
+    return {
+      pattern: op.pattern,
+      regex: !!op.regex,
+      out: 'count',
+      root: ctx.sandbox.rel(abs),
+      filesScanned: scanned,
+      count,
+      filesMatched: matchedFiles.length,
+    };
   }
 
   return {

@@ -48,6 +48,10 @@ export async function executeBatch(ops, ctx) {
       shellQueue.push(i);
       continue;
     }
+    if (plan.softErrors?.has(i)) {
+      results.push({ index: i, op: op.op, ok: false, error: plan.softErrors.get(i) });
+      continue;
+    }
     try {
       if (READERS[op.op]) {
         results.push({ index: i, op: op.op, ok: true, result: READERS[op.op](op, ctx) });
@@ -314,6 +318,16 @@ function summarize(op, r) {
         r.entries.map((e) => `  ${e.name}${e.size !== undefined ? `  ${e.size}b` : ''}`).join('\n')
       );
     case 'grep':
+      if (r.out === 'files') {
+        return (
+          `"${r.pattern}" in ${r.root}: ${r.files.length} matching files across ${r.filesScanned} scanned` +
+          (r.note ? ` (${r.note})` : '') +
+          (r.files.length ? '\n' + r.files.map((f) => `  ${f}`).join('\n') : '')
+        );
+      }
+      if (r.out === 'count') {
+        return `"${r.pattern}" in ${r.root}: ${r.count} matches in ${r.filesMatched} of ${r.filesScanned} files`;
+      }
       return (
         `"${r.pattern}" in ${r.root}: ${r.matches.length} matches across ${r.filesScanned} files` +
         (r.note ? ` (${r.note})` : '') +
@@ -330,7 +344,11 @@ function summarize(op, r) {
     case 'write':
       return `${r.path} ${r.action} (${r.lines} lines, ${r.bytes} bytes)`;
     case 'replace':
-      return `${r.path} ${r.action} (${r.occurrences}x, ${r.delta >= 0 ? '+' : ''}${r.delta} lines)`;
+      return (
+        `${r.path} ${r.action} (${r.occurrences}x` +
+        (r.hunks ? ` across ${r.hunks} hunks` : '') +
+        `, ${r.delta >= 0 ? '+' : ''}${r.delta} lines)`
+      );
     case 'delete':
       return `${r.path} ${r.action} (${r.type})`;
     case 'move':

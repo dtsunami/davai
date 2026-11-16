@@ -28,26 +28,97 @@ export function opWrite(op, ctx) {
   };
 }
 
-export function opReplace(op, ctx) {
-  const abs = ctx.sandbox.resolveForWrite(op.path);
-  const original = fs.readFileSync(abs, 'utf8');
-  const { old, new: replacement } = alignOp(original, op);
-  const count = countOccurrences(original, old);
+/**
+ * Apply a single replace hunk (`{old, new, all?, regex?}`) to `content` in memory,
+ * returning `{updated, occurrences}` or throwing an actionable error naming `relPath`.
+ * Shared by `planner.js` (virtual overlay pre-validation) and `opReplace` (execution).
+ */
+export function applyReplaceHunk(content, hunk, relPath, label = '') {
+  const prefix = label ? `${label}: ` : '';
 
-  // The planner already checked this; re-check because the file may have changed
-  // between plan and apply.
-  if (count === 0) throw new Error(`"old" text not found in ${ctx.sandbox.rel(abs)}`);
-  if (count > 1 && !op.all) {
+  if (hunk.regex) {
+    let reSingle;
+    let reGlobal;
+    try {
+      reSingle = new RegExp(hunk.old, 'm');
+      reGlobal = new RegExp(hunk.old, 'gm');
+    } catch (err) {
+      throw new Error(`${prefix}invalid regex: ${err.message}`, { cause: err });
+    }
+    const matches = [...content.matchAll(reGlobal)];
+    if (matches.length === 0) {
+      throw new Error(`${prefix}regex pattern not found in ${relPath}`);
+    }
+    if (matches.length > 1 && !hunk.all) {
+      throw new Error(
+        `${prefix}regex pattern matches ${matches.length} times in ${relPath} — ` +
+          `make the pattern more specific, or set "all": true`,
+      );
+    }
+    const usesCRLF = content.includes('\r\n') && !content.replace(/\r\n/g, '').includes('\n');
+    const replacement = usesCRLF
+      ? String(hunk.new ?? '').replace(/\r?\n/g, '\r\n')
+      : String(hunk.new ?? '');
+    const updated = hunk.all
+      ? content.replace(reGlobal, replacement)
+      : content.replace(reSingle, replacement);
+    return { updated, occurrences: hunk.all ? matches.length : 1 };
+  }
+
+  const { old, new: replacement } = alignOp(content, hunk);
+  const count = countOccurrences(content, old);
+  if (count === 0) {
     throw new Error(
-      `"old" text occurs ${count} times in ${ctx.sandbox.rel(abs)} — ` +
+      `${prefix}"old" text not found in ${relPath}. ` +
+        `Read the file and copy the exact text, including indentation.`,
+    );
+  }
+  if (count > 1 && !hunk.all) {
+    throw new Error(
+      `${prefix}"old" text occurs ${count} times in ${relPath} — ` +
         `include more surrounding context to make it unique, or set "all": true`,
     );
   }
 
-  const updated = op.all
-    ? original.split(old).join(replacement)
+  const updated = hunk.all
+    ? content.split(old).join(replacement)
     : // A function replacement, so `$&` and friends in the model's text are literal.
-      original.replace(old, () => replacement);
+      content.replace(old, () => replacement);
+  return { updated, occurrences: hunk.all ? count : 1 };
+}
+
+/** Normalize a replace op into an ordered list of hunks. */
+export function replaceHunks(op) {
+  if (Array.isArray(op.edits)) {
+    return op.edits.map((e) => ({
+      old: e.old,
+      new: e.new,
+      all: e.all ?? op.all ?? false,
+      regex: e.regex ?? op.regex ?? false,
+    }));
+  }
+  return [{ old: op.old, new: op.new, all: Boolean(op.all), regex: Boolean(op.regex) }];
+}
+
+/** Apply all hunks of a replace op sequentially in memory. */
+export function simulateReplace(content, op, relPath) {
+  const hunks = replaceHunks(op);
+  let current = content;
+  let totalOccurrences = 0;
+  for (let i = 0; i < hunks.length; i++) {
+    const label = hunks.length > 1 ? `edits[${i}]` : '';
+    const { updated, occurrences } = applyReplaceHunk(current, hunks[i], relPath, label);
+    current = updated;
+    totalOccurrences += occurrences;
+  }
+  return { updated: current, occurrences: totalOccurrences, hunks: hunks.length };
+}
+
+export function opReplace(op, ctx) {
+  const abs = ctx.sandbox.resolveForWrite(op.path);
+  const rel = ctx.sandbox.rel(abs);
+  const original = fs.readFileSync(abs, 'utf8');
+  const { updated, occurrences, hunks } = simulateReplace(original, op, rel);
 
   const pre = ctx.journal.snapshot(abs);
   const entry = ctx.journal.record({ op: 'replace', path: abs, pre, existed: true });
@@ -56,9 +127,10 @@ export function opReplace(op, ctx) {
   return {
     entry,
     result: {
-      path: ctx.sandbox.rel(abs),
+      path: rel,
       action: 'replaced',
-      occurrences: op.all ? count : 1,
+      occurrences,
+      ...(hunks > 1 ? { hunks } : {}),
       delta: updated.split('\n').length - original.split('\n').length,
     },
   };

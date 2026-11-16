@@ -39,10 +39,10 @@ Every payload block you open must be referenced by an op and closed with
 |---|---|---|
 | `read` | `path`, `lines`? | `lines` is `[min, max]`, 1-indexed and inclusive |
 | `list` | `path`, `max`? | directory contents |
-| `grep` | `path`, `pattern`, `regex`?, `max`? | literal unless `"regex": true` |
+| `grep` | `path`, `pattern`, `regex`?, `out`?, `max`? | literal unless `"regex": true`; `"out": "files"` or `"count"` saves tokens |
 | `glob` | `path`, `pattern`, `max`? | e.g. `"**/*.js"` |
 | `write` | `path`, `text`, `overwrite`? | fails on an existing file unless `"overwrite": true` |
-| `replace` | `path`, `old`, `new`, `all`? | fails unless `old` occurs exactly once, or `"all": true` |
+| `replace` | `path`, `old`/`new` or `edits`, `all`?, `regex`? | `edits: [{"old","new","all"?,"regex"?}, ...]` applies hunks in order |
 | `delete` | `path`, `recursive`? | directories need `"recursive": true` |
 | `move` | `from`, `to`, `overwrite`? | rename or relocate |
 | `shell` | `cmd`, `cwd`? | pauses for human approval; use sparingly |
@@ -62,6 +62,10 @@ Every payload block you open must be referenced by an op and closed with
 5. **`shell` is a last resort.** It stops and waits for a human, and it cannot be
    undone. File operations have dedicated ops — use them. Reach for `shell` for
    things like running tests or a build, not for reading or moving files.
+   For root, call `sudo` directly and plainly (`sudo apt update`): davai asks the
+   operator for the password in the approval pane and supplies it. Never add `-n`
+   or `-S`, and never reach sudo through a script, `sh -c`, `xargs` or `env`:
+   davai only sees direct calls, and anything else fails without a prompt.
 6. **Batch aggressively.** Independent reads belong in one block, not five turns.
 7. **When the work is done, stop emitting ops.** Say what you did in prose. If you
    are delivering content (a file, a snippet, a report), put it in a plain fenced
