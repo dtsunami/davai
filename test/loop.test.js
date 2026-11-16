@@ -515,6 +515,38 @@ describe('steering', () => {
     expect(events.steered).toHaveLength(0);
     expect(provider.calls).toBe(1);
   });
+
+  it('applies paste segments alongside a steer AFTER the in-flight assistant turn', async () => {
+    const held = {};
+    const pasteSeg = {
+      type: 'paste',
+      label: 'paste#1 (2 lines)',
+      role: 'user',
+      text: '[paste#1]\nstack trace line 1\nstack trace line 2',
+    };
+    const provider = steerableProvider([`Working.\n${READ_OPS}`, 'Fixed the trace.'], (n) => {
+      if (n === 1) {
+        held.agent.steer('check [paste#1] instead', [pasteSeg]);
+      }
+    });
+    const { agent, ledger } = makeAgent(provider);
+    held.agent = agent;
+    await drive(agent, 'go');
+
+    // Ordering matters: the paste was steered mid-turn 1, so it must land AFTER
+    // turn 1's assistant segment and op-result, right before the steer segment.
+    const types = ledger.segments.map((s) => `${s.type}:${s.label}`);
+    const assistantIdx = types.findIndex((t) => t.startsWith('assistant:'));
+    const pasteIdx = types.findIndex((t) => t === 'paste:paste#1 (2 lines)');
+    const steerIdx = types.findIndex((t) => t.startsWith('user:steer:'));
+    expect(assistantIdx).toBeGreaterThanOrEqual(0);
+    expect(pasteIdx).toBeGreaterThan(assistantIdx);
+    expect(steerIdx).toBe(pasteIdx + 1);
+
+    const turn2 = requestText(provider, 1);
+    expect(turn2).toContain('[paste#1]\nstack trace line 1\nstack trace line 2');
+    expect(turn2).toContain('check [paste#1] instead');
+  });
 });
 
 describe('provider retries', () => {

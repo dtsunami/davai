@@ -17,9 +17,11 @@ class FakeAgent extends EventEmitter {
     this.steerable = false;
   }
   async run(text) { this.ran.push(text); }
-  steer(text) {
+  steer(text, segments = []) {
     if (!this.steerable) return false;
     this.steered.push(text);
+    if (!this.steeredSegments) this.steeredSegments = [];
+    this.steeredSegments.push(segments);
     return true;
   }
 }
@@ -197,5 +199,31 @@ describe('pastes', () => {
       expect.objectContaining({ type: 'paste', label: 'paste#1 (3 lines)' }),
     );
     expect(session.agent.ran).toEqual(['see above']);
+  });
+
+  it('expands pastes on a steer and hands their segments to agent.steer', async () => {
+    session.agent.steerable = true;
+    session.pastes = {
+      expand: () => ({
+        text: '[paste#1] fix this',
+        referenced: [{ n: 1, lines: 3, text: 'a\nb\nc' }],
+      }),
+    };
+    await build({ isBusy: () => true })('[[paste#1: 3 lines]] fix this');
+
+    // Held on the steer rather than pushed to ledger immediately, so it lands after
+    // the in-flight assistant turn finishes.
+    expect(session.ledger.add).not.toHaveBeenCalled();
+    expect(session.agent.steered).toEqual(['[paste#1] fix this']);
+    expect(session.agent.steeredSegments).toEqual([
+      [
+        expect.objectContaining({
+          type: 'paste',
+          label: 'paste#1 (3 lines)',
+          text: '[paste#1]\na\nb\nc',
+        }),
+      ],
+    ]);
+    expect(pushed).toEqual([{ type: 'user', text: '[paste#1] fix this' }]);
   });
 });

@@ -210,15 +210,21 @@ export class Agent extends EventEmitter {
    *
    * Applied at the next step boundary rather than interrupting the request in progress:
    * aborting mid-stream would throw away tokens already paid for, and the model cannot
-   * act on anything until it is between turns anyway. When no run is in flight the
-   * caller should submit normally — there is nothing to steer.
+   * act on anything until it is between turns anyway. Any pastes or media segments the
+   * steer carries ride along with it and enter the ledger at the same boundary —
+   * inserting a user-role paste segment mid-turn before the assistant's own turn has
+   * been added would put the attachment *ahead* of the response it was reacting to.
    *
+   * When no run is in flight the caller should submit normally — there is nothing to steer.
+   *
+   * @param {string} text
+   * @param {object[]} [segments]  paste/media segments to add right before the steer
    * @returns {boolean} true if it was queued
    */
-  steer(text) {
+  steer(text, segments = []) {
     const trimmed = String(text || '').trim();
-    if (!trimmed || !this.busy) return false;
-    this.steers.push(trimmed);
+    if ((!trimmed && !segments.length) || !this.busy) return false;
+    this.steers.push({ text: trimmed, segments });
     this.emit('steer-queued', { text: trimmed, queued: this.steers.length });
     return true;
   }
@@ -246,16 +252,21 @@ export class Agent extends EventEmitter {
   #applySteers() {
     if (!this.steers.length) return 0;
     const pending = this.steers.splice(0, this.steers.length);
-    for (const text of pending) {
+    const texts = [];
+    for (const item of pending) {
+      const { text, segments = [] } = typeof item === 'string' ? { text: item } : item;
+      for (const seg of segments) this.ledger.add(seg);
+      const body = text || '[attached]';
+      texts.push(body);
       this.ledger.add({
         type: 'user',
-        label: `steer: ${firstLine(text)}`,
+        label: `steer: ${firstLine(body)}`,
         role: 'user',
-        text: steerPrompt(text, this.prompts),
+        text: steerPrompt(body, this.prompts),
       });
-      this.log.event('steer', { text });
+      this.log.event('steer', { text: body });
     }
-    this.emit('steered', { applied: pending.length, texts: pending });
+    this.emit('steered', { applied: pending.length, texts });
     return pending.length;
   }
 

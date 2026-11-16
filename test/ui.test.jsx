@@ -458,6 +458,83 @@ describe('paste capture', () => {
     expect(session.pastes.get(1).text).toBe('first line\nsecond line\nthird line');
     app.unmount();
   });
+
+  it('coalesces a multi-chunk paste burst into a single paste#1 in forward order', async () => {
+    const stdout = fakeStdout();
+    const stdin = fakeStdin();
+    const submitted = [];
+    session.agent.run = async (text) => submitted.push(text);
+
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    stdin.write('prefix ');
+    await flush();
+
+    // Simulate Windows console delivering a large paste in separate synchronous/back-to-back
+    // chunks — including a middle chunk with no newline at all. Previously this shattered
+    // into N pastes and spliced them in reverse order ([paste#N]...[paste#1]).
+    stdin.write('chunk1 line A\r\nchunk1 part B ');
+    stdin.write('chunk2 has no line breaks at all ');
+    stdin.write('chunk3 finishes line B\r\nchunk3 line C');
+    await flush();
+
+    stdin.write(' suffix');
+    await flush();
+    stdin.write('\r');
+    await flush();
+
+    expect(session.pastes.n).toBe(1);
+    expect(session.pastes.get(1).text).toBe(
+      'chunk1 line A\nchunk1 part B chunk2 has no line breaks at all chunk3 finishes line B\nchunk3 line C',
+    );
+    expect(submitted).toEqual(['prefix [paste#1] suffix']);
+    app.unmount();
+  });
+
+  it('expands a pasted block when steering a running turn', async () => {
+    const stdout = fakeStdout();
+    const stdin = fakeStdin();
+    const steered = [];
+    session.agent.run = () => new Promise(() => {});
+    session.agent.steer = (text, segments) => {
+      steered.push({ text, segments });
+      return true;
+    };
+
+    const app = render(<App session={session} initialInput="start working" />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+    session.agent.emit('turn-start');
+    await flush();
+
+    stdin.write('here is the log ');
+    await flush();
+    stdin.write('error line 1\r\nerror line 2\r\nerror line 3');
+    await flush();
+    stdin.write('\r');
+    await flush();
+
+    expect(steered).toHaveLength(1);
+    expect(steered[0].text).toBe('here is the log [paste#1]');
+    expect(steered[0].segments).toEqual([
+      expect.objectContaining({
+        type: 'paste',
+        label: 'paste#1 (3 lines)',
+        text: '[paste#1]\nerror line 1\nerror line 2\nerror line 3',
+      }),
+    ]);
+    app.unmount();
+  });
 });
 
 describe('thinking panel', () => {

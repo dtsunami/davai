@@ -42,11 +42,16 @@ export async function startTui({ input, cwd, overrides, resume, acceptStalePromp
 
   banner(session, sidecar, urlCopied);
 
+  // Enable DECSET 2004 bracketed paste so modern terminals (Windows Terminal, WezTerm,
+  // iTerm2, xterm, Kitty) frame pastes in \x1b[200~ … \x1b[201~ regardless of chunking.
+  if (process.stdout.isTTY) process.stdout.write('\x1b[?2004h');
+
   const instance = render(React.createElement(App, { session, initialInput: input }), {
     exitOnCtrlC: false,
   });
 
   const onSignal = () => {
+    if (process.stdout.isTTY) process.stdout.write('\x1b[?2004l');
     log.close('signal');
     instance.unmount();
   };
@@ -55,6 +60,7 @@ export async function startTui({ input, cwd, overrides, resume, acceptStalePromp
   try {
     await instance.waitUntilExit();
   } finally {
+    if (process.stdout.isTTY) process.stdout.write('\x1b[?2004l');
     process.off('SIGTERM', onSignal);
     if (sidecar) await sidecar.stop();
     if (!log.meta.endedAt) log.close('exit');

@@ -37,35 +37,19 @@ export function createDispatcher({ session, view }) {
     isBusy = () => false,
   } = view;
 
-  return async function submit(raw) {
-    const text = String(raw ?? '').trim();
-    if (!text) return;
-
-    // Typed while a run is in flight: steer it rather than queueing a second request.
-    // Commands still run immediately — /context while it works is the point of them.
-    if (isBusy() && !text.startsWith('/') && agent.steer(text)) {
-      session.history?.add(text);
-      push({ type: 'user', text });
-      return;
-    }
-
-    const cmd = await handleCommand(text, {
-      session,
-      push,
-      setPane,
-      exit,
-      refresh,
-      requestSecret,
-    });
-    if (cmd.handled) return;
-
-    // Recorded after the command check, so /history holds prompts and not commands.
-    const prompt = cmd.input ?? text;
-    session.history?.add(prompt);
+  /**
+   * Expand paste placeholders and `@media` references into ledger segment specs and the
+   * cleaned prompt text. Collected into an array rather than written straight to the
+   * ledger so a steer can hold its segments until the step boundary where the steer
+   * itself lands — otherwise a paste added mid-stream sits *before* the assistant turn
+   * it was meant to correct.
+   */
+  function collectAttachments(prompt) {
+    const segments = [];
 
     const { text: expanded, referenced } = pastes.expand(prompt);
     for (const p of referenced) {
-      ledger.add({
+      segments.push({
         type: 'paste',
         label: `paste#${p.n} (${p.lines} lines)`,
         role: 'user',
@@ -85,7 +69,7 @@ export function createDispatcher({ session, view }) {
       }
       try {
         const img = loadImage(ref, session.sandbox);
-        ledger.add({
+        segments.push({
           type: 'paste',
           label: `image ${img.name} (${Math.round(img.bytes / 1024)}kB)`,
           role: 'user',
@@ -114,7 +98,7 @@ export function createDispatcher({ session, view }) {
         continue;
       }
       const yt = youtubeRef(url);
-      ledger.add({
+      segments.push({
         type: 'paste',
         label: `youtube ${yt.uri}`,
         role: 'user',
@@ -140,7 +124,7 @@ export function createDispatcher({ session, view }) {
       }
       try {
         const vid = loadVideo(ref, session.sandbox);
-        ledger.add({
+        segments.push({
           type: 'paste',
           label: `video ${vid.name} (${(vid.bytes / 1024 / 1024).toFixed(1)}MB)`,
           role: 'user',
@@ -154,6 +138,50 @@ export function createDispatcher({ session, view }) {
         push({ type: 'warning', message: err.message });
       }
     }
+
+    return { text: withoutMedia, segments };
+  }
+
+  return async function submit(raw) {
+    const text = String(raw ?? '').trim();
+    if (!text) return;
+
+    // Typed while a run is in flight: steer it rather than queueing a second request.
+    // Commands still run immediately — /context while it works is the point of them —
+    // and sh <cmd> is never intercepted as a steer unless the operator meant prose.
+    if (isBusy() && !text.startsWith('/') && text !== 'sh' && !text.startsWith('sh ')) {
+      const { text: cleaned, segments } = collectAttachments(text);
+      if (agent.steer(cleaned, segments)) {
+        session.history?.add(text);
+        push({ type: 'user', text: cleaned });
+        return;
+      }
+      // The run finished between isBusy() and agent.steer() — fall through with the
+      // already-expanded text and segments so pastes are not expanded twice.
+      session.history?.add(text);
+      for (const seg of segments) ledger.add(seg);
+      push({ type: 'user', text: cleaned });
+      onRunStart();
+      await agent.run(cleaned);
+      return;
+    }
+
+    const cmd = await handleCommand(text, {
+      session,
+      push,
+      setPane,
+      exit,
+      refresh,
+      requestSecret,
+    });
+    if (cmd.handled) return;
+
+    // Recorded after the command check, so /history holds prompts and not commands.
+    const prompt = cmd.input ?? text;
+    session.history?.add(prompt);
+
+    const { text: withoutMedia, segments } = collectAttachments(prompt);
+    for (const seg of segments) ledger.add(seg);
 
     push({ type: 'user', text: withoutMedia });
     onRunStart();
