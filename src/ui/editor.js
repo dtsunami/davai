@@ -11,6 +11,26 @@ import { looksLikePaste } from '../context/pastes.js';
 
 const MAX_UNDO = 64;
 
+/**
+ * Settle window for an unbracketed multi-chunk paste burst (ms).
+ *
+ * Node/libuv delivers large console pastes on Windows in ~1–4 KB `data` chunks across
+ * consecutive ticks rather than one buffer, and legacy consoles or stripped streams omit
+ * DECSET 2004 markers (`\x1b[200~` … `\x1b[201~`). Coalescing rapid chunks prevents an
+ * 85 KB paste from shattering into 85 separate `paste#N` segments.
+ */
+const PASTE_SETTLE_MS = 30;
+const BRACKET_FALLBACK_MS = 150;
+
+/** True when `str` contains a control byte other than tab/LF/CR (`\t`, `\n`, `\r`). */
+function hasNonPasteControlChar(str) {
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if ((c < 32 && c !== 9 && c !== 10 && c !== 13) || c === 127) return true;
+  }
+  return false;
+}
+
 /** Step one UTF-16 code point left without splitting surrogate pairs. */
 export function prevCharIndex(str, idx) {
   if (idx <= 0) return 0;
@@ -920,6 +940,7 @@ export function useLineEditor({
     stateRef.current = createEditorState(initialValue, initialHistory);
   }
   const pasteStateRef = useRef({ active: false, buffer: '' });
+  const burstRef = useRef({ text: '', timer: null });
 
   // Keep latest callbacks in a ref so the stdin listener never has to re-bind per keystroke.
   const optsRef = useRef({});
@@ -976,6 +997,51 @@ export function useLineEditor({
     };
   }, []);
 
+  const applyPasteText = useCallback(
+    (raw) => {
+      if (!raw) return false;
+      const curOpts = optsRef.current;
+      const handled = curOpts.onPaste?.(raw, { insert: insertAtCursor });
+      if (!handled) {
+        const clean = curOpts.multiline
+          ? raw.replace(/\r\n?/g, '\n')
+          : raw.replace(/[\r\n]+/g, ' ').trimEnd();
+        const s = stateRef.current;
+        const head = s.value.slice(0, s.cursor) + clean;
+        stateRef.current = mutateText(s, head + s.value.slice(s.cursor), head.length);
+        curOpts.onChange?.(stateRef.current);
+        return true;
+      }
+      return false;
+    },
+    [insertAtCursor],
+  );
+
+  const commitBurst = useCallback(() => {
+    const b = burstRef.current;
+    if (b.timer) {
+      clearTimeout(b.timer);
+      b.timer = null;
+    }
+    const p = pasteStateRef.current;
+    let raw = b.text;
+    b.text = '';
+    if (p.active) {
+      raw += p.buffer;
+      p.buffer = '';
+      p.active = false;
+    }
+    if (!raw) return;
+    if (applyPasteText(raw)) rerender();
+  }, [applyPasteText, rerender]);
+
+  useEffect(() => {
+    const b = burstRef.current;
+    return () => {
+      if (b.timer) clearTimeout(b.timer);
+    };
+  }, []);
+
   const handleEvents = useCallback(
     (events) => {
       if (!events.length) return;
@@ -999,17 +1065,7 @@ export function useLineEditor({
         }
         if (effect) {
           if (effect.type === 'paste') {
-            const handled = curOpts.onPaste?.(effect.text, { insert: insertAtCursor });
-            if (!handled) {
-              const clean = curOpts.multiline
-                ? effect.text.replace(/\r\n?/g, '\n')
-                : effect.text.replace(/[\r\n]+/g, ' ').trimEnd();
-              const s = stateRef.current;
-              const head = s.value.slice(0, s.cursor) + clean;
-              stateRef.current = mutateText(s, head + s.value.slice(s.cursor), head.length);
-              changed = true;
-              curOpts.onChange?.(stateRef.current);
-            }
+            if (applyPasteText(effect.text)) changed = true;
           } else if (effect.type === 'submit') {
             curOpts.onSubmit?.(stateRef.current.value);
           } else if (effect.type === 'escape') {
@@ -1021,7 +1077,7 @@ export function useLineEditor({
       }
       if (changed) rerender();
     },
-    [insertAtCursor, rerender, setBuffer],
+    [applyPasteText, insertAtCursor, rerender, setBuffer],
   );
 
   const { internal_eventEmitter } = useStdin();
@@ -1041,14 +1097,49 @@ export function useLineEditor({
     if (!isActive || !internal_eventEmitter) return undefined;
     const onData = (chunk) => {
       const str = typeof chunk === 'string' ? chunk : String(chunk ?? '');
-      const events = tokenizeRawInput(str, pasteStateRef.current);
+      if (!str) return;
+
+      const b = burstRef.current;
+      const p = pasteStateRef.current;
+
+      // Coalesce unbracketed multi-chunk paste bursts across rapid stdin reads while
+      // never capturing single-character control/enter/escape presses as part of the
+      // paste — if the user hits Enter inside the settle window right after pasting,
+      // flush the buffered paste first and then process Enter cleanly.
+      if (!p.active && !str.includes('\x1b')) {
+        const isLoneEnter = str === '\r' || str === '\n' || str === '\r\n';
+        const hasCtrl = !isLoneEnter && hasNonPasteControlChar(str);
+        const startsBurst = looksLikePaste(str) || (!hasCtrl && str.length > 128);
+        const continuesBurst = Boolean(b.timer) && !isLoneEnter && !hasCtrl;
+
+        if (startsBurst || continuesBurst) {
+          optsRef.current.onKeystroke?.();
+          b.text += str;
+          if (b.timer) clearTimeout(b.timer);
+          b.timer = setTimeout(commitBurst, PASTE_SETTLE_MS);
+          return;
+        }
+      }
+
+      if (b.text || b.timer) {
+        commitBurst();
+      }
+
+      const events = tokenizeRawInput(str, p);
+      if (p.active) {
+        if (b.timer) clearTimeout(b.timer);
+        b.timer = setTimeout(commitBurst, BRACKET_FALLBACK_MS);
+      } else if (b.timer) {
+        clearTimeout(b.timer);
+        b.timer = null;
+      }
       handleEvents(events);
     };
     internal_eventEmitter.on('input', onData);
     return () => {
       internal_eventEmitter.off('input', onData);
     };
-  }, [isActive, internal_eventEmitter, handleEvents]);
+  }, [isActive, internal_eventEmitter, handleEvents, commitBurst]);
 
   const st = stateRef.current;
   return {
