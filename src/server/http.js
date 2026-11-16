@@ -145,6 +145,14 @@ export function createWebServer({
     if (req.method === 'POST' && url.pathname === '/api/artifact/save') {
       return postArtifactSave(req, res);
     }
+    if (req.method === 'GET' && url.pathname === '/api/tx') {
+      return json(
+        res,
+        session.agent?.txSnapshot
+          ? session.agent.txSnapshot()
+          : { codeMode: Boolean(session.cfg?.codeMode), queued: [], stateKeys: [], statePreview: {}, entries: [] },
+      );
+    }
     if (req.method === 'POST' && url.pathname === '/api/paste') return postPaste(req, res);
     if (req.method === 'POST' && url.pathname === '/api/submit') return postSubmit(req, res);
     if (req.method === 'POST' && url.pathname === '/api/approve') return postApprove(req, res);
@@ -203,6 +211,7 @@ export function createWebServer({
       model: cfg.model.id,
       contextLimit: cfg.contextLimit,
       effort: cfg.model.effort ? cfg.effort : null,
+      codeMode: Boolean(cfg.codeMode),
       yolo: Boolean(cfg.yolo),
       stats: session.agent.stats,
       context: {

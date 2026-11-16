@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events';
 import { extract } from './parser.js';
 import { normalizeBatch } from './ops/schema.js';
 import { executeBatch, formatResults } from './ops/executor.js';
+import { opTx } from './ops/tx.js';
 import { DEFAULT_PROMPTS, opsResultPrompt, repairPrompt, steerPrompt } from './prompt.js';
 import { describeNative, nativeCallPrompt, resolveNativeCalls, salvageNote } from './native.js';
 import { compact } from '../context/compact.js';
@@ -83,6 +84,8 @@ export const EVENTS = [
   'retry',
   'steer-queued',
   'steered',
+  'tx-queued',
+  'tx-applied',
   'prompts-applied',
   'repair',
   'warning',
@@ -122,6 +125,11 @@ export class Agent extends EventEmitter {
     };
     /** Operator text typed mid-run, applied at the next step boundary. */
     this.steers = [];
+    /** Operator `tx` snippets typed mid-run, applied atomically at the next step boundary. */
+    this.pendingTx = [];
+    /** Chronological session log of both agent and operator `tx` REPL executions. */
+    this.txHistory = [];
+    this.nextTxSeq = 1;
     /**
      * Set by the degeneracy guard when it aborts a turn. The abort itself goes through
      * cancel(), so this is how run() tells a runaway generation from an operator's esc.
@@ -229,6 +237,174 @@ export class Agent extends EventEmitter {
     this.steers.push({ text: trimmed, segments });
     this.emit('steer-queued', { text: trimmed, queued: this.steers.length });
     return true;
+  }
+
+  /**
+   * Run an operator `tx` REPL snippet immediately when idle, or queue it for atomic
+   * application at the next turn/step boundary when a model turn is in flight.
+   *
+   * Merging operator interactions at the step boundary ensures neither `txState` nor the
+   * working tree changes underneath an active `executeBatch` or mid-stream turn, and the
+   * resulting context segment lands cleanly right before the model's next request.
+   *
+   * @param {string} code
+   * @param {{description?: string}} [opts]
+   */
+  runOperatorTx(code, opts = {}) {
+    const src = String(code || '').trim();
+    if (!src) throw new Error('empty tx snippet');
+    if (this.busy) {
+      this.pendingTx.push({ code: src, description: opts.description, ts: Date.now() });
+      this.emit('tx-queued', { code: src, queued: this.pendingTx.length });
+      return { queued: true, position: this.pendingTx.length };
+    }
+    const entry = this.#execSingleOperatorTx({ code: src, description: opts.description });
+    this.emit('tx-applied', { applied: 1, entries: [entry], immediate: true });
+    return { queued: false, entry };
+  }
+
+  /**
+   * Snapshot of the shared `tx` REPL transcript and live `state` keys/values.
+   */
+  txSnapshot() {
+    const statePreview = {};
+    for (const [k, v] of Object.entries(this.txState || {})) {
+      let s;
+      try {
+        s = typeof v === 'string' ? v : JSON.stringify(v);
+      } catch {
+        s = String(v);
+      }
+      if (s === undefined) s = String(v);
+      statePreview[k] = s.length > 400 ? `${s.slice(0, 400)}… (${s.length} chars)` : s;
+    }
+    return {
+      codeMode: Boolean(this.cfg?.codeMode),
+      queued: this.pendingTx.map((p, i) => ({
+        position: i + 1,
+        code: p.code,
+        description: p.description || null,
+        ts: p.ts,
+      })),
+      stateKeys: Object.keys(this.txState || {}),
+      statePreview,
+      entries: this.txHistory.slice(-200),
+    };
+  }
+
+  #recordTxEntry(spec) {
+    const entry = {
+      seq: this.nextTxSeq++,
+      ts: Date.now(),
+      ...spec,
+    };
+    this.txHistory.push(entry);
+    if (this.txHistory.length > 500) this.txHistory.shift();
+    return entry;
+  }
+
+  #execSingleOperatorTx({ code, description }) {
+    const started = Date.now();
+    try {
+      const { result } = opTx(
+        { op: 'tx', code, description, allowImplicitReturn: true },
+        {
+          sandbox: this.sandbox,
+          journal: this.journal,
+          txState: this.txState,
+        },
+      );
+      const durationMs = Date.now() - started;
+      const entry = this.#recordTxEntry({
+        origin: 'operator',
+        code,
+        description: description || null,
+        ok: true,
+        durationMs,
+        opsCount: result.opsCount,
+        changes: result.changes || [],
+        logs: result.logs || [],
+        output: result.output,
+        note: result.note || null,
+      });
+
+      const summaryLines = [
+        `The operator ran a \`tx\` script in the shared Code Mode REPL:`,
+        '```js',
+        code,
+        '```',
+        `Result: ${result.changes.length} file(s) changed (${result.opsCount} fs ops, ${durationMs}ms)` +
+          (result.note ? ` [${result.note}]` : ''),
+      ];
+      for (const c of result.changes) {
+        summaryLines.push(`  ${c.path} ${c.action} (${c.delta >= 0 ? '+' : ''}${c.delta} lines)`);
+      }
+      if (result.logs?.length) summaryLines.push(`logs:\n${result.logs.join('\n')}`);
+      if (result.output !== undefined) summaryLines.push(`return:\n${result.output}`);
+
+      const ledgerText = summaryLines.join('\n');
+      this.ledger.add({
+        type: 'op-result',
+        label: `tx (operator): ${firstLine(description || code)}`,
+        role: 'user',
+        text: ledgerText,
+      });
+      this.log?.event?.('operator-tx', {
+        code,
+        ok: true,
+        opsCount: result.opsCount,
+        changes: result.changes,
+        logs: result.logs,
+        output: result.output,
+        text: ledgerText,
+      });
+      this.stats.ops += 1;
+      this.log?.addOps?.(1);
+      return entry;
+    } catch (err) {
+      const durationMs = Date.now() - started;
+      const message = err?.message || String(err);
+      const entry = this.#recordTxEntry({
+        origin: 'operator',
+        code,
+        description: description || null,
+        ok: false,
+        durationMs,
+        error: message,
+      });
+      const ledgerText = [
+        `The operator ran a \`tx\` script in the shared Code Mode REPL, and it threw (no changes written):`,
+        '```js',
+        code,
+        '```',
+        `Error: ${message}`,
+      ].join('\n');
+      this.ledger.add({
+        type: 'op-result',
+        label: `tx (operator, failed): ${firstLine(description || code)}`,
+        role: 'user',
+        text: ledgerText,
+      });
+      this.log?.event?.('operator-tx', {
+        code,
+        ok: false,
+        error: message,
+        text: ledgerText,
+      });
+      return entry;
+    }
+  }
+
+  /** Drain queued operator `tx` interactions atomically at a step boundary. */
+  #applyPendingTx() {
+    if (!this.pendingTx.length) return 0;
+    const batch = this.pendingTx.splice(0, this.pendingTx.length);
+    const entries = [];
+    for (const item of batch) {
+      entries.push(this.#execSingleOperatorTx(item));
+    }
+    this.emit('tx-applied', { applied: entries.length, entries, immediate: false });
+    return entries.length;
   }
 
   /**
@@ -341,7 +517,9 @@ export class Agent extends EventEmitter {
           return;
         }
 
-        // Before the request, so a correction typed during the last turn shapes this one.
+        // Before the request, so operator `tx` REPL interactions and steers typed during
+        // the last turn land atomically at this boundary and shape the next request.
+        this.#applyPendingTx();
         this.#applySteers();
 
         // Same boundary, same reason: nothing is in flight and the next request has not
@@ -504,13 +682,13 @@ export class Agent extends EventEmitter {
               this.stats.nudgesWasted++;
               this.log.event('nudge-wasted', { prose: firstLine(prose) });
             }
-            if (this.steers.length) continue;
+            if (this.steers.length || this.pendingTx.length) continue;
             this.emit('done', { prose });
             return;
           }
-          // If the operator sent a steer while this turn was streaming, apply it on the
-          // next iteration instead of burning a nudge or dropping the steer on exit.
-          if (this.steers.length) {
+          // If the operator sent a steer or queued a `tx` interaction while this turn was
+          // streaming, apply it on the next iteration instead of burning a nudge or dropping it.
+          if (this.steers.length || this.pendingTx.length) {
             nudges = 0;
             continue;
           }
@@ -561,6 +739,9 @@ export class Agent extends EventEmitter {
         ...(err?.detail ? { detail: err.detail } : {}),
       });
     } finally {
+      // Drain any operator `tx` snippets queued just before cancellation/exit so an
+      // operator interaction never stays orphaned in `pendingTx` once the turn ends.
+      this.#applyPendingTx();
       this.busy = false;
       this.controller = null;
     }
@@ -975,6 +1156,37 @@ export class Agent extends EventEmitter {
       approve: (op, index, extra) => this.#requestApproval(op, index, extra),
       sudo: this.sudo,
     });
+
+    for (let i = 0; i < ops.length; i++) {
+      if (ops[i].op !== 'tx') continue;
+      const res = outcome.results?.find((r) => r.index === i);
+      const err = outcome.errors?.find((e) => e.index === i);
+      if (res?.ok && res.result) {
+        this.#recordTxEntry({
+          origin: 'agent',
+          turn: this.stats.turns,
+          code: ops[i].code,
+          description: ops[i].description || null,
+          ok: true,
+          opsCount: res.result.opsCount,
+          changes: res.result.changes || [],
+          logs: res.result.logs || [],
+          output: res.result.output,
+          note: res.result.note || null,
+        });
+      } else if (err || outcome.status !== 'ok') {
+        this.#recordTxEntry({
+          origin: 'agent',
+          turn: this.stats.turns,
+          code: ops[i].code,
+          description: ops[i].description || null,
+          ok: false,
+          error:
+            err?.message ||
+            (outcome.status === 'plan-failed' ? 'batch rejected at plan time' : `batch ${outcome.status}`),
+        });
+      }
+    }
 
     this.stats.ops += ops.length;
     this.log.addOps(ops.length);

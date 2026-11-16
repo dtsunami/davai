@@ -214,8 +214,14 @@ export function createDispatcher({ session, view }) {
 
     // Typed while a run is in flight: steer it rather than queueing a second request.
     // Commands still run immediately — /context while it works is the point of them —
-    // and sh <cmd> is never intercepted as a steer unless the operator meant prose.
-    if (busyNow && !text.startsWith('/') && text !== 'sh' && !text.startsWith('sh ')) {
+    // and `sh <cmd>` / `tx <code>` route to `handleCommand` (where `tx` queues itself
+    // atomically for the next turn boundary).
+    const isOperatorOp =
+      text === 'sh' ||
+      text.startsWith('sh ') ||
+      text === 'tx' ||
+      /^tx[\s\n]/.test(text);
+    if (busyNow && !text.startsWith('/') && !isOperatorOp) {
       const { text: cleaned, segments } = collectAttachments(text);
       if (agent.steer(cleaned, segments)) {
         session.history?.add(text);

@@ -47,6 +47,15 @@ header {
 .muted { color: var(--dim); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); flex: 0 0 auto; }
 .dot.on { background: var(--green); }
+.tx-badge {
+  color: var(--mag);
+  border: 1px solid var(--mag);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 11px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
 
 .tab {
   background: none;
@@ -365,6 +374,65 @@ details.entry.error > summary { color: var(--red); }
   cursor: pointer;
   text-align: left;
 }
+
+/* --- tx repl --- */
+.view.tx-view { display: flex; flex-direction: column; overflow: hidden; gap: 8px; }
+.tx-top {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  flex: 0 0 auto;
+}
+.tx-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tx-state { margin-top: 6px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tx-queued { margin-top: 6px; font-size: 12px; color: var(--yellow); }
+.tx-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.tx-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+.tx-card.operator { border-left: 3px solid var(--cyan); }
+.tx-card.agent { border-left: 3px solid var(--mag); }
+.tx-card.fail { border-left-color: var(--red); }
+.tx-card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.tx-origin.operator { color: var(--cyan); }
+.tx-origin.agent { color: var(--mag); }
+.tx-card pre {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+.tx-card pre.tx-out { border-color: rgba(152, 195, 121, 0.35); color: var(--green); }
+.tx-card pre.tx-logs { color: var(--cyan); }
+.tx-card pre.tx-err { border-color: var(--red); color: var(--red); }
+.tx-composer {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex: 0 0 auto;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+textarea#tx-input {
+  flex: 1;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 30vh;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--mag);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font: inherit;
+}
+textarea#tx-input:focus { outline: none; border-color: var(--cyan); }
 
 /* --- artifacts --- */
 .art-list { display: flex; flex-direction: column; gap: 6px; }

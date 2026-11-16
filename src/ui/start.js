@@ -146,9 +146,14 @@ function banner(session, sidecar, urlCopied) {
   const w = (s) => process.stdout.write(s + '\n');
   const dim = (s) => `\u001b[2m${s}\u001b[0m`;
   const cyan = (s) => `\u001b[36m${s}\u001b[0m`;
+  const mag = (s) => `\u001b[35m${s}\u001b[0m`;
 
   w('');
-  w(cyan('  davai') + dim('  agentic repl'));
+  w(
+    cyan('  davai') +
+      dim('  agentic repl') +
+      (cfg.codeMode ? mag(`  ${glyphs.bullet} code mode (tx)`) : ''),
+  );
   w(
     dim(
       `  ${cfg.provider}/${cfg.model.id}  ${formatTokens(cfg.contextLimit)} ctx` +
@@ -158,6 +163,9 @@ function banner(session, sidecar, urlCopied) {
   );
   w(dim(`  write ${glyphs.arrow} ${sandbox.writeRoot}`));
   if (cfg.roDirs.length) w(dim(`  read  ${glyphs.arrow} + ${cfg.roDirs.join(', ')}`));
+  if (cfg.codeMode) {
+    w(mag(`  tx    ${glyphs.arrow} CoW JS REPL active (tx <code> or /tx · queued at turn boundaries)`));
+  }
   if (cfg.yolo) {
     w(`\u001b[31m  ${glyphs.warn} yolo: shell commands run without approval\u001b[0m`);
   }

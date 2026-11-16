@@ -18,6 +18,12 @@ export function StatusBar({ cfg, ledger, stats, throughput, width, exitArmed }) 
     <Box paddingX={1} marginTop={1} flexDirection="column">
       <Box>
         <Text color={colors.dim}>{dir}</Text>
+        {cfg.codeMode ? (
+          <>
+            <Text color={colors.dim}> {glyphs.bullet} </Text>
+            <Text color={colors.op}>tx</Text>
+          </>
+        ) : null}
         {cfg.yolo ? (
           <>
             <Text color={colors.dim}> {glyphs.bullet} </Text>

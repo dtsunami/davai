@@ -6,16 +6,17 @@ import { HighlightedInput } from './highlight.jsx';
 import { useLineEditor } from './editor.js';
 
 /** Control keys owned by App.jsx or Composer mode-switching rather than readline. */
-const COMPOSER_RESERVED_CTRL = new Set(['g', 't', 's', 'c']);
+const COMPOSER_RESERVED_CTRL = new Set(['g', 't', 's', 'x', 'c']);
 
 /**
  * Input composer: shell-grade cursor movement, multiline editing, history + ctrl+r
  * reverse search, Tab / Shift+Tab completion, live syntax highlighting, bracketed
- * paste (req 14), and shell mode (req 13).
+ * paste (req 14), shell mode (`ctrl+s`), and Code Mode `tx` REPL (`ctrl+x`).
  */
 export function Composer({ onSubmit, session, busy, active = true }) {
   const { pastes } = session;
   const [shellMode, setShellMode] = useState(false);
+  const [txMode, setTxMode] = useState(false);
 
   const editor = useLineEditor({
     initialHistory: session.history?.all() ?? [],
@@ -26,7 +27,7 @@ export function Composer({ onSubmit, session, busy, active = true }) {
     reservedCtrl: COMPOSER_RESERVED_CTRL,
     onKeystroke: () => session.throughput?.recordKeystroke?.(),
     complete: (val, cur) =>
-      completeInput(val, cur, session, { mode: 'composer', shellMode }),
+      completeInput(val, cur, session, { mode: txMode ? 'plain' : 'composer', shellMode }),
     onPaste: (raw, { insert }) => {
       const captured = pastes.capture(raw);
       if (captured) {
@@ -41,11 +42,19 @@ export function Composer({ onSubmit, session, busy, active = true }) {
       if (!text.trim()) return;
       editor.pushHistory(text);
       editor.setBuffer('', 0);
-      onSubmit(shellMode && !text.startsWith('sh ') ? `sh ${text}` : text);
+      if (shellMode && !text.startsWith('sh ')) return onSubmit(`sh ${text}`);
+      if (txMode && !text.startsWith('/') && text !== 'tx' && !/^tx[\s\n]/.test(text)) {
+        return onSubmit(`tx ${text}`);
+      }
+      return onSubmit(text);
     },
     onEffect: (effect) => {
       if (effect.type === 'ctrl' && effect.key === 's') {
+        setTxMode(false);
         setShellMode((s) => !s);
+      } else if (effect.type === 'ctrl' && effect.key === 'x') {
+        setShellMode(false);
+        setTxMode((x) => !x);
       }
     },
     onChange: (next) => {
@@ -68,8 +77,14 @@ export function Composer({ onSubmit, session, busy, active = true }) {
 
   if (!active) return null;
 
-  const prompt = shellMode ? '$' : glyphs.prompt;
-  const promptColor = shellMode ? colors.warn : busy ? colors.warn : colors.accent;
+  const prompt = shellMode ? '$' : txMode ? 'tx❯' : glyphs.prompt;
+  const promptColor = shellMode
+    ? colors.warn
+    : txMode
+      ? colors.op
+      : busy
+        ? colors.warn
+        : colors.accent;
   const { value, cursor, hint, search } = editor;
 
   return (
@@ -79,7 +94,7 @@ export function Composer({ onSubmit, session, busy, active = true }) {
         cursor={cursor}
         // Hide the cursor during a run until the operator starts typing a steer.
         hideCursor={busy && !value}
-        mode="composer"
+        mode={txMode ? 'plain' : 'composer'}
         shellMode={shellMode}
         sandbox={session.sandbox}
         prefix={
@@ -97,11 +112,16 @@ export function Composer({ onSubmit, session, busy, active = true }) {
         </Text>
       ) : null}
       {hint ? <Text color={colors.dim}>  {hint}</Text> : null}
-      {busy && value.trim() && !shellMode ? (
+      {busy && value.trim() && !shellMode && !txMode ? (
         <Text color={colors.dim}>  enter steers the run in progress</Text>
       ) : null}
       {shellMode ? (
         <Text color={colors.dim}>  shell mode — output is added to context (ctrl+s to exit)</Text>
+      ) : null}
+      {txMode ? (
+        <Text color={colors.dim}>
+          {'  '}tx repl mode — {busy ? 'queues for next turn boundary' : 'CoW JS sandbox, added to context'} (ctrl+x to exit, /tx for pane)
+        </Text>
       ) : null}
     </Box>
   );

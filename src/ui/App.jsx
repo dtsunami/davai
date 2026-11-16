@@ -8,6 +8,7 @@ import { ModelPane } from './ModelPane.jsx';
 import { KeyPane } from './KeyPane.jsx';
 import { EnvPane } from './EnvPane.jsx';
 import { ArtifactPane } from './ArtifactPane.jsx';
+import { TxPane } from './TxPane.jsx';
 import { ApprovalPane } from './ApprovalPane.jsx';
 import { ThroughputPane } from './ThroughputPane.jsx';
 import { PerfHud } from './PerfHud.jsx';
@@ -182,6 +183,29 @@ export function App({ session, initialInput }) {
         type: 'notice',
         message: `steering applied (${applied})`,
       });
+    const onTxQueued = ({ queued }) => {
+      push({
+        type: 'notice',
+        message:
+          queued > 1
+            ? `tx queued (${queued} waiting) — applied atomically at next turn boundary`
+            : 'tx queued — applied atomically at next turn boundary',
+      });
+      setTick((t) => t + 1);
+    };
+    const onTxApplied = ({ entries = [], immediate }) => {
+      if (!immediate && entries.length) {
+        push({
+          type: 'notice',
+          message: `queued operator tx applied at turn boundary (${entries.length})`,
+        });
+      }
+      for (const entry of entries) {
+        push({ type: 'tx-eval', entry });
+      }
+      setStats({ ...agent.stats });
+      setTick((t) => t + 1);
+    };
     // A prompt edited in a browser landed at this step boundary. Said out loud because
     // the cached prefix was just rebuilt, which the operator pays for on the next turn.
     const onPromptsApplied = () => {
@@ -280,6 +304,8 @@ export function App({ session, initialInput }) {
       retry: onRetry,
       'steer-queued': onSteerQueued,
       steered: onSteered,
+      'tx-queued': onTxQueued,
+      'tx-applied': onTxApplied,
       'prompts-applied': onPromptsApplied,
     };
     for (const [name, fn] of Object.entries(handlers)) agent.on(name, fn);
@@ -534,6 +560,14 @@ export function App({ session, initialInput }) {
           push={push}
         />
       ) : null}
+      {pane === 'tx' ? (
+        <TxPane
+          session={session}
+          width={width}
+          onClose={() => setPane(null)}
+          onSubmit={submit}
+        />
+      ) : null}
       {pane === 'tps' ? (
         <ThroughputPane
           tracker={throughput}
@@ -583,10 +617,29 @@ function HistoryItem({ item }) {
       return (
         <Box flexDirection="column" paddingX={1}>
           {item.ops.map((op, i) => (
-            <Text key={i} color={colors.op}>
-              {'  '}
-              {glyphs.bullet} {describeOp(op)}
-            </Text>
+            <Box key={i} flexDirection="column">
+              <Text color={colors.op}>
+                {'  '}
+                {glyphs.bullet} {describeOp(op)}
+              </Text>
+              {op.op === 'tx' && op.code
+                ? String(op.code)
+                    .split('\n')
+                    .slice(0, 12)
+                    .map((line, li) => (
+                      <Text key={li} color={colors.dim}>
+                        {'      '}
+                        {line}
+                      </Text>
+                    ))
+                : null}
+              {op.op === 'tx' && op.code && String(op.code).split('\n').length > 12 ? (
+                <Text color={colors.dim}>
+                  {'      '}
+                  {glyphs.ellipsis} ({String(op.code).split('\n').length} lines total — /tx for full REPL log)
+                </Text>
+              ) : null}
+            </Box>
           ))}
         </Box>
       );
@@ -599,10 +652,28 @@ function HistoryItem({ item }) {
             {outcome.results
               .filter((r) => r.result && MUTATING.has(r.op))
               .map((r, i) => (
-                <Text key={i} color={colors.ok}>
-                  {'  '}
-                  {glyphs.check} {summarizeResult(r)}
-                </Text>
+                <Box key={i} flexDirection="column">
+                  <Text color={colors.ok}>
+                    {'  '}
+                    {glyphs.check} {summarizeResult(r)}
+                  </Text>
+                  {r.op === 'tx' && r.result?.logs?.length ? (
+                    <Text color={colors.accent}>
+                      {'      '}logs: {r.result.logs.slice(0, 3).join(' | ')}
+                    </Text>
+                  ) : null}
+                  {r.op === 'tx' && r.result?.output !== undefined
+                    ? String(r.result.output)
+                        .split('\n')
+                        .slice(0, 8)
+                        .map((line, li) => (
+                          <Text key={li} color={colors.dim}>
+                            {'      '}
+                            {li === 0 ? `${glyphs.arrow} ${line}` : `  ${line}`}
+                          </Text>
+                        ))
+                    : null}
+                </Box>
               ))}
           </Box>
         );
@@ -623,6 +694,55 @@ function HistoryItem({ item }) {
                 ? 'stopped at the shell op; earlier file changes kept'
                 : 'changes rolled back'}
           </Text>
+        </Box>
+      );
+    }
+
+    case 'tx-eval': {
+      const e = item.entry || {};
+      if (!e.ok) {
+        return (
+          <Box flexDirection="column" paddingX={1}>
+            <Text color={colors.err}>
+              {'  '}
+              {glyphs.cross} tx (operator): {e.error}
+            </Text>
+          </Box>
+        );
+      }
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Text color={colors.ok}>
+            {'  '}
+            {glyphs.check} tx (operator):{' '}
+            {e.changes?.length
+              ? `${e.changes.length} file(s) modified (${e.opsCount || 0} fs ops, ${e.durationMs || 0}ms)`
+              : `${e.opsCount || 0} fs ops (read-only, ${e.durationMs || 0}ms)`}
+            {' · added to context'}
+          </Text>
+          {(e.changes || []).map((c, ci) => (
+            <Text key={`ch-${ci}`} color={colors.dim}>
+              {'      '}
+              {c.path} {c.action} ({c.delta >= 0 ? '+' : ''}
+              {c.delta} lines)
+            </Text>
+          ))}
+          {e.logs?.length ? (
+            <Text color={colors.accent}>
+              {'      '}logs: {e.logs.join(' | ')}
+            </Text>
+          ) : null}
+          {e.output !== undefined
+            ? String(e.output)
+                .split('\n')
+                .slice(0, 12)
+                .map((line, li) => (
+                  <Text key={`out-${li}`} color={colors.dim}>
+                    {'      '}
+                    {li === 0 ? `${glyphs.arrow} ${line}` : `  ${line}`}
+                  </Text>
+                ))
+            : null}
         </Box>
       );
     }

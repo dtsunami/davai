@@ -351,6 +351,12 @@ export function tokenizeInput(text, opts = {}) {
     return [...head, ...rest];
   }
 
+  if (text === 'tx' || /^tx[\s\n]/.test(text)) {
+    const head = [{ start: 0, end: 2, color: colors.op, bold: true }];
+    if (text.length === 2) return head;
+    return [...head, { start: 2, end: text.length, color: colors.accent }];
+  }
+
   if (text.startsWith('/')) return tokenizeSlash(text, { sandbox, cwd });
   return tokenizePrompt(text, { sandbox, cwd });
 }

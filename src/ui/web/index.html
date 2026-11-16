@@ -26,6 +26,7 @@
       <header>
         <span class="dot" id="conn" title="disconnected"></span>
         <strong id="model">—</strong>
+        <span id="codemode-badge" class="tx-badge" title="Code Mode (tx) active — click to open REPL" hidden>tx</span>
         <span class="muted" id="cwd"></span>
         <span class="spacer"></span>
         <span class="muted" id="stats"></span>
@@ -34,6 +35,7 @@
           <span id="perf-now" class="muted">—</span>
         </button>
         <button id="tab-chat" class="tab active">chat</button>
+        <button id="tab-tx" class="tab">tx</button>
         <button id="tab-perf" class="tab">perf</button>
         <button id="tab-ctx" class="tab">context</button>
         <button id="tab-models" class="tab">models</button>
@@ -188,6 +190,37 @@
 
           <div id="m-efforts" class="efforts"></div>
           <div id="m-list" class="m-list"></div>
+        </section>
+
+        <section id="view-tx" class="view tx-view" hidden>
+          <div class="tx-top">
+            <div class="tx-head">
+              <strong>Code Mode REPL (tx)</strong>
+              <span id="tx-mode-note" class="muted"></span>
+              <span class="spacer"></span>
+              <button id="tx-clear-state" class="chip plain" title="clear persistent in-memory state object">clear state</button>
+              <button id="tx-refresh" class="chip plain" title="reload REPL state and transcript">refresh</button>
+            </div>
+            <div id="tx-state" class="tx-state muted"></div>
+            <div id="tx-queued" class="tx-queued" hidden></div>
+          </div>
+          <div id="tx-log" class="tx-log"></div>
+          <div id="tx-empty" class="muted" hidden>
+            No tx runs yet. Both LLM <code>tx</code> ops and operator snippets appear here in full.
+            Globals: <code>read</code>, <code>exists</code>, <code>list</code>, <code>glob</code>,
+            <code>grep</code>, <code>write</code>, <code>replace</code>, <code>remove</code>,
+            <code>move</code>, <code>fileset</code>, <code>state</code>, <code>log</code>, <code>preview</code>.
+          </div>
+          <div class="tx-composer">
+            <textarea
+              id="tx-input"
+              rows="2"
+              placeholder="JS expression or script (e.g. fileset('src/**/*.js').paths().length) — enter runs or queues at turn boundary, shift+enter newline"
+              autocomplete="off"
+              spellcheck="false"
+            ></textarea>
+            <button id="tx-run" class="ok">run tx</button>
+          </div>
         </section>
 
         <section id="view-art" class="view" hidden>

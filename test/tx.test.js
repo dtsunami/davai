@@ -10,6 +10,11 @@ import { executeBatch, formatResults } from '../src/agent/ops/executor.js';
 import { buildSystemPrompt, DEFAULT_PROMPTS } from '../src/agent/prompt.js';
 import { loadConfig } from '../src/config/env.js';
 import { parseArgs } from '../bin/davai.js';
+import { Agent } from '../src/agent/loop.js';
+import { Ledger } from '../src/context/ledger.js';
+import { Artifacts } from '../src/context/artifacts.js';
+import { resolveModel } from '../src/config/models.js';
+import { replaySegments } from '../src/session/resume.js';
 
 let base;
 let root;
@@ -261,5 +266,138 @@ describe('tx Copy-on-Write execution, sandbox, and rollback', () => {
     ]);
     expect(out.status).toBe('ok');
     expect(read('src/generated.js')).toBe('export const count = 3;\n');
+  });
+});
+
+describe('operator interactive tx REPL and atomic turn-boundary queueing', () => {
+  function makeTestAgent(provider) {
+    const model = resolveModel('anthropic', 'claude-opus-5');
+    const ledger = new Ledger({ limit: model.context, compactAt: 0.75 });
+    ledger.setSystem('sys');
+    const events = [];
+    const sessionLogDir = path.join(base, 'repl-log');
+    fs.mkdirSync(sessionLogDir, { recursive: true });
+    const transcriptFile = path.join(sessionLogDir, 'transcript.jsonl');
+    const log = {
+      event(type, data = {}) {
+        const entry = { ts: new Date().toISOString(), type, ...data };
+        events.push(entry);
+        fs.appendFileSync(transcriptFile, JSON.stringify(entry) + '\n');
+      },
+      addUsage() {},
+      addOps() {},
+    };
+    const agent = new Agent({
+      cfg: { cwd: root, home: base, provider: 'anthropic', model, shellTimeout: 5000, codeMode: true },
+      provider,
+      makeProvider: () => provider,
+      ledger,
+      sandbox: ctx.sandbox,
+      journal: ctx.journal,
+      artifacts: new Artifacts(),
+      log,
+    });
+    return { agent, ledger, events, sessionLogDir };
+  }
+
+  it('evaluates single-line expressions immediately when idle, shares state, and records transcript', () => {
+    const dummyProvider = { async *send() {} };
+    const { agent, ledger, sessionLogDir } = makeTestAgent(dummyProvider);
+    const applied = [];
+    agent.on('tx-applied', (ev) => applied.push(ev));
+
+    const res = agent.runOperatorTx('state.hits = fileset("src/**/*.js").containing("oldHelper").paths()');
+    expect(res.queued).toBe(false);
+    expect(res.entry.ok).toBe(true);
+    expect(res.entry.output).toContain('src/one.js');
+    expect(agent.txState.hits).toEqual(['src/one.js', 'src/two.js']);
+    expect(applied).toHaveLength(1);
+    expect(applied[0].immediate).toBe(true);
+
+    const snap = agent.txSnapshot();
+    expect(snap.stateKeys).toEqual(['hits']);
+    expect(snap.entries).toHaveLength(1);
+    expect(snap.entries[0].origin).toBe('operator');
+
+    // Context ledger receives the full code + result so the LLM sees the operator's REPL action:
+    expect(ledger.segments.some((s) => s.label.startsWith('tx (operator):') && s.part.text.includes('src/one.js'))).toBe(true);
+
+    // Session resume replays operator-tx cleanly:
+    const replayed = replaySegments(sessionLogDir);
+    expect(replayed).toHaveLength(1);
+    expect(replayed[0].label).toContain('tx (operator)');
+  });
+
+  it('queues operator tx mid-turn and applies it atomically at the turn boundary alongside LLM tx', async () => {
+    const holder = { agent: null };
+    let callCount = 0;
+    const seenMessages = [];
+
+    const provider = {
+      async *send({ messages }) {
+        seenMessages.push(
+          messages
+            .flatMap((m) => m.content)
+            .map((c) => c.text)
+            .join('\n'),
+        );
+        callCount++;
+        if (callCount === 1) {
+          // Operator interacts mid-stream during Turn 1!
+          const q = holder.agent.runOperatorTx('state.seed = 40; replace("src/three.js", "true", "false"); return state.seed;');
+          expect(q.queued).toBe(true);
+          expect(q.position).toBe(1);
+          // Disk & txState MUST NOT be mutated yet while Turn 1 is still in flight:
+          expect(holder.agent.txState.seed).toBeUndefined();
+          expect(read('src/three.js')).toBe('export const untouched = true;\n');
+
+          // Model concludes without ops — queued operator tx must keep the loop alive for Turn 2!
+          yield { t: 'text', delta: 'Initial check done.' };
+          yield { t: 'usage', in: 50, out: 10, cacheRead: 0, cacheWrite: 0 };
+          yield { t: 'stop', reason: 'end_turn' };
+          return;
+        }
+        if (callCount === 2) {
+          // Turn 2: operator's tx has now applied atomically at the step boundary!
+          expect(holder.agent.txState.seed).toBe(40);
+          expect(read('src/three.js')).toBe('export const untouched = false;\n');
+          // LLM now reads `state.seed` set by the operator in the shared REPL:
+          yield {
+            t: 'text',
+            delta: '```da_ops\n{"ops": [{"op": "tx", "description": "consume operator state", "code": "state.total = state.seed + 2; return state.total;"}]}\n```',
+          };
+          yield { t: 'usage', in: 80, out: 20, cacheRead: 0, cacheWrite: 0 };
+          yield { t: 'stop', reason: 'end_turn' };
+          return;
+        }
+        yield { t: 'text', delta: 'All done: total is 42.' };
+        yield { t: 'usage', in: 100, out: 10, cacheRead: 0, cacheWrite: 0 };
+        yield { t: 'stop', reason: 'end_turn' };
+      },
+    };
+
+    const { agent } = makeTestAgent(provider);
+    holder.agent = agent;
+
+    const queuedEvents = [];
+    const appliedEvents = [];
+    agent.on('tx-queued', (e) => queuedEvents.push(e));
+    agent.on('tx-applied', (e) => appliedEvents.push(e));
+
+    await agent.run('cooperate with me');
+
+    expect(queuedEvents).toHaveLength(1);
+    expect(appliedEvents).toHaveLength(1);
+    expect(appliedEvents[0].immediate).toBe(false);
+    expect(agent.txState.total).toBe(42);
+
+    // Turn 2's prompt included the operator's REPL script and return value:
+    expect(seenMessages[1]).toContain('The operator ran a `tx` script in the shared Code Mode REPL:');
+    expect(seenMessages[1]).toContain('return:\n40');
+
+    // Unified REPL transcript holds both the operator entry and the LLM entry in order:
+    const snap = agent.txSnapshot();
+    expect(snap.entries.map((e) => e.origin)).toEqual(['operator', 'agent']);
+    expect(snap.entries[1].output).toBe('42');
   });
 });

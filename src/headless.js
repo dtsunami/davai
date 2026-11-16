@@ -107,11 +107,17 @@ export async function runHeadless(input, opts = {}) {
     if (!opts.json) process.stderr.write(`  · auto-compacted, freed ~${r.freed} tokens\n`);
   });
 
-  // Only reachable when a view queued a prompt rebuild, and headless has no view. Kept
-  // so the event contract holds in every mode rather than being excused in one.
+  // Only reachable when a view queued a prompt rebuild or operator tx, and headless has
+  // no interactive view. Kept so the event contract holds in every mode.
   agent.on('prompts-applied', (r) => {
     emit({ type: 'prompts-applied', ...r });
     if (!opts.json) process.stderr.write('  · prompt changes applied\n');
+  });
+  agent.on('tx-queued', (r) => {
+    emit({ type: 'tx-queued', ...r });
+  });
+  agent.on('tx-applied', (r) => {
+    emit({ type: 'tx-applied', ...r });
   });
 
   agent.on('warning', (w) => {

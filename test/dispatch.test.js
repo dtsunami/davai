@@ -14,9 +14,14 @@ class FakeAgent extends EventEmitter {
     this.stats = { turns: 0, ops: 0, cost: 0 };
     this.ran = [];
     this.steered = [];
+    this.txCalls = [];
     this.steerable = false;
   }
   async run(text) { this.ran.push(text); }
+  runOperatorTx(code) {
+    this.txCalls.push(code);
+    return { queued: this.steerable };
+  }
   steer(text, segments = []) {
     if (!this.steerable) return false;
     this.steered.push(text);
@@ -88,6 +93,14 @@ describe('steering', () => {
     // The whole point of /context while it works.
     expect(panes).toEqual(['context']);
     expect(session.agent.steered).toEqual([]);
+  });
+
+  it('routes `tx <code>` to runOperatorTx even mid-turn so it queues at the turn boundary', async () => {
+    session.agent.steerable = true;
+    await build({ isBusy: () => true })('tx state.answer = 42');
+    expect(session.agent.txCalls).toEqual(['state.answer = 42']);
+    expect(session.agent.steered).toEqual([]);
+    expect(session.agent.ran).toEqual([]);
   });
 
   it('falls back to a normal run when the agent refuses the steer', async () => {

@@ -175,6 +175,19 @@ export function replaySegments(dir, opts = {}) {
         }
         break;
 
+      case 'operator-tx':
+        specs.push({
+          type: 'op-result',
+          label: ev.ok === false
+            ? `tx (operator, failed): ${firstLine(ev.code)}`
+            : `tx (operator): ${firstLine(ev.code)}`,
+          role: 'user',
+          text:
+            ev.text ||
+            `The operator ran a \`tx\` script in an earlier session:\n\`\`\`js\n${ev.code || ''}\n\`\`\``,
+        });
+        break;
+
       case 'context-clear':
         pendingOps = null;
         specs.length = 0;

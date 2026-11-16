@@ -18,6 +18,8 @@ import { formatTokens, glyphs } from './theme.js';
 
 const HELP = `Commands
   sh <cmd>            run a shell command; output is added to context (sudo asks for a password)
+  tx <code>           run JS in the CoW tx REPL (queues for next turn boundary if busy)
+  /tx [code|--state]  open the interactive Code Mode REPL pane, or run/inspect tx state
   /model [id|query]   model and settings pane (--save to remember it for next time)
   /tps                token/s and time-to-first-token, per turn and per model (also ctrl+t)
   /context            context breakdown (also ctrl+g)
@@ -47,7 +49,7 @@ Keys
   ctrl+w, alt+d       kill word backward / forward (ctrl+k / ctrl+u kill line, ctrl+y yank)
   ctrl+r              reverse incremental history search
   tab / shift+tab     complete & cycle commands, subcommands, scripts, and paths
-  ctrl+s              toggle shell mode
+  ctrl+s / ctrl+x     toggle shell mode / Code Mode tx REPL
   ctrl+t / ctrl+g     throughput pane / context pane
   shift+enter         newline instead of submit
   ctrl+c              clear input line (twice on empty quits)
@@ -72,7 +74,7 @@ export function commandList() {
     if (!m) continue;
     const usage = m[1].trim();
     const name = usage.split(/\s/)[0];
-    if (!name.startsWith('/') && name !== 'sh') continue;
+    if (!name.startsWith('/') && name !== 'sh' && name !== 'tx') continue;
     out.push({ name, usage, desc: m[2].trim() });
   }
   return out;
@@ -201,6 +203,24 @@ export async function handleCommand(text, deps) {
     return { handled: true };
   }
 
+  // --- tx <code>: operator Code Mode REPL (runs now if idle, queues for step boundary if busy) ---
+  if (text === 'tx' || /^tx[\s\n]/.test(text)) {
+    const rawCode = text.slice(2).trim();
+    if (!rawCode) {
+      setPane('tx');
+      return { handled: true };
+    }
+    const expandedCode = session.pastes ? session.pastes.expand(rawCode).text : rawCode;
+    push({ type: 'user', text: `tx ${expandedCode}` });
+    try {
+      agent.runOperatorTx(expandedCode);
+      refresh();
+    } catch (err) {
+      push({ type: 'error', message: err.message });
+    }
+    return { handled: true };
+  }
+
   if (!text.startsWith('/')) return { handled: false };
 
   const [cmd, ...rest] = text.slice(1).split(/\s+/);
@@ -302,6 +322,46 @@ export async function handleCommand(text, deps) {
     case 'artifacts':
       setPane('artifacts');
       return { handled: true };
+
+    case 'tx':
+    case 'repl':
+    case 'codemode': {
+      const trimmedArg = arg.trim();
+      if (!trimmedArg) {
+        setPane('tx');
+        return { handled: true };
+      }
+      if (trimmedArg === '--state' || trimmedArg === 'state') {
+        const snap = agent?.txSnapshot?.() || { stateKeys: [], statePreview: {}, queued: [] };
+        const keys = snap.stateKeys || [];
+        const lines = [
+          `Code Mode REPL state (${keys.length} key${keys.length === 1 ? '' : 's'}${snap.queued?.length ? `, ${snap.queued.length} queued` : ''})`,
+          ...(keys.length
+            ? keys.map((k) => `  ${k} = ${snap.statePreview[k]}`)
+            : ['  (empty)']),
+        ];
+        push({ type: 'info', text: lines.join('\n') });
+        return { handled: true };
+      }
+      if (trimmedArg === '--clear-state') {
+        if (agent?.txState) {
+          for (const k of Object.keys(agent.txState)) delete agent.txState[k];
+        }
+        push({ type: 'notice', message: 'tx state cleared' });
+        refresh();
+        return { handled: true };
+      }
+      const rawTail = text.replace(/^\/\S+\s+/, '');
+      const expandedCode = session.pastes ? session.pastes.expand(rawTail).text : rawTail;
+      push({ type: 'user', text: `tx ${expandedCode}` });
+      try {
+        agent.runOperatorTx(expandedCode);
+        refresh();
+      } catch (err) {
+        push({ type: 'error', message: err.message });
+      }
+      return { handled: true };
+    }
 
     case 'compact': {
       // Through manage.js rather than compact.js directly, so this takes the same lock

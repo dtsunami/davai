@@ -159,6 +159,22 @@ describe('auth', () => {
 });
 
 describe('routes', () => {
+  it('serves /api/tx snapshot for the interactive Code Mode REPL tab', async () => {
+    session.cfg.codeMode = true;
+    session.agent.txSnapshot = () => ({
+      codeMode: true,
+      queued: [{ position: 1, code: 'state.x = 1', description: null, ts: 123 }],
+      stateKeys: ['x'],
+      statePreview: { x: '1' },
+      entries: [{ seq: 1, origin: 'operator', code: '1 + 1', ok: true, output: '2', opsCount: 0, changes: [] }],
+    });
+    const d = await (await fetch(url('/api/tx'), { headers: auth() })).json();
+    expect(d.codeMode).toBe(true);
+    expect(d.stateKeys).toEqual(['x']);
+    expect(d.queued).toHaveLength(1);
+    expect(d.entries[0].output).toBe('2');
+  });
+
   it('describes the session', async () => {
     const d = await (await fetch(url('/api/session'), { headers: auth() })).json();
     expect(d).toMatchObject({ id: 'sess123', provider: 'anthropic', effort: 'high' });

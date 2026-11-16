@@ -39,6 +39,8 @@ const FORWARD = [
   'retry',
   'steer-queued',
   'steered',
+  'tx-queued',
+  'tx-applied',
 ];
 
 export class SessionBus extends EventEmitter {

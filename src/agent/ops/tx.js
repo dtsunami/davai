@@ -629,7 +629,22 @@ export function evaluateTx(op, ctx) {
   });
 
   // Wrap as an IIFE so top-level `return ...` works cleanly inside the script.
-  const wrapped = `'use strict';\n(function() {\n${op.code}\n})()`;
+  // For interactive REPL convenience (`tx read("a.js")`), if `op.allowImplicitReturn` is
+  // set and the snippet has no explicit `return` and parses as a single JS expression,
+  // auto-return its value while keeping line numbers aligned.
+  let body = String(op.code ?? '');
+  if (op.allowImplicitReturn && !/\breturn\b/.test(body) && !body.includes('\n')) {
+    const trimmed = body.trim().replace(/;+\s*$/, '');
+    if (trimmed) {
+      try {
+        new vm.Script(`'use strict';\n(\n${trimmed}\n)`, { filename: 'davai-tx-expr.js' });
+        body = `return (${trimmed});`;
+      } catch {
+        /* statement rather than expression — compile as-is below */
+      }
+    }
+  }
+  const wrapped = `'use strict';\n(function() {\n${body}\n})()`;
   let script;
   try {
     script = new vm.Script(wrapped, { filename: 'davai-tx.js' });

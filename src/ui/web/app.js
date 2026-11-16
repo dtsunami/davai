@@ -31,6 +31,8 @@ const state = {
   commands: [],
   filters: {},
   turnNo: 0,
+  queuedSteers: 0,
+  queuedTx: 0,
 };
 
 // --- transport ---
@@ -99,6 +101,7 @@ function connect() {
 // both map to 'models'; the branch in the pane handler also expands the right panel.
 const PANE_TAB = {
   context: 'ctx',
+  tx: 'tx',
   tps: 'perf',
   model: 'models',
   artifacts: 'art',
@@ -110,7 +113,8 @@ const EVENTS = [
   'thinking', 'text', 'turn-start', 'turn-end', 'ops-parsed', 'ops-result',
   'artifact', 'usage', 'error', 'warning', 'done', 'cancelled',
   'compact-start', 'compact-done', 'repair', 'nudge', 'retry',
-  'steer-queued', 'steered', 'approval-request', 'approval-resolved',
+  'steer-queued', 'steered', 'tx-queued', 'tx-applied',
+  'approval-request', 'approval-resolved',
   'prompts-applied',
   // Not an agent event: the REPL's own transcript lines, mirrored by App.jsx so a
   // browser sees the operator's half of the conversation too.
@@ -164,6 +168,7 @@ function handle(type, d) {
         loadCtxHistory();
         loadPrompts();
       }
+      if (currentTab === 'tx') loadTx();
       break;
     case 'turn-start':
       live = ''; thinking = '';
@@ -196,6 +201,7 @@ function handle(type, d) {
       break;
     case 'ops-result':
       setStatus(null);
+      if (currentTab === 'tx') loadTx();
       break;
     case 'done':
     case 'cancelled':
@@ -205,15 +211,29 @@ function handle(type, d) {
       stopLiveMeter();
       refreshSession();
       refreshPerf();
+      if (currentTab === 'tx') loadTx();
       break;
     case 'error':
       setBusy(false); setStatus(null); stopLiveMeter();
       break;
     case 'steer-queued':
-      showQueue(d.queued);
+      state.queuedSteers = d.queued || 0;
+      renderQueue();
       break;
     case 'steered':
-      showQueue(0);
+      state.queuedSteers = 0;
+      renderQueue();
+      break;
+    case 'tx-queued':
+      state.queuedTx = d.queued || 0;
+      renderQueue();
+      if (currentTab === 'tx') loadTx();
+      break;
+    case 'tx-applied':
+      state.queuedTx = 0;
+      renderQueue();
+      refreshSession();
+      if (currentTab === 'tx') loadTx();
       break;
     case 'prompts-applied':
       // The staged edit landed. Re-read the panel so "pending" clears and the live
@@ -266,6 +286,7 @@ const KIND = {
   thinking: 'think',
   ops: 'ops',
   'ops-result': 'ops',
+  'tx-eval': 'ops',
   notice: 'note',
   info: 'note',
   compact: 'note',
@@ -321,7 +342,10 @@ function renderEntry(e) {
       const ops = e.ops || [];
       const head = `${ops.length} op${ops.length === 1 ? '' : 's'} · ${ops.map(opLabel).slice(0, 2).join(', ')}${ops.length > 2 ? ' …' : ''}`;
       const d = fold('ops', head, ops.length <= 5);
-      for (const op of ops) d.appendChild(el('div', 'op-line', opLabel(op)));
+      for (const op of ops) {
+        d.appendChild(el('div', 'op-line', opLabel(op)));
+        if (op.op === 'tx' && op.code) d.appendChild(el('pre', null, op.code));
+      }
       return d;
     }
 
@@ -340,10 +364,34 @@ function renderEntry(e) {
         : `✗ ${rows.length} error${rows.length === 1 ? '' : 's'} — ${tail}`;
       const d = fold(`opsres ${ok ? 'ok' : 'fail'}`, head, !ok);
       if (ok) {
-        for (const r of rows) d.appendChild(el('div', 'op-ok', summarize(r)));
+        for (const r of rows) {
+          d.appendChild(el('div', 'op-ok', summarize(r)));
+          if (r.op === 'tx' && r.result) {
+            if (r.result.logs?.length) d.appendChild(el('pre', null, `logs:\n${r.result.logs.join('\n')}`));
+            if (r.result.output !== undefined) d.appendChild(el('pre', null, `return:\n${r.result.output}`));
+          }
+        }
         if (!rows.length) d.appendChild(el('div', 'op-ok', 'read-only batch'));
       } else {
         for (const err of rows) d.appendChild(el('div', 'op-fail', `[${err.index}] ${err.op}: ${err.message}`));
+      }
+      return d;
+    }
+
+    case 'tx-eval': {
+      const it = e.entry || {};
+      const ok = Boolean(it.ok);
+      const head = ok
+        ? `✓ tx (operator) · ${it.changes?.length ? `${it.changes.length} file(s) modified (${it.opsCount || 0} fs ops)` : `${it.opsCount || 0} fs ops (read-only)`} · added to context`
+        : `✗ tx (operator) — ${it.error || 'failed'}`;
+      const d = fold(`opsres ${ok ? 'ok' : 'fail'}`, head, true);
+      if (it.code) d.appendChild(el('pre', null, it.code));
+      if (ok) {
+        for (const c of it.changes || []) {
+          d.appendChild(el('div', 'op-ok', `${c.path} ${c.action} (${c.delta >= 0 ? '+' : ''}${c.delta} lines)`));
+        }
+        if (it.logs?.length) d.appendChild(el('pre', null, `logs:\n${it.logs.join('\n')}`));
+        if (it.output !== undefined) d.appendChild(el('pre', null, `→ ${it.output}`));
       }
       return d;
     }
@@ -553,10 +601,19 @@ function setConnected(on) {
   $('conn').title = on ? 'connected' : 'disconnected';
 }
 
-function showQueue(n) {
+function renderQueue() {
+  const parts = [];
+  if (state.queuedTx) {
+    parts.push(`${state.queuedTx} tx snippet${state.queuedTx > 1 ? 's' : ''}`);
+  }
+  if (state.queuedSteers) {
+    parts.push(`${state.queuedSteers} steer${state.queuedSteers > 1 ? 's' : ''}`);
+  }
   const q = $('queue');
-  q.hidden = !n;
-  q.textContent = n ? `${n} steer${n > 1 ? 's' : ''} queued — applied at the next step` : '';
+  q.hidden = parts.length === 0;
+  q.textContent = parts.length
+    ? `${parts.join(' + ')} queued — applied atomically at the next turn boundary`
+    : '';
 }
 
 // --- header / stats ---
@@ -564,6 +621,7 @@ function showQueue(n) {
 function renderHeader(d) {
   $('model').textContent = `${d.provider}/${d.model}`;
   $('cwd').textContent = d.cwd || '';
+  $('codemode-badge').hidden = !d.codeMode;
   if (d.stats) renderStats({ ...d.stats, total: d.stats.cost });
   if (d.yolo) $('model').style.color = 'var(--red)';
 }
@@ -1490,6 +1548,101 @@ async function loadArtifactBody(a, d) {
 
 const fmtBytes = (n) => (n >= 1024 ? `${(n / 1024).toFixed(1)}kB` : `${n}B`);
 
+// --- tx repl ---
+
+const txRepl = { snap: null, history: [], histIdx: -1, draft: '' };
+
+async function loadTx() {
+  try {
+    txRepl.snap = await api('/api/tx');
+  } catch {
+    txRepl.snap = { codeMode: false, queued: [], stateKeys: [], statePreview: {}, entries: [] };
+  }
+  renderTx();
+}
+
+function renderTx() {
+  const s = txRepl.snap || { codeMode: false, queued: [], stateKeys: [], statePreview: {}, entries: [] };
+  $('tx-mode-note').textContent = s.codeMode
+    ? '· LLM + operator enabled'
+    : '· operator active (launch with --code-mode to expose tx to the LLM)';
+
+  const keys = s.stateKeys || [];
+  $('tx-state').textContent = keys.length
+    ? `state (${keys.length} key${keys.length === 1 ? '' : 's'}): ` +
+      keys.map((k) => `${k} = ${s.statePreview?.[k] ?? ''}`).join(' · ')
+    : 'state: (empty — assign properties on `state` to share across turns)';
+
+  const qBox = $('tx-queued');
+  const queued = s.queued || [];
+  qBox.hidden = queued.length === 0;
+  qBox.textContent = queued.length
+    ? `▲ ${queued.length} operator tx snippet${queued.length > 1 ? 's' : ''} queued for atomic application at the next turn boundary`
+    : '';
+
+  const log = $('tx-log');
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+  log.innerHTML = '';
+  const entries = s.entries || [];
+  $('tx-empty').hidden = entries.length > 0;
+
+  for (const e of entries) {
+    const card = el('div', `tx-card ${e.origin === 'operator' ? 'operator' : 'agent'}${e.ok ? '' : ' fail'}`);
+    const head = el('div', 'tx-card-head');
+    head.appendChild(el('strong', null, `#${e.seq}`));
+    head.appendChild(
+      el(
+        'span',
+        `tx-origin ${e.origin === 'operator' ? 'operator' : 'agent'}`,
+        e.origin === 'operator' ? 'operator' : `llm${e.turn ? ` · turn ${e.turn}` : ''}`,
+      ),
+    );
+    if (e.description) head.appendChild(el('span', null, e.description));
+    head.appendChild(
+      el(
+        'span',
+        e.ok ? 'op-ok' : 'op-fail',
+        e.ok
+          ? `${e.changes?.length || 0} changed · ${e.opsCount || 0} fs ops${e.durationMs != null ? ` · ${e.durationMs}ms` : ''}`
+          : `failed${e.durationMs != null ? ` (${e.durationMs}ms)` : ''}`,
+      ),
+    );
+    if (e.ts) head.appendChild(el('span', 'muted', new Date(e.ts).toLocaleTimeString()));
+    card.appendChild(head);
+
+    if (e.code) card.appendChild(el('pre', null, e.code));
+    if (e.ok) {
+      if (e.changes?.length) {
+        const ch = e.changes
+          .map((c) => `${c.path} ${c.action} (${c.delta >= 0 ? '+' : ''}${c.delta} lines)`)
+          .join('\n');
+        card.appendChild(el('pre', 'tx-logs', ch));
+      }
+      if (e.logs?.length) card.appendChild(el('pre', 'tx-logs', `logs:\n${e.logs.join('\n')}`));
+      if (e.output !== undefined) card.appendChild(el('pre', 'tx-out', `→ ${e.output}`));
+    } else if (e.error) {
+      card.appendChild(el('pre', 'tx-err', e.error));
+    }
+    log.appendChild(card);
+  }
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+async function sendTx() {
+  const input = $('tx-input');
+  const code = input.value.trim();
+  if (!code) return;
+  txRepl.history.unshift(code);
+  txRepl.histIdx = -1;
+  input.value = '';
+  try {
+    await api('/api/submit', { text: `tx ${code}` });
+    await loadTx();
+  } catch (e) {
+    pushEntry({ type: 'error', message: e.message });
+  }
+}
+
 // --- perf: one dataset, three resolutions ---
 //
 // The chip in the header is a canvas sparkline of per-turn throughput, drawn by hand
@@ -2181,7 +2334,7 @@ function updateComplete() {
   const v = $('input').value;
   if (!v.startsWith('/') || v.includes(' ') || v.includes('\n')) return hideComplete();
   const q = v.slice(1).toLowerCase();
-  completeItems = state.commands.filter((c) => c.name.slice(1).startsWith(q));
+  completeItems = state.commands.filter((c) => c.name.startsWith('/') && c.name.slice(1).startsWith(q));
   if (!completeItems.length) return hideComplete();
   completeSel = 0;
   renderComplete();
@@ -2215,7 +2368,7 @@ function hideComplete() {
 
 // --- tabs ---
 
-const TABS = ['chat', 'perf', 'ctx', 'models', 'art'];
+const TABS = ['chat', 'tx', 'perf', 'ctx', 'models', 'art'];
 
 let currentTab = 'chat';
 function setTab(name) {
@@ -2239,6 +2392,10 @@ function setTab(name) {
     // Charts of a hidden pane cannot be measured and will not be seen. Dropping them
     // keeps four canvases and their listeners out of memory while the tab is away.
     destroyPaneCharts();
+  }
+  if (name === 'tx') {
+    loadTx();
+    $('tx-input').focus();
   }
   if (name === 'ctx') {
     refreshSession();
@@ -2352,6 +2509,40 @@ function bind() {
   });
 
   for (const t of TABS) $(`tab-${t}`).onclick = () => setTab(t);
+  $('codemode-badge').onclick = () => setTab('tx');
+  $('tx-run').onclick = sendTx;
+  $('tx-refresh').onclick = loadTx;
+  $('tx-clear-state').onclick = async () => {
+    try {
+      await api('/api/submit', { text: '/tx --clear-state' });
+      await loadTx();
+    } catch (e) {
+      pushEntry({ type: 'error', message: e.message });
+    }
+  };
+  $('tx-input').addEventListener('keydown', (e) => {
+    recordLocalTyping();
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendTx();
+      return;
+    }
+    const ta = $('tx-input');
+    if (e.key === 'ArrowUp' && (ta.selectionStart === 0 || txRepl.histIdx >= 0)) {
+      if (txRepl.histIdx === -1) txRepl.draft = ta.value;
+      if (txRepl.histIdx + 1 < txRepl.history.length) {
+        e.preventDefault();
+        txRepl.histIdx++;
+        ta.value = txRepl.history[txRepl.histIdx];
+      }
+      return;
+    }
+    if (e.key === 'ArrowDown' && txRepl.histIdx >= 0) {
+      e.preventDefault();
+      txRepl.histIdx--;
+      ta.value = txRepl.histIdx === -1 ? txRepl.draft : txRepl.history[txRepl.histIdx];
+    }
+  });
 
   for (const id of ['m-search', 'm-vision', 'm-reason', 'm-sort']) {
     $(id).addEventListener('input', renderModels);
