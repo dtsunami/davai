@@ -253,14 +253,62 @@ function fill(template, placeholder, value) {
   return template.replaceAll(placeholder, () => value);
 }
 
+const PAYLOAD_TAG_OPEN = ['--davai', ':1--'].join('');
+const PAYLOAD_TAG_CLOSE = ['--davai', ':end--'].join('');
+
+/**
+ * Optional protocol addendum injected ONLY when `DAVAI_CODE_MODE=true`. Kept separate
+ * from `PROTOCOL` so the default baseline prompt and `.davai-prompts.json` fork hashes
+ * stay completely untouched when Code Mode is off.
+ */
+export const CODE_MODE_PROTOCOL = [
+  '## Code Mode (`tx` op — enabled)',
+  '',
+  'For bulk exploration, multi-file queries, or cross-file refactors where static ops would',
+  'dump large intermediate reads into context or repeat the same edit across many files, you',
+  'also have the `tx` op:',
+  '',
+  '```da_ops',
+  '{"ops": [',
+  '  {"op": "tx", "description": "rename helper across callers", "code": "@1"}',
+  ']}',
+  PAYLOAD_TAG_OPEN,
+  'const hits = fileset("src/**/*.js").containing("oldHelper");',
+  'const res = hits.replaceAll("oldHelper", "newHelper");',
+  'return { updated: hits.paths(), ...res };',
+  PAYLOAD_TAG_CLOSE,
+  '```',
+  '',
+  '`code` runs synchronously in a sealed Copy-on-Write JavaScript sandbox (no `await`,',
+  '`require`, `import`, `process`, or network). Disk is untouched until the script',
+  'returns cleanly; any thrown error or uniqueness failure aborts the `tx` cleanly with',
+  'zero changes written, and committed edits participate in batch rollback without needing',
+  '`shell` approval.',
+  '',
+  'Globals in `tx`:',
+  '- `read(path, [min, max]?)`, `exists(path)`, `list(path?)`, `glob(pattern, root?)`',
+  '- `grep(pattern, { path?, regex?, out?: "lines"|"files"|"count", max? })`',
+  '- `write(path, text, { overwrite?: boolean })`, `remove(path)`, `move(from, to, { overwrite? })`',
+  '- `replace(path, oldOrRegExpOrEdits, newText?, { all?, regex? })` — enforces uniqueness unless `all: true` or `/g`',
+  '- `fileset(globOrPaths, root?)` -> `.containing(strOrRe)`, `.filter((path, text) => ...)`, `.map(...)`, `.readAll()`, `.replace(...)`, `.replaceAll(...)`, `.paths()`',
+  '- `state` (object persisted across turns in memory), `preview(val, maxChars?)`, `log(...args)`',
+  '',
+  'Return a compact summary object/string from `tx` rather than raw file contents so the',
+  'context window stays lean. For simple 1–3 file reads or edits, prefer ordinary `read` /',
+  '`replace` ops.',
+].join('\n');
+
 /**
  * Assemble the full system prompt. Order is deliberate: the stable parts come first
  * so the cache prefix stays intact, with per-project grounding last.
  *
- * @param {{grounding: string, prompts?: Record<string, string>}} opts
+ * @param {{grounding: string, prompts?: Record<string, string>, codeMode?: boolean}} opts
  */
-export function buildSystemPrompt({ grounding, prompts = DEFAULT_PROMPTS }) {
-  return [prompts.preamble, '', prompts.protocol, '', grounding].join('\n');
+export function buildSystemPrompt({ grounding, prompts = DEFAULT_PROMPTS, codeMode = false }) {
+  const parts = [prompts.preamble, '', prompts.protocol];
+  if (codeMode) parts.push('', CODE_MODE_PROTOCOL);
+  parts.push('', grounding);
+  return parts.join('\n');
 }
 
 /** Wrap a rendered da_results block in the ops-result prompt. */

@@ -323,7 +323,8 @@ function synthesizeInterruptedOps(ops) {
     'Batch interrupted — the previous session ended while these ops were running, so no ops-result was recorded:',
   ];
   ops.forEach((o, i) => {
-    const detail = o.path || o.cmd || (o.from ? `${o.from} -> ${o.to}` : '');
+    const detail =
+      o.path || o.cmd || o.description || (o.from ? `${o.from} -> ${o.to}` : '');
     lines.push(`  [${i}] ${o.op}${detail ? `: ${detail}` : ''}`);
   });
   lines.push(

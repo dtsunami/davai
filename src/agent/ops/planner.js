@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import { OPS } from './schema.js';
 import { simulateReplace } from './writers.js';
+import { evaluateTx, TOMBSTONE } from './tx.js';
 
 /**
  * @param {object[]} ops  normalized ops
@@ -191,6 +192,37 @@ export function planBatch(ops, ctx) {
           overlay.delete(from);
           pending.set(from, 'moved-away');
           pending.set(to, 'written');
+          return;
+        }
+
+        case 'tx': {
+          if (!ctx.codeMode) {
+            return fail(
+              i,
+              op,
+              'op "tx" requires Code Mode (set DAVAI_CODE_MODE=true or launch with --code-mode) — use declarative da_ops instead',
+            );
+          }
+          const { staged } = evaluateTx(op, {
+            sandbox: ctx.sandbox,
+            txState: ctx.txState,
+            txTimeoutMs: ctx.txTimeoutMs,
+            initialOverlay: overlay,
+            initialPending: pending,
+            dryRun: true,
+          });
+          // Propagate the tx's staged mutations into the planner's virtual overlay so
+          // any subsequent op in the same batch validates against the post-tx tree.
+          for (const [abs, meta] of staged.mutations.entries()) {
+            if (meta.action === 'deleted') {
+              pending.set(abs, 'deleted');
+              overlay.delete(abs);
+            } else {
+              const v = staged.files.get(abs);
+              pending.set(abs, 'written');
+              overlay.set(abs, typeof v === 'string' && v !== TOMBSTONE ? v : null);
+            }
+          }
           return;
         }
 

@@ -38,14 +38,13 @@ const CONFLICT = /^(?:<{7}|>{7})(?:[ \t]|$)/m;
  *   damage to a file that was previously clean. Skip the check in that case.
  * @returns {string|null} a reason if the result is corrupt, else null
  */
-export function verifyWritten(abs, { created = false } = {}) {
-  let content;
-  try {
-    content = fs.readFileSync(abs);
-  } catch {
-    return null; // unreadable tells this check nothing; the op's own error handling owns it
-  }
-
+/**
+ * Pure buffer check shared by `verifyWritten` (post-flush) and `StagedFS` (pre-flush CoW).
+ * @param {Buffer} content
+ * @param {{created?: boolean}} [opts]
+ * @returns {string|null}
+ */
+export function verifyBuffer(content, { created = false } = {}) {
   if (content.includes(0)) {
     return 'the result contains NUL bytes, so it is no longer a text file';
   }
@@ -56,4 +55,15 @@ export function verifyWritten(abs, { created = false } = {}) {
   }
 
   return null;
+}
+
+export function verifyWritten(abs, { created = false } = {}) {
+  let content;
+  try {
+    content = fs.readFileSync(abs);
+  } catch {
+    return null; // unreadable tells this check nothing; the op's own error handling owns it
+  }
+
+  return verifyBuffer(content, { created });
 }

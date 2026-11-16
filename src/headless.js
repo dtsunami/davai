@@ -213,6 +213,8 @@ function describeOp(op) {
   switch (op.op) {
     case 'shell':
       return `shell: ${op.cmd}`;
+    case 'tx':
+      return `tx: ${op.description || `${(op.code || '').split('\n').length} line(s) JS`}`;
     case 'move':
       return `move: ${op.from} -> ${op.to}`;
     case 'grep':

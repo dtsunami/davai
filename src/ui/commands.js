@@ -1062,6 +1062,7 @@ export async function handleCommand(text, deps) {
         `  effort         ${cfg.effort}`,
         `  compact at     ${Math.round(cfg.compactAt * 100)}%`,
         `  shell timeout  ${cfg.shellTimeout / 1000}s`,
+        `  code mode      ${cfg.codeMode ? 'on — tx sandbox enabled' : 'off'}${origin(cfg, 'DAVAI_CODE_MODE')}`,
         `  yolo           ${cfg.yolo ? 'on — shell auto-approved' : 'off'}`,
         `  prompts        ${describePrompts(cfg)}`,
         `  DAVAI_HOME     ${cfg.home}`,

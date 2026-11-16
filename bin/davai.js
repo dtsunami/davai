@@ -23,6 +23,7 @@ OPTIONS
       --json             one-shot, emit newline-delimited JSON events
   -y, --yes              auto-approve shell commands (headless only)
       --yolo             auto-approve shell commands in the REPL too (/yolo toggles)
+      --code-mode        enable the transactional JS DSL op (tx; also DAVAI_CODE_MODE=true)
   -m, --model <id>       override the model for this run
       --provider <name>  anthropic | openai | gemini | grok | openrouter
       --effort <level>   low | medium | high | xhigh | max
@@ -87,6 +88,9 @@ export function parseArgs(argv) {
         // thing to remember when the request is piped in.
         out.overrides.DAVAI_YOLO = 'true';
         out.yes = true;
+        break;
+      case '--code-mode':
+        out.overrides.DAVAI_CODE_MODE = 'true';
         break;
       case '-m':
       case '--model':

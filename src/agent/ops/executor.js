@@ -10,6 +10,7 @@
 import { planBatch } from './planner.js';
 import { opRead, opList, opGrep, opGlob } from './readers.js';
 import { opWrite, opReplace, opDelete, opMove } from './writers.js';
+import { opTx } from './tx.js';
 import { runShell } from './shell.js';
 import { verifyWritten } from './verify.js';
 
@@ -55,6 +56,10 @@ export async function executeBatch(ops, ctx) {
     try {
       if (READERS[op.op]) {
         results.push({ index: i, op: op.op, ok: true, result: READERS[op.op](op, ctx) });
+      } else if (op.op === 'tx') {
+        const { entries, result } = opTx(op, ctx);
+        applied.push(...entries);
+        results.push({ index: i, op: 'tx', ok: true, result });
       } else {
         const { entry, result } = WRITERS[op.op](op, ctx);
         applied.push(entry);
@@ -353,6 +358,18 @@ function summarize(op, r) {
       return `${r.path} ${r.action} (${r.type})`;
     case 'move':
       return `${r.from} -> ${r.to} ${r.action}${r.note ? ` (${r.note})` : ''}`;
+    case 'tx': {
+      const head =
+        `${r.changes.length} file(s) changed (${r.opsCount} fs ops)` +
+        (r.note ? ` [${r.note}]` : '');
+      const lines = [head];
+      for (const c of r.changes) {
+        lines.push(`  ${c.path} ${c.action} (${c.delta >= 0 ? '+' : ''}${c.delta} lines)`);
+      }
+      if (r.logs?.length) lines.push(`logs:\n${r.logs.join('\n')}`);
+      if (r.output !== undefined) lines.push(`return:\n${r.output}`);
+      return lines.join('\n');
+    }
     case 'shell': {
       const body = [r.stdout, r.stderr && `stderr:\n${r.stderr}`].filter(Boolean).join('\n');
       return (

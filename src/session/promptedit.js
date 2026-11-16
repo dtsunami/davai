@@ -148,7 +148,13 @@ export function applyPrompts(session) {
     // the same prefix, and resolving one without the other would be arbitrary.
     const ground = buildGrounding({ sandbox, cfg });
     session.agents = ground.agents;
-    ledger.setSystem(buildSystemPrompt({ grounding: ground.text, prompts: resolved.values }));
+    ledger.setSystem(
+      buildSystemPrompt({
+        grounding: ground.text,
+        prompts: resolved.values,
+        codeMode: Boolean(cfg.codeMode),
+      }),
+    );
   }
   session.pendingPrompts = null;
   return { applied: true, before, after: ledger?.systemTokens ?? 0 };

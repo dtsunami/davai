@@ -104,7 +104,9 @@ export async function createSession(opts = {}) {
     cfg.warnings.push(...ground.notices);
     log.event('agents-notices', { notices: ground.notices });
   }
-  ledger.setSystem(buildSystemPrompt({ grounding, prompts: cfg.prompts }));
+  ledger.setSystem(
+    buildSystemPrompt({ grounding, prompts: cfg.prompts, codeMode: Boolean(cfg.codeMode) }),
+  );
 
   // After setSystem, so the replay budget accounts for the cached prefix. Pass the new
   // session's sandbox and model capabilities so file-backed image/video attachments can

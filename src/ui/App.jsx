@@ -719,12 +719,14 @@ function HistoryItem({ item }) {
   }
 }
 
-const MUTATING = new Set(['write', 'replace', 'delete', 'move', 'shell']);
+const MUTATING = new Set(['write', 'replace', 'delete', 'move', 'tx', 'shell']);
 
 function describeOp(op) {
   switch (op.op) {
     case 'shell':
       return `shell: ${op.cmd}`;
+    case 'tx':
+      return `tx: ${op.description || `${(op.code || '').split('\n').length} line(s) JS`}`;
     case 'move':
       return `move: ${op.from} ${glyphs.arrow} ${op.to}`;
     case 'grep':
@@ -748,6 +750,10 @@ function summarizeResult(r) {
       return `${x.path} deleted`;
     case 'move':
       return `${x.from} ${glyphs.arrow} ${x.to}`;
+    case 'tx':
+      return x.changes?.length
+        ? `tx: ${x.changes.length} file(s) modified (${x.opsCount} fs ops)`
+        : `tx: ${x.opsCount} fs ops (read-only)`;
     case 'shell':
       return `$ ${x.cmd} (exit ${x.exitCode}, ${x.durationMs}ms)`;
     default:

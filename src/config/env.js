@@ -479,6 +479,9 @@ export function loadConfig(opts = {}) {
     promptSources,
     promptLayers,
     promptDirs: promptLocations,
+    // Opt-in transactional JS DSL (`tx` op). Off by default so the battle-tested
+    // declarative `da_ops` baseline is unchanged unless explicitly enabled.
+    codeMode: bool(merged.DAVAI_CODE_MODE, false),
     // Auto-approve shell ops. Deliberately not a persisted setting (see settings.js):
     // it lives for one run, or for one `/yolo` toggle, and never outlives the session.
     yolo: bool(merged.DAVAI_YOLO, false),

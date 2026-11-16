@@ -14,6 +14,7 @@
  */
 import { loadConfig, applyModelLimits } from '../config/env.js';
 import { refineModel } from '../config/models.js';
+import { buildSystemPrompt } from '../agent/prompt.js';
 import { createProvider, maskKey } from '../providers/index.js';
 import { envFilePath, editEnvFile, readEnvText } from '../config/envfile.js';
 import {
@@ -101,7 +102,18 @@ async function reload(session) {
     await refineModel(cfg.model, { apiKey: cfg.keys[cfg.provider], baseURL: cfg.baseURL });
   }
   const notices = applyModelLimits(cfg);
-  if (ledger) ledger.limit = cfg.contextLimit;
+  if (ledger) {
+    ledger.limit = cfg.contextLimit;
+    if (session.grounding) {
+      ledger.setSystem(
+        buildSystemPrompt({
+          grounding: session.grounding,
+          prompts: cfg.prompts,
+          codeMode: Boolean(cfg.codeMode),
+        }),
+      );
+    }
+  }
   session.agent.provider = createProvider(cfg);
   return notices;
 }

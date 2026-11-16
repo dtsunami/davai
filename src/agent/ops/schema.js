@@ -18,6 +18,7 @@ export const OPS = {
   },
   delete: { mutating: true, required: ['path'], optional: ['recursive'] },
   move: { mutating: true, required: ['from', 'to'], optional: ['overwrite'] },
+  tx: { mutating: true, required: ['code'], optional: ['description'], codeModeOnly: true },
   shell: { mutating: true, required: ['cmd'], optional: ['cwd'], needsApproval: true },
 };
 
@@ -65,7 +66,8 @@ export function normalizeOp(raw, index) {
     op = key;
     rest = { ...raw };
     delete rest[key];
-    const primary = op === 'move' ? 'from' : op === 'shell' ? 'cmd' : 'path';
+    const primary =
+      op === 'move' ? 'from' : op === 'shell' ? 'cmd' : op === 'tx' ? 'code' : 'path';
     rest[primary] = raw[key];
   }
 
@@ -107,9 +109,22 @@ function validateTypes(o, index) {
     throw new OpError(index, `op "${o.op}": ${msg}`);
   };
 
-  for (const f of ['path', 'from', 'to', 'cmd', 'pattern', 'text', 'old', 'new', 'cwd']) {
+  for (const f of [
+    'path',
+    'from',
+    'to',
+    'cmd',
+    'pattern',
+    'text',
+    'old',
+    'new',
+    'cwd',
+    'code',
+    'description',
+  ]) {
     if (o[f] !== undefined && !str(o[f])) bad(`"${f}" must be a string`);
   }
+  if (o.op === 'tx' && !o.code.trim()) bad('"code" must not be empty');
   for (const f of ['overwrite', 'all', 'regex', 'recursive']) {
     if (o[f] !== undefined && typeof o[f] !== 'boolean') bad(`"${f}" must be a boolean`);
   }

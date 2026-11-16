@@ -128,6 +128,8 @@ export class Agent extends EventEmitter {
      * @type {{period: number, repeats: number, unit: string, channel: string, turn: number}|null}
      */
     this.degenerate = null;
+    /** Persistent in-memory scratchpad shared across `tx` ops within this session. */
+    this.txState = {};
     /** How many of each event was emitted, and how many went nowhere. */
     this.eventCounts = {};
     this.unretiredEvents = {};
@@ -959,12 +961,16 @@ export class Agent extends EventEmitter {
     }
 
     this.emit('ops-parsed', ops);
-    this.log.event('ops', { ops: ops.map((o) => ({ ...o, text: undefined, new: undefined })) });
+    this.log.event('ops', {
+      ops: ops.map((o) => ({ ...o, text: undefined, new: undefined, code: undefined, edits: undefined })),
+    });
 
     const outcome = await executeBatch(ops, {
       sandbox: this.sandbox,
       journal: this.journal,
       shellTimeout: this.cfg.shellTimeout,
+      codeMode: Boolean(this.cfg?.codeMode),
+      txState: this.txState,
       signal: this.controller.signal,
       approve: (op, index, extra) => this.#requestApproval(op, index, extra),
       sudo: this.sudo,

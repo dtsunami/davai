@@ -404,11 +404,12 @@ function renderEntry(e) {
   }
 }
 
-const MUTATING = new Set(['write', 'replace', 'delete', 'move', 'shell']);
+const MUTATING = new Set(['write', 'replace', 'delete', 'move', 'tx', 'shell']);
 
 function opLabel(op) {
   switch (op.op) {
     case 'shell': return `shell: ${op.cmd}`;
+    case 'tx': return `tx: ${op.description || `${(op.code || '').split('\n').length} line(s) JS`}`;
     case 'move': return `move: ${op.from} → ${op.to}`;
     case 'grep':
     case 'glob': return `${op.op}: "${op.pattern}" in ${op.path}`;
@@ -424,6 +425,7 @@ function summarize(r) {
     case 'replace': return `${x.path} edited (${x.delta >= 0 ? '+' : ''}${x.delta} lines)`;
     case 'delete': return `${x.path} deleted`;
     case 'move': return `${x.from} → ${x.to}`;
+    case 'tx': return x.changes?.length ? `tx: ${x.changes.length} file(s) modified (${x.opsCount} fs ops)` : `tx: ${x.opsCount || 0} fs ops (read-only)`;
     case 'shell': return `$ ${x.cmd} (exit ${x.exitCode}, ${x.durationMs}ms)`;
     default: return `${r.op} ${x.path || 'ok'}`;
   }

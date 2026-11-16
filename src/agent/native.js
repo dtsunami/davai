@@ -33,6 +33,7 @@ const OP_NAMES = new Set([
   'replace',
   'delete',
   'move',
+  'tx',
   'shell',
 ]);
 const PAYLOAD_OPEN = /^--davai:([A-Za-z0-9_-]+)--[ \t]*$/;
