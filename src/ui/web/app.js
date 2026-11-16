@@ -2260,6 +2260,31 @@ function bind() {
     updateComplete();
   });
 
+  input.addEventListener('paste', async (e) => {
+    const raw = e.clipboardData?.getData('text/plain') || '';
+    if (!raw || !/[\r\n]/.test(raw) || raw.replace(/\r\n?/g, '\n').replace(/\n+$/, '').split('\n').length <= 1) {
+      return;
+    }
+    e.preventDefault();
+    recordLocalTyping();
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? input.value.length;
+    try {
+      const r = await api('/api/paste', { text: raw });
+      const insert = r?.captured?.placeholder ?? raw.replace(/\r\n?/g, '\n');
+      input.value = input.value.slice(0, start) + insert + input.value.slice(end);
+      const nextPos = start + insert.length;
+      input.setSelectionRange(nextPos, nextPos);
+    } catch {
+      const fallback = raw.replace(/\r\n?/g, '\n');
+      input.value = input.value.slice(0, start) + fallback + input.value.slice(end);
+      const nextPos = start + fallback.length;
+      input.setSelectionRange(nextPos, nextPos);
+    }
+    resize(input);
+    updateComplete();
+  });
+
   input.addEventListener('keydown', (e) => {
     recordLocalTyping();
     if (completeItems.length) {

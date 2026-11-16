@@ -314,6 +314,7 @@ export async function handleCommand(text, deps) {
           makeProvider: agent.makeProvider,
           onEvent: (e) => push({ type: 'warning', message: e.message }),
         });
+        if (result.actions.length) log?.event?.('compact', result);
         push({ type: 'compact', ...result });
         refresh();
       } catch (err) {
@@ -425,6 +426,8 @@ export async function handleCommand(text, deps) {
     case 'clear': {
       const before = ledger.tokens;
       ledger.segments = ledger.segments.filter((s) => s.type === 'grounding');
+      if (session.pendingAttachments) session.pendingAttachments.length = 0;
+      log?.event?.('context-clear', {});
       push({
         type: 'notice',
         message: `context cleared (${formatTokens(before - ledger.tokens)} tokens freed); grounding kept`,
@@ -439,10 +442,8 @@ export async function handleCommand(text, deps) {
         return { handled: true };
       }
       try {
-        const img =
-          !arg || arg === 'clipboard'
-            ? clipboardImage(os.tmpdir())
-            : loadImage(arg, sandbox);
+        const fromClipboard = !arg || arg === 'clipboard';
+        const img = fromClipboard ? clipboardImage(os.tmpdir()) : loadImage(arg, sandbox);
         if (!img) {
           push({
             type: 'warning',
@@ -453,13 +454,33 @@ export async function handleCommand(text, deps) {
           });
           return { handled: true };
         }
-        ledger.add({
+        const spec = {
           type: 'paste',
           label: `image ${img.name} (${Math.round(img.bytes / 1024)}kB)`,
           role: 'user',
           image: img,
-        });
-        push({ type: 'notice', message: `attached ${img.name} (~${img.tokens} tokens)` });
+          ...(!fromClipboard ? { _sourcePath: img.name } : {}),
+        };
+        if (agent?.busy) {
+          (session.pendingAttachments ||= []).push(spec);
+          push({
+            type: 'notice',
+            message: `queued ${img.name} (~${img.tokens} tokens) — attaches with your next steer or prompt`,
+          });
+        } else {
+          const { _sourcePath, ...clean } = spec;
+          ledger.add(clean);
+          log?.event?.('attachment', {
+            kind: 'image',
+            label: clean.label,
+            name: img.name,
+            ...(_sourcePath ? { path: _sourcePath } : {}),
+            mediaType: img.mediaType,
+            bytes: img.bytes,
+            tokens: img.tokens,
+          });
+          push({ type: 'notice', message: `attached ${img.name} (~${img.tokens} tokens)` });
+        }
         refresh();
       } catch (err) {
         push({ type: 'error', message: err.message });
@@ -485,16 +506,36 @@ export async function handleCommand(text, deps) {
       }
       try {
         const vid = loadVideo(arg, sandbox);
-        ledger.add({
+        const spec = {
           type: 'paste',
           label: `video ${vid.name} (${(vid.bytes / 1024 / 1024).toFixed(1)}MB)`,
           role: 'user',
           video: vid,
-        });
-        push({
-          type: 'notice',
-          message: `attached ${vid.name} (~${vid.tokens} tokens, estimated from file size)`,
-        });
+          _sourcePath: vid.name,
+        };
+        if (agent?.busy) {
+          (session.pendingAttachments ||= []).push(spec);
+          push({
+            type: 'notice',
+            message: `queued ${vid.name} (~${vid.tokens} tokens) — attaches with your next steer or prompt`,
+          });
+        } else {
+          const { _sourcePath, ...clean } = spec;
+          ledger.add(clean);
+          log?.event?.('attachment', {
+            kind: 'video',
+            label: clean.label,
+            name: vid.name,
+            path: _sourcePath,
+            mediaType: vid.mediaType,
+            bytes: vid.bytes,
+            tokens: vid.tokens,
+          });
+          push({
+            type: 'notice',
+            message: `attached ${vid.name} (~${vid.tokens} tokens, estimated from file size)`,
+          });
+        }
         refresh();
       } catch (err) {
         push({ type: 'error', message: err.message });
@@ -527,18 +568,37 @@ export async function handleCommand(text, deps) {
         return { handled: true };
       }
       const yt = youtubeRef(url, { minutes: Number(mins) });
-      ledger.add({
+      const spec = {
         type: 'paste',
         label: `youtube ${yt.uri}`,
         role: 'user',
         video: yt,
-      });
-      push({
-        type: 'notice',
-        message: yt.assumed
-          ? `attached ${yt.uri} (~${yt.tokens} tokens, assuming ${yt.minutes} minutes)`
-          : `attached ${yt.uri} (~${yt.tokens} tokens for ${yt.minutes} minutes)`,
-      });
+      };
+      if (agent?.busy) {
+        (session.pendingAttachments ||= []).push(spec);
+        push({
+          type: 'notice',
+          message: yt.assumed
+            ? `queued ${yt.uri} (~${yt.tokens} tokens, assuming ${yt.minutes} minutes) — attaches with your next steer or prompt`
+            : `queued ${yt.uri} (~${yt.tokens} tokens for ${yt.minutes} minutes) — attaches with your next steer or prompt`,
+        });
+      } else {
+        ledger.add(spec);
+        log?.event?.('attachment', {
+          kind: 'youtube',
+          label: spec.label,
+          uri: yt.uri,
+          minutes: yt.minutes,
+          assumed: yt.assumed,
+          tokens: yt.tokens,
+        });
+        push({
+          type: 'notice',
+          message: yt.assumed
+            ? `attached ${yt.uri} (~${yt.tokens} tokens, assuming ${yt.minutes} minutes)`
+            : `attached ${yt.uri} (~${yt.tokens} tokens for ${yt.minutes} minutes)`,
+        });
+      }
       refresh();
       return { handled: true };
     }

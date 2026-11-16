@@ -25,8 +25,52 @@ import { extractVideoRefs, loadVideo, youtubeRef } from '../context/video.js';
  *   - `isBusy()`         whether a turn is in flight
  * @returns {(raw: string) => Promise<void>}
  */
+/**
+ * Record an attachment segment in the session transcript so `--resume` can restore text
+ * pastes, YouTube references, and lightweight file references without bloating
+ * `transcript.jsonl` with megabytes of raw base64 media.
+ */
+export function logAttachment(log, seg, meta = {}) {
+  if (!log?.event) return;
+  if (seg.image) {
+    log.event('attachment', {
+      kind: 'image',
+      label: seg.label,
+      name: seg.image.name,
+      ...(meta.path ? { path: meta.path } : {}),
+      mediaType: seg.image.mediaType,
+      bytes: seg.image.bytes,
+      tokens: seg.image.tokens,
+    });
+    return;
+  }
+  if (seg.video) {
+    if (seg.video.uri) {
+      log.event('attachment', {
+        kind: 'youtube',
+        label: seg.label,
+        uri: seg.video.uri,
+        minutes: seg.video.minutes,
+        assumed: seg.video.assumed,
+        tokens: seg.video.tokens,
+      });
+    } else {
+      log.event('attachment', {
+        kind: 'video',
+        label: seg.label,
+        name: seg.video.name,
+        ...(meta.path ? { path: meta.path } : {}),
+        mediaType: seg.video.mediaType,
+        bytes: seg.video.bytes,
+        tokens: seg.video.tokens,
+      });
+    }
+    return;
+  }
+  log.event('paste', { label: seg.label, text: seg.text });
+}
+
 export function createDispatcher({ session, view }) {
-  const { agent, cfg, ledger, pastes } = session;
   const {
     push,
     setPane = () => {},
@@ -45,7 +89,13 @@ export function createDispatcher({ session, view }) {
    * it was meant to correct.
    */
   function collectAttachments(prompt) {
+    const { cfg, pastes } = session;
     const segments = [];
+
+    // Drain any media queued via `/image`, `/video`, or `/youtube` while a run was busy.
+    if (session.pendingAttachments?.length) {
+      segments.push(...session.pendingAttachments.splice(0, session.pendingAttachments.length));
+    }
 
     const { text: expanded, referenced } = pastes.expand(prompt);
     for (const p of referenced) {
@@ -74,6 +124,7 @@ export function createDispatcher({ session, view }) {
           label: `image ${img.name} (${Math.round(img.bytes / 1024)}kB)`,
           role: 'user',
           image: img,
+          _sourcePath: img.name,
         });
         push({ type: 'notice', message: `attached ${img.name} (~${img.tokens} tokens)` });
       } catch (err) {
@@ -129,6 +180,7 @@ export function createDispatcher({ session, view }) {
           label: `video ${vid.name} (${(vid.bytes / 1024 / 1024).toFixed(1)}MB)`,
           role: 'user',
           video: vid,
+          _sourcePath: vid.name,
         });
         push({
           type: 'notice',
@@ -142,24 +194,38 @@ export function createDispatcher({ session, view }) {
     return { text: withoutMedia, segments };
   }
 
+  function commitSegments(segments) {
+    for (const seg of segments) {
+      const { _sourcePath, ...spec } = seg;
+      session.ledger.add(spec);
+      logAttachment(session.log, spec, { path: _sourcePath });
+    }
+  }
+
   return async function submit(raw) {
+    const { agent } = session;
     const text = String(raw ?? '').trim();
     if (!text) return;
+
+    // Check `agent.busy` directly alongside the view's `isBusy()` so a message submitted
+    // before React commits `turn-start` (or from a view whose busy state briefly lags)
+    // still routes through `agent.steer` rather than calling `agent.run` while busy.
+    const busyNow = Boolean(agent?.busy) || isBusy();
 
     // Typed while a run is in flight: steer it rather than queueing a second request.
     // Commands still run immediately — /context while it works is the point of them —
     // and sh <cmd> is never intercepted as a steer unless the operator meant prose.
-    if (isBusy() && !text.startsWith('/') && text !== 'sh' && !text.startsWith('sh ')) {
+    if (busyNow && !text.startsWith('/') && text !== 'sh' && !text.startsWith('sh ')) {
       const { text: cleaned, segments } = collectAttachments(text);
       if (agent.steer(cleaned, segments)) {
         session.history?.add(text);
         push({ type: 'user', text: cleaned });
         return;
       }
-      // The run finished between isBusy() and agent.steer() — fall through with the
+      // The run finished between busyNow and agent.steer() — fall through with the
       // already-expanded text and segments so pastes are not expanded twice.
       session.history?.add(text);
-      for (const seg of segments) ledger.add(seg);
+      commitSegments(segments);
       push({ type: 'user', text: cleaned });
       onRunStart();
       await agent.run(cleaned);
@@ -181,7 +247,7 @@ export function createDispatcher({ session, view }) {
     session.history?.add(prompt);
 
     const { text: withoutMedia, segments } = collectAttachments(prompt);
-    for (const seg of segments) ledger.add(seg);
+    commitSegments(segments);
 
     push({ type: 'user', text: withoutMedia });
     onRunStart();

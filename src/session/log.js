@@ -84,8 +84,19 @@ export class SessionLog {
 
   #writeMeta() {
     fs.writeFileSync(
-      path.join(this.dir, 'meta.json'),
-      JSON.stringify(redact({ ...this.meta, totals: this.totals }), null, 2) + '\n',
+      path.join(
+        this.dir,
+        'meta.json',
+      ),
+      JSON.stringify(
+        redact({
+          ...this.meta,
+          totals: this.totals,
+          ...(this.calibrator ? { calibrator: this.calibrator } : {}),
+        }),
+        null,
+        2,
+      ) + '\n',
     );
   }
 
@@ -97,6 +108,17 @@ export class SessionLog {
     } catch {
       /* logging must never take down the REPL */
     }
+  }
+
+  /**
+   * Persist the live `TokenCalibrator` snapshot alongside turn usage in `meta.json`, so
+   * `--resume` starts with calibrated token estimates immediately on turn 0 rather than
+   * under-reporting context usage until the first API round-trip reconciles it.
+   * @param {{ratio: number, samples: number}|null} snap
+   */
+  setCalibrator(snap) {
+    if (!snap) return;
+    this.calibrator = snap;
   }
 
   addUsage(usage, cost, estimated = false) {

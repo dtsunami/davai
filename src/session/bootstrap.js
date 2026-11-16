@@ -2,7 +2,13 @@
  * Wire up one davai session. Shared by the TUI and headless mode so both run
  * identical machinery.
  */
-import { loadConfig, requireKey, ensureHome, applyModelLimits } from '../config/env.js';
+import {
+  loadConfig,
+  requireKey,
+  ensureHome,
+  applyModelLimits,
+  assertValidProviderConfig,
+} from '../config/env.js';
 import { loadSettings, settingsToDefaults } from '../config/settings.js';
 import { createProvider } from '../providers/index.js';
 import { refineModel } from '../config/models.js';
@@ -67,6 +73,7 @@ export async function createSession(opts = {}) {
   // feature looks like it. Say so, do not block.
   if (forks.unstamped.length) cfg.warnings.push(...describeUnstamped(forks.unstamped));
 
+  assertValidProviderConfig(cfg);
   const apiKey = requireKey(cfg);
   ensureHome(cfg);
   pruneSessions(cfg.home, prior ? { except: prior.dir } : {});
@@ -99,9 +106,21 @@ export async function createSession(opts = {}) {
   }
   ledger.setSystem(buildSystemPrompt({ grounding, prompts: cfg.prompts }));
 
-  // After setSystem, so the replay budget accounts for the cached prefix.
-  const resumed = prior ? restoreLedger(ledger, prior) : null;
-  if (resumed) log.event('resume', resumed);
+  // After setSystem, so the replay budget accounts for the cached prefix. Pass the new
+  // session's sandbox and model capabilities so file-backed image/video attachments can
+  // be reloaded if still readable, and restore persisted TokenCalibrator state so turn-0
+  // context accounting matches the prior session immediately.
+  const resumed = prior
+    ? restoreLedger(ledger, prior, {
+        sandbox,
+        model: cfg.model,
+        prompts: cfg.prompts,
+      })
+    : null;
+  if (resumed) {
+    if (ledger.calibrator?.samples) log.setCalibrator(ledger.calibrator.snapshot());
+    log.event('resume', resumed);
+  }
 
   const provider = createProvider(cfg);
   const makeProvider = (model, extra = {}) => createProvider(cfg, { model, ...extra });

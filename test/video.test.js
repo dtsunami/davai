@@ -87,6 +87,13 @@ describe('extractVideoRefs', () => {
     expect(text).toBe('summarize [video: clip.mp4] please');
   });
 
+  it('strips trailing sentence punctuation and supports quoted paths with spaces', () => {
+    write('my clip.mp4', 32);
+    const r1 = extractVideoRefs('watch @clip.mp4, then @"my clip.mp4".', sandbox);
+    expect(r1.videos).toEqual(['clip.mp4', 'my clip.mp4']);
+    expect(r1.text).toBe('watch [video: clip.mp4], then [video: my clip.mp4].');
+  });
+
   it('leaves an unreadable ref as written, for the model to see', () => {
     const { text, videos } = extractVideoRefs('watch @missing.mp4', sandbox);
     expect(videos).toEqual([]);

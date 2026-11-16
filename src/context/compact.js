@@ -66,6 +66,8 @@ export async function compact(ledger, { cfg, makeProvider, onEvent }) {
     }
   }
 
+  let summaryRecord = null;
+
   // --- 3. summarize the oldest conversation turns ---
   if (ledger.tokens > target) {
     const old = ledger.segments.filter(
@@ -91,9 +93,10 @@ export async function compact(ledger, { cfg, makeProvider, onEvent }) {
       const text = summary
         ? `[earlier conversation, summarized]\n${summary}`
         : `[${freedIds.length} earlier turns dropped by auto-compact; see the session log]`;
+      const label = `summary of ${freedIds.length} earlier turns`;
       const seg = ledger.add({
         type: 'summary',
-        label: `summary of ${freedIds.length} earlier turns`,
+        label,
         role: 'user',
         text,
         pinned: true,
@@ -103,12 +106,13 @@ export async function compact(ledger, { cfg, makeProvider, onEvent }) {
       if (anchor >= 0 && at >= 0) {
         ledger.segments.splice(anchor, 0, ledger.segments.splice(at, 1)[0]);
       }
+      summaryRecord = { label, text, replacedCount: freedIds.length };
       actions.push(`summarized ${freedIds.length} turns into #${seg.id}`);
     }
   }
 
   const freed = before - ledger.tokens;
-  return { freed, actions };
+  return { freed, actions, ...(summaryRecord ? { summary: summaryRecord } : {}) };
 }
 
 /** Segments belonging to the last KEEP_RECENT_TURNS operator exchanges. */

@@ -145,6 +145,7 @@ export function createWebServer({
     if (req.method === 'POST' && url.pathname === '/api/artifact/save') {
       return postArtifactSave(req, res);
     }
+    if (req.method === 'POST' && url.pathname === '/api/paste') return postPaste(req, res);
     if (req.method === 'POST' && url.pathname === '/api/submit') return postSubmit(req, res);
     if (req.method === 'POST' && url.pathname === '/api/approve') return postApprove(req, res);
     if (req.method === 'POST' && url.pathname === '/api/cancel') {
@@ -479,6 +480,7 @@ export function createWebServer({
             }
           },
         });
+        session.log?.event?.('compact', r);
         for (const a of r.actions) contextChanged(a);
         json(res, { ok: true, freed: r.freed, actions: r.actions });
       } catch (e) {
@@ -753,6 +755,15 @@ export function createWebServer({
         // A path outside the write jail lands here: the operator's mistake, not a crash.
         json(res, { error: e.message }, 400);
       }
+    });
+  }
+
+  function postPaste(req, res) {
+    body(req, (err, data) => {
+      if (err) return json(res, { error: err.message }, 400);
+      const text = String(data?.text ?? '');
+      const captured = session.pastes?.capture?.(text) || null;
+      json(res, { ok: true, captured });
     });
   }
 

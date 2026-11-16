@@ -5,15 +5,40 @@
 import { GoogleGenAI } from '@google/genai';
 import { wrapError } from './base.js';
 
-export function createGemini({ apiKey, model, maxTokens, temperature, thinkingVisible, baseURL }) {
+/**
+ * Leak header Gemini 4 emits at index 0 of `part.text` when an upstream gateway fails to
+ * split `thought` out of the text channel (`" düşünceler\n..."` — Turkish for "thoughts").
+ */
+const LEAKED_THOUGHT_PREFIX = /^[ \t]*düşünceler\r?\n/;
+
+export function createGemini({
+  apiKey,
+  model,
+  maxTokens,
+  temperature,
+  thinkingVisible,
+  baseURL,
+  client: injectedClient,
+}) {
+  if (!thinkingVisible) {
+    throw new Error(
+      'Gemini requires thinking enabled (DAVAI_THINKING=true). With DAVAI_THINKING=false, ' +
+        'Gemini models leak raw internal reasoning ("düşünceler\\n…") straight into the ' +
+        'text channel and corrupt da_ops fences. Set DAVAI_THINKING=true (or unset ' +
+        'DAVAI_THINKING=false) in $DAVAI_HOME/.env.',
+    );
+  }
+
   // `baseURL` was accepted by every other adapter and dropped here, while endpointOf()
   // in providers/index.js reported it for gemini regardless — so an auth diagnostic
   // named a server the request had never gone to. Threading it makes the two agree,
   // which matters now that meta.json records the endpoint per session.
-  const client = new GoogleGenAI({
-    apiKey,
-    ...(baseURL ? { httpOptions: { baseUrl: baseURL } } : {}),
-  });
+  const client =
+    injectedClient ||
+    new GoogleGenAI({
+      apiKey,
+      ...(baseURL ? { httpOptions: { baseUrl: baseURL } } : {}),
+    });
 
   return {
     name: 'gemini',
@@ -23,10 +48,9 @@ export function createGemini({ apiKey, model, maxTokens, temperature, thinkingVi
       const config = {
         systemInstruction: system,
         maxOutputTokens: maxTokens,
-        // Gemini thinks either way and bills thoughtsTokenCount for it, but only
-        // returns thought parts when asked — without this the `part.thought` branch
-        // below can never fire.
-        ...(thinkingVisible ? { thinkingConfig: { includeThoughts: true } } : {}),
+        // Always request structured thought parts on Gemini (`includeThoughts: true`),
+        // so reasoning stays on `part.thought` rather than leaking into `part.text`.
+        thinkingConfig: { includeThoughts: true },
         ...(temperature != null ? { temperature } : {}),
         ...(signal ? { abortSignal: signal } : {}),
       };
@@ -47,15 +71,27 @@ export function createGemini({ apiKey, model, maxTokens, temperature, thinkingVi
 
       let usage = null;
       let finish = 'end_turn';
+      let sawText = false;
       try {
         for await (const chunk of stream) {
           if (chunk.usageMetadata) usage = chunk.usageMetadata;
           const cand = chunk.candidates?.[0];
           if (cand?.finishReason) finish = cand.finishReason;
           for (const part of cand?.content?.parts || []) {
-            if (part.text) {
-              yield part.thought ? { t: 'thinking', delta: part.text } : { t: 'text', delta: part.text };
+            if (!part.text) continue;
+            if (part.thought) {
+              yield { t: 'thinking', delta: part.text };
+              continue;
             }
+            let delta = part.text;
+            if (!sawText) {
+              sawText = true;
+              // Strip a stray `" düşünceler\n"` thought-block marker if an upstream
+              // Gemini gateway ever leaks it at the start of `part.text`.
+              delta = delta.replace(LEAKED_THOUGHT_PREFIX, '');
+              if (!delta) continue;
+            }
+            yield { t: 'text', delta };
           }
         }
       } catch (err) {

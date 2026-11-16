@@ -131,19 +131,47 @@ export function loadVideo(filePath, sandbox) {
  *
  * @returns {{text: string, videos: string[], youtube: string[]}}
  */
+const TRAILING_PUNCT = /[.,;:!?)\]}]+$/;
+
+function splitTrailingPunct(token) {
+  const m = TRAILING_PUNCT.exec(token);
+  if (!m) return { ref: token, suffix: '' };
+  return { ref: token.slice(0, -m[0].length), suffix: m[0] };
+}
+
 export function extractVideoRefs(input, sandbox) {
   const videos = [];
   const youtube = [];
-  const text = input.replace(/@([^\s"']+)/g, (match, p) => {
-    if (isYouTubeUrl(p)) {
-      youtube.push(p);
-      return `[video: ${p}]`;
+  const text = input.replace(/@(?:"([^"]+)"|'([^']+)'|([^\s"']+))/g, (match, dq, sq, bare) => {
+    if (dq != null || sq != null) {
+      const p = dq ?? sq;
+      if (isYouTubeUrl(p)) {
+        youtube.push(p);
+        return `[video: ${p}]`;
+      }
+      if (!isVideoPath(p)) return match;
+      try {
+        sandbox.resolveForRead(p);
+        videos.push(p);
+        return `[video: ${p}]`;
+      } catch {
+        return match;
+      }
     }
-    if (!isVideoPath(p)) return match;
+    const { ref, suffix } = splitTrailingPunct(bare);
+    const ytCandidate = isYouTubeUrl(ref) ? ref : isYouTubeUrl(bare) ? bare : null;
+    if (ytCandidate) {
+      const trail = ytCandidate === ref ? suffix : '';
+      youtube.push(ytCandidate);
+      return `[video: ${ytCandidate}]${trail}`;
+    }
+    const candidate = isVideoPath(bare) ? bare : isVideoPath(ref) ? ref : null;
+    const trail = candidate === ref ? suffix : '';
+    if (!candidate) return match;
     try {
-      sandbox.resolveForRead(p);
-      videos.push(p);
-      return `[video: ${p}]`;
+      sandbox.resolveForRead(candidate);
+      videos.push(candidate);
+      return `[video: ${candidate}]${trail}`;
     } catch {
       return match; // unreadable: leave the text alone and let the model see it
     }

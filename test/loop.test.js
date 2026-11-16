@@ -547,6 +547,27 @@ describe('steering', () => {
     expect(turn2).toContain('[paste#1]\nstack trace line 1\nstack trace line 2');
     expect(turn2).toContain('check [paste#1] instead');
   });
+
+  it('applies a steer queued during a stalled turn instead of burning a nudge or dropping it', async () => {
+    const held = {};
+    const provider = steerableProvider(
+      [
+        "I'll inspect the config next.", // stalled prose, no ops
+        'Steered conclusion.',
+      ],
+      (n) => {
+        if (n === 1) held.agent.steer('skip config, summarize now');
+      },
+    );
+    const { agent } = makeAgent(provider);
+    held.agent = agent;
+    const events = await drive(agent, 'go');
+
+    expect(events.nudge).toHaveLength(0);
+    expect(events.steered).toHaveLength(1);
+    expect(events.done[0].prose).toBe('Steered conclusion.');
+    expect(requestText(provider, 1)).toContain('skip config, summarize now');
+  });
 });
 
 describe('provider retries', () => {

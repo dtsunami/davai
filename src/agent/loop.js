@@ -255,7 +255,11 @@ export class Agent extends EventEmitter {
     const texts = [];
     for (const item of pending) {
       const { text, segments = [] } = typeof item === 'string' ? { text: item } : item;
-      for (const seg of segments) this.ledger.add(seg);
+      for (const seg of segments) {
+        const { _sourcePath, ...spec } = seg;
+        this.ledger.add(spec);
+        this.#logSteerAttachment(spec, _sourcePath);
+      }
       const body = text || '[attached]';
       texts.push(body);
       this.ledger.add({
@@ -268,6 +272,44 @@ export class Agent extends EventEmitter {
     }
     this.emit('steered', { applied: pending.length, texts });
     return pending.length;
+  }
+
+  #logSteerAttachment(spec, sourcePath) {
+    if (!this.log?.event) return;
+    if (spec.image) {
+      this.log.event('attachment', {
+        kind: 'image',
+        label: spec.label,
+        name: spec.image.name,
+        ...(sourcePath ? { path: sourcePath } : {}),
+        mediaType: spec.image.mediaType,
+        bytes: spec.image.bytes,
+        tokens: spec.image.tokens,
+      });
+    } else if (spec.video) {
+      if (spec.video.uri) {
+        this.log.event('attachment', {
+          kind: 'youtube',
+          label: spec.label,
+          uri: spec.video.uri,
+          minutes: spec.video.minutes,
+          assumed: spec.video.assumed,
+          tokens: spec.video.tokens,
+        });
+      } else {
+        this.log.event('attachment', {
+          kind: 'video',
+          label: spec.label,
+          name: spec.video.name,
+          ...(sourcePath ? { path: sourcePath } : {}),
+          mediaType: spec.video.mediaType,
+          bytes: spec.video.bytes,
+          tokens: spec.video.tokens,
+        });
+      }
+    } else if (spec.text != null) {
+      this.log.event('paste', { label: spec.label, text: spec.text });
+    }
   }
 
   /**
@@ -463,6 +505,12 @@ export class Agent extends EventEmitter {
             if (this.steers.length) continue;
             this.emit('done', { prose });
             return;
+          }
+          // If the operator sent a steer while this turn was streaming, apply it on the
+          // next iteration instead of burning a nudge or dropping the steer on exit.
+          if (this.steers.length) {
+            nudges = 0;
+            continue;
           }
           if (nudges++ < MAX_NUDGES) {
             this.stats.nudges++;
@@ -676,6 +724,7 @@ export class Agent extends EventEmitter {
     if (estimated) this.stats.costEstimated = true;
     this.stats.cost += cost;
     this.ledger.reconcile(billedInput(usage));
+    this.log.setCalibrator?.(this.ledger.calibrator?.snapshot?.());
     this.log.addUsage(usage, cost, estimated);
     this.emit('usage', { ...usage, cost, estimated, total: this.stats.cost });
   }

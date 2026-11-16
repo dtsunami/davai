@@ -9,12 +9,18 @@ import { Ledger } from '../src/context/ledger.js';
 let home;
 
 /** Write a fake session directory the way SessionLog would. */
-function writeSession(id, { startedAt, events = [], cwd = '/proj' }) {
+function writeSession(id, { startedAt, events = [], cwd = '/proj', model = 'test-model', calibrator } = {}) {
   const dir = path.join(home, 'sessions', `${startedAt.replace(/[:.]/g, '-')}-${id}`);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, 'meta.json'),
-    JSON.stringify({ id, startedAt, cwd, model: 'test-model' }),
+    JSON.stringify({
+      id,
+      startedAt,
+      cwd,
+      model,
+      ...(calibrator ? { calibrator } : {}),
+    }),
   );
   fs.writeFileSync(
     path.join(dir, 'transcript.jsonl'),
@@ -211,7 +217,7 @@ describe('restoreLedger', () => {
   });
 
   it('drops op-results first when the replay exceeds its budget', () => {
-    const big = 'x'.repeat(4000);
+    const big = 'x'.repeat(4500);
     const dir = writeSession('ffff777777', {
       startedAt: '2026-09-07T10:00:00.000Z',
       events: [
@@ -221,7 +227,7 @@ describe('restoreLedger', () => {
       ],
     });
 
-    // Budget is half the limit, so ~500 tokens: the 1000-token op-result cannot fit.
+    // Budget is half the limit (~1000 tokens): the >1000-token op-result cannot fit.
     const ledger = ledgerFor(2000);
     const info = restoreLedger(ledger, { id: 'ffff777777', dir });
 
@@ -231,5 +237,150 @@ describe('restoreLedger', () => {
     // The omission is announced in context rather than silently dropped.
     const summary = ledger.segments.find((s) => s.type === 'summary');
     expect(summary.part.text).toContain('ffff777777');
+  });
+
+  it('replays steers, pastes, media attachments, compaction summaries, and /clear', () => {
+    const imgPath = path.join(home, 'shot.png');
+    fs.writeFileSync(imgPath, Buffer.alloc(256, 9));
+    const sandbox = {
+      resolveForRead: (p) => {
+        const abs = path.resolve(home, p);
+        if (!fs.existsSync(abs)) throw new Error('missing');
+        return abs;
+      },
+      rel: (abs) => path.relative(home, abs).replace(/\\/g, '/'),
+    };
+
+    const dir = writeSession('aaaa999999', {
+      startedAt: '2026-09-08T10:00:00.000Z',
+      events: [
+        { type: 'user', text: 'discarded before /clear' },
+        { type: 'context-clear' },
+        { type: 'user', text: 'old q1' },
+        { type: 'assistant', text: 'old a1' },
+        {
+          type: 'compact',
+          freed: 500,
+          actions: ['summarized 2 turns into #5'],
+          summary: {
+            label: 'summary of 2 earlier turns',
+            text: '[earlier conversation, summarized]\ncondensed q1/a1',
+            replacedCount: 2,
+          },
+        },
+        { type: 'paste', label: 'paste#1 (2 lines)', text: '[paste#1]\nl1\nl2' },
+        {
+          type: 'attachment',
+          kind: 'image',
+          label: 'image shot.png (1kB)',
+          name: 'shot.png',
+          path: 'shot.png',
+          mediaType: 'image/png',
+          bytes: 256,
+          tokens: 85,
+        },
+        {
+          type: 'attachment',
+          kind: 'youtube',
+          label: 'youtube https://youtu.be/dQw4w9WgXcQ',
+          uri: 'https://youtu.be/dQw4w9WgXcQ',
+          minutes: 4,
+          assumed: false,
+          tokens: 70_800,
+        },
+        { type: 'steer', text: 'check [paste#1] and [image: shot.png]' },
+        { type: 'assistant', text: 'checked both' },
+      ],
+    });
+
+    const ledger = ledgerFor(500_000);
+    const info = restoreLedger(
+      ledger,
+      { id: 'aaaa999999', dir, model: 'test-model' },
+      { sandbox, model: { id: 'test-model', vision: true, video: true } },
+    );
+
+    expect(info.omitted).toBe(0);
+    // Everything before `context-clear` is gone; `old q1`/`old a1` were replaced by the pinned summary.
+    expect(ledger.segments.map((s) => s.type)).toEqual([
+      'summary',
+      'paste',
+      'paste',
+      'paste',
+      'user',
+      'assistant',
+    ]);
+    expect(ledger.segments[0].part.text).toContain('condensed q1/a1');
+    expect(ledger.segments[1].part.text).toBe('[paste#1]\nl1\nl2');
+    expect(ledger.segments[2].part.type).toBe('image');
+    expect(ledger.segments[3].part).toMatchObject({
+      type: 'video',
+      uri: 'https://youtu.be/dQw4w9WgXcQ',
+    });
+    expect(ledger.segments[4].label).toContain('steer:');
+    expect(ledger.segments[4].part.text).toContain('check [paste#1] and [image: shot.png]');
+  });
+
+  it('degrades missing or unsupported media attachments to an explanatory text note on resume', () => {
+    const dir = writeSession('bbbb888888', {
+      startedAt: '2026-09-09T10:00:00.000Z',
+      events: [
+        {
+          type: 'attachment',
+          kind: 'image',
+          label: 'image gone.png (4kB)',
+          name: 'gone.png',
+          path: 'gone.png',
+          mediaType: 'image/png',
+          bytes: 4096,
+          tokens: 85,
+        },
+        { type: 'user', text: 'inspect [image: gone.png]' },
+      ],
+    });
+
+    const sandbox = {
+      resolveForRead: () => {
+        throw new Error('ENOENT');
+      },
+      rel: (p) => p,
+    };
+
+    const ledger = ledgerFor(100_000);
+    restoreLedger(ledger, { id: 'bbbb888888', dir }, { sandbox, model: { id: 'm', vision: true } });
+    expect(ledger.segments[0].part.type).toBe('text');
+    expect(ledger.segments[0].part.text).toMatch(/no longer readable/);
+  });
+
+  it('persists and restores the TokenCalibrator heuristic across sessions for the same model', () => {
+    const dir = writeSession('cal1112223', {
+      startedAt: '2026-09-10T10:00:00.000Z',
+      model: 'claude-opus-5',
+      calibrator: { ratio: 1.35, samples: 4 },
+      events: [
+        { type: 'user', text: 'hello '.repeat(100) },
+        { type: 'assistant', text: 'world '.repeat(100) },
+      ],
+    });
+
+    const uncalibrated = ledgerFor(100_000);
+    restoreLedger(
+      uncalibrated,
+      { id: 'cal1112223', dir, model: 'claude-opus-5' },
+      { model: { id: 'different-model' } },
+    );
+    expect(uncalibrated.calibrator.samples).toBe(0);
+    expect(uncalibrated.calibrator.ratio).toBe(1);
+
+    const calibrated = ledgerFor(100_000);
+    const info = restoreLedger(
+      calibrated,
+      { id: 'cal1112223', dir, model: 'claude-opus-5' },
+      { model: { id: 'claude-opus-5' } },
+    );
+    expect(info.calibrated).toBe(true);
+    expect(calibrated.calibrator.samples).toBe(4);
+    expect(calibrated.calibrator.ratio).toBeCloseTo(1.35, 3);
+    expect(calibrated.tokens).toBeGreaterThan(uncalibrated.tokens);
   });
 });

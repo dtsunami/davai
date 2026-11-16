@@ -939,7 +939,7 @@ export function useLineEditor({
   if (!stateRef.current) {
     stateRef.current = createEditorState(initialValue, initialHistory);
   }
-  const pasteStateRef = useRef({ active: false, buffer: '' });
+  const pasteStateRef = useRef({ active: false, buffer: '', timer: null });
   const burstRef = useRef({ text: '', timer: null });
 
   // Keep latest callbacks in a ref so the stdin listener never has to re-bind per keystroke.
@@ -1023,22 +1023,32 @@ export function useLineEditor({
       clearTimeout(b.timer);
       b.timer = null;
     }
-    const p = pasteStateRef.current;
-    let raw = b.text;
+    const raw = b.text;
     b.text = '';
-    if (p.active) {
-      raw += p.buffer;
-      p.buffer = '';
-      p.active = false;
+    if (!raw) return;
+    if (applyPasteText(raw)) rerender();
+  }, [applyPasteText, rerender]);
+
+  const commitBracketFallback = useCallback(() => {
+    const p = pasteStateRef.current;
+    if (p.timer) {
+      clearTimeout(p.timer);
+      p.timer = null;
     }
+    if (!p.active) return;
+    const raw = p.buffer;
+    p.buffer = '';
+    p.active = false;
     if (!raw) return;
     if (applyPasteText(raw)) rerender();
   }, [applyPasteText, rerender]);
 
   useEffect(() => {
     const b = burstRef.current;
+    const p = pasteStateRef.current;
     return () => {
       if (b.timer) clearTimeout(b.timer);
+      if (p.timer) clearTimeout(p.timer);
     };
   }, []);
 
@@ -1127,11 +1137,11 @@ export function useLineEditor({
 
       const events = tokenizeRawInput(str, p);
       if (p.active) {
-        if (b.timer) clearTimeout(b.timer);
-        b.timer = setTimeout(commitBurst, BRACKET_FALLBACK_MS);
-      } else if (b.timer) {
-        clearTimeout(b.timer);
-        b.timer = null;
+        if (p.timer) clearTimeout(p.timer);
+        p.timer = setTimeout(commitBracketFallback, BRACKET_FALLBACK_MS);
+      } else if (p.timer) {
+        clearTimeout(p.timer);
+        p.timer = null;
       }
       handleEvents(events);
     };
@@ -1139,7 +1149,7 @@ export function useLineEditor({
     return () => {
       internal_eventEmitter.off('input', onData);
     };
-  }, [isActive, internal_eventEmitter, handleEvents, commitBurst]);
+  }, [isActive, internal_eventEmitter, handleEvents, commitBurst, commitBracketFallback]);
 
   const st = stateRef.current;
   return {

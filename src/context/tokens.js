@@ -71,9 +71,37 @@ export function videoSeconds(bytes) {
  * live bar converges on reality over a session instead of staying permanently wrong.
  */
 export class TokenCalibrator {
-  constructor() {
+  /** @param {{ratio?: number, samples?: number}} [seed] */
+  constructor(seed) {
     this.ratio = 1;
     this.samples = 0;
+    if (seed) this.restore(seed);
+  }
+
+  /**
+   * Restore persisted calibration state (e.g. from `meta.json` on `--resume`), clamped to
+   * the same plausible band `observe()` enforces so a corrupt or cross-model outlier
+   * cannot poison a resumed session.
+   * @param {{ratio?: number, samples?: number}|null|undefined} state
+   */
+  restore(state) {
+    if (!state || typeof state !== 'object') return false;
+    const r = Number(state.ratio);
+    const n = Number(state.samples);
+    if (!Number.isFinite(r) || r < MIN_RATIO || r > MAX_RATIO) return false;
+    if (!Number.isFinite(n) || n < 1) return false;
+    this.ratio = r;
+    this.samples = Math.floor(n);
+    return true;
+  }
+
+  /** Serializable snapshot for `meta.json`. Null when uncalibrated (`samples === 0`). */
+  snapshot() {
+    if (!this.samples) return null;
+    return {
+      ratio: Math.round(this.ratio * 10_000) / 10_000,
+      samples: this.samples,
+    };
   }
 
   /**

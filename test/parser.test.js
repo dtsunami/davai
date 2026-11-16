@@ -196,4 +196,51 @@ describe('extract', () => {
     const out = extract(fence('da_ops', '{"ops": [oops]}'));
     expect(out.parseError).toMatch(/not valid JSON/);
   });
+
+  // Gemini 4 thought-boundary leak (`session 169de885f5` / `1104df5220`): the model
+  // glued the opening ```da_ops fence onto the end of its prose/thought line without
+  // a newline, and payloads inside carried nested ```dr_ops fences.
+  it('recovers a da_ops block whose opening fence is glued to the end of a prose line, preserving nested payload fences', () => {
+    const turn = [
+      ' düşünceler',
+      "Let's apply the `da_ops` batch right now so `pyproject.toml` gets written!```da_ops",
+      '{"ops": [',
+      '  {"op": "replace", "path": "src/davag/agent/prompt.py", "old": "@1", "new": "@2"}',
+      ']}',
+      '--davai:1--',
+      '```dr_ops',
+      '{"ops": []}',
+      '--davag:1--',
+      '--davai:end--',
+      '--davai:2--',
+      '```dr_ops',
+      '{"ops": [{"op": "motion.render_overlay"}]}',
+      '--davag:1--',
+      '--davai:end--',
+      '```',
+    ].join('\n');
+
+    const out = extract(turn);
+    expect(out.parseError).toBeNull();
+    expect(out.recovered).toBe('inline opening fence');
+    expect(out.artifacts).toEqual([]);
+    expect(out.prose).toContain("Let's apply the `da_ops` batch right now");
+    expect(out.prose).not.toContain('```da_ops');
+    expect(out.ops).toEqual([
+      {
+        op: 'replace',
+        path: 'src/davag/agent/prompt.py',
+        old: '```dr_ops\n{"ops": []}\n--davag:1--',
+        new: '```dr_ops\n{"ops": [{"op": "motion.render_overlay"}]}\n--davag:1--',
+      },
+    ]);
+  });
+
+  it('does not treat inline backtick code spans like ```` ```da_ops ```` as an opening fence', () => {
+    const proseOnly = 'In markdown, open the block with ```` ```da_ops ```` on its own line.';
+    const out = extract(proseOnly);
+    expect(out.ops).toBeNull();
+    expect(out.artifacts).toEqual([]);
+    expect(out.prose).toBe(proseOnly);
+  });
 });

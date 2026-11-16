@@ -226,4 +226,70 @@ describe('pastes', () => {
     ]);
     expect(pushed).toEqual([{ type: 'user', text: '[paste#1] fix this' }]);
   });
+
+  it('queues /image, /video, and /youtube while busy and attaches them to the next steer', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'davai-disp-media-'));
+    try {
+      fs.writeFileSync(path.join(tmp, 'shot.png'), Buffer.alloc(128, 7));
+      session.sandbox = {
+        resolveForRead: (p) => path.resolve(tmp, p),
+        rel: (abs) => path.relative(tmp, abs).replace(/\\/g, '/'),
+      };
+      session.cfg.model = { id: 'gemini-3-pro-preview', vision: true, video: true };
+      session.agent.busy = true;
+      session.agent.steerable = true;
+
+      const submit = build({ isBusy: () => true });
+
+      // /image mid-turn must NOT hit ledger.add ahead of the in-flight assistant turn!
+      await submit('/image shot.png');
+      await submit('/youtube https://youtu.be/dQw4w9WgXcQ 3');
+      expect(session.ledger.add).not.toHaveBeenCalled();
+      expect(session.pendingAttachments).toHaveLength(2);
+
+      // Next steer drains both queued attachments onto the steer segment list.
+      await submit('check this screenshot and clip');
+      expect(session.pendingAttachments).toEqual([]);
+      expect(session.agent.steered).toEqual(['check this screenshot and clip']);
+      expect(session.agent.steeredSegments[0]).toHaveLength(2);
+      expect(session.agent.steeredSegments[0][0]).toMatchObject({
+        type: 'paste',
+        label: expect.stringContaining('image shot.png'),
+      });
+      expect(session.agent.steeredSegments[0][1]).toMatchObject({
+        type: 'paste',
+        label: 'youtube https://youtu.be/dQw4w9WgXcQ',
+      });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('attaches @image and @video references with trailing punctuation on a steer', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'davai-disp-punct-'));
+    try {
+      fs.writeFileSync(path.join(tmp, 'err.png'), Buffer.alloc(64, 1));
+      fs.writeFileSync(path.join(tmp, 'demo.mp4'), Buffer.alloc(128, 2));
+      session.sandbox = {
+        resolveForRead: (p) => path.resolve(tmp, p),
+        rel: (abs) => path.relative(tmp, abs).replace(/\\/g, '/'),
+      };
+      session.cfg.model = { id: 'gemini-3-pro-preview', vision: true, video: true };
+      session.agent.busy = true;
+      session.agent.steerable = true;
+
+      await build({ isBusy: () => true })('see @err.png, and (@demo.mp4).');
+
+      expect(session.agent.steered).toEqual(['see [image: err.png], and ([video: demo.mp4]).']);
+      expect(session.agent.steeredSegments[0]).toHaveLength(2);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });

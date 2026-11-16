@@ -75,9 +75,10 @@ async function summarizeNow(ledger, ids, { cfg, makeProvider, onEvent }) {
   const text = summary
     ? `[earlier conversation, summarized]\n${summary}`
     : `[${freedIds.length} segments dropped; see the session log]`;
+  const label = `summary of ${freedIds.length} segments`;
   const seg = ledger.add({
     type: 'summary',
-    label: `summary of ${freedIds.length} segments`,
+    label,
     role: 'user',
     text,
     pinned: true,
@@ -89,7 +90,11 @@ async function summarizeNow(ledger, ids, { cfg, makeProvider, onEvent }) {
   }
 
   actions.push(`summarized ${freedIds.length} segments into #${seg.id}`);
-  return { freed: before - ledger.tokens, actions };
+  return {
+    freed: before - ledger.tokens,
+    actions,
+    summary: { label, text, replacedCount: freedIds.length },
+  };
 }
 
 /**

@@ -611,4 +611,21 @@ describe('event stream', () => {
     const res = await fetch(url('/api/events?token=wrong'));
     expect(res.status).toBe(401);
   });
+
+  it('captures multi-line pastes through POST /api/paste for web steering & prompts', async () => {
+    const { Pastes } = await import('../src/context/pastes.js');
+    session.pastes = new Pastes();
+    const res = await fetch(url('/api/paste'), {
+      method: 'POST',
+      headers: auth({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ text: 'line one\nline two\nline three' }),
+    });
+    expect(res.status).toBe(200);
+    const d = await res.json();
+    expect(d.captured).toEqual({
+      n: 1,
+      placeholder: '[[paste#1: 3 lines]]',
+    });
+    expect(session.pastes.get(1)?.text).toBe('line one\nline two\nline three');
+  });
 });

@@ -16,6 +16,14 @@
  */
 
 const FENCE = /^([ \t]*)(`{3,}|~{3,})[ \t]*([^\s`]*)[ \t]*$/;
+/**
+ * Inline `da_ops` fence glued onto the end of a prose/thought line without a newline —
+ * e.g. `Let's apply this batch now!```da_ops`. Gemini 4 emits this when a leaked thought
+ * boundary abuts the opening fence (`session 169de885f5` / `1104df5220`). Guarded against
+ * four-backtick inline markdown (` ````da_ops ```` `) by requiring no closing backtick on
+ * the same line.
+ */
+const INLINE_DA_OPS_FENCE = /^(.*\S)[ \t]*(`{3,}|~{3,})[ \t]*(da_ops)[ \t]*$/i;
 const PAYLOAD_OPEN = /^--davai:([A-Za-z0-9_-]+)--[ \t]*$/;
 const PAYLOAD_CLOSE = /^--davai:end--[ \t]*$/;
 
@@ -25,6 +33,8 @@ const PAYLOAD_CLOSE = /^--davai:end--[ \t]*$/;
  * @property {string} lang
  * @property {string} body
  * @property {number} start  line index in the source
+ * @property {boolean} [unterminated]
+ * @property {boolean} [inlineFence]
  */
 
 /**
@@ -39,11 +49,19 @@ export function scanBlocks(text) {
 
   let i = 0;
   while (i < lines.length) {
-    const m = lines[i].match(FENCE);
+    let m = lines[i].match(FENCE);
+    let inlineFence = false;
     if (!m) {
-      prose.push(lines[i]);
-      i++;
-      continue;
+      const inline = lines[i].match(INLINE_DA_OPS_FENCE);
+      if (inline) {
+        prose.push(inline[1]);
+        m = [lines[i], '', inline[2], inline[3]];
+        inlineFence = true;
+      } else {
+        prose.push(lines[i]);
+        i++;
+        continue;
+      }
     }
     const [, indent, fence, lang] = m;
     const closer = new RegExp(`^[ \\t]*${fence[0]}{${fence.length},}[ \\t]*$`);
@@ -78,6 +96,7 @@ export function scanBlocks(text) {
       body: body.join('\n'),
       start,
       unterminated: !closed,
+      ...(inlineFence ? { inlineFence: true } : {}),
     });
   }
 
@@ -259,11 +278,15 @@ export function extract(text) {
     };
   }
 
+  const reasons = [];
+  if (opBlocks.some((b) => b.inlineFence)) reasons.push('inline opening fence');
+  if (opBlocks.some((b) => b.unterminated)) reasons.push('no closing fence');
+
   return {
     ops: merged,
     parseError: null,
     artifacts,
     prose,
-    recovered: opBlocks.some((b) => b.unterminated) ? 'no closing fence' : null,
+    recovered: reasons.length ? reasons.join(', ') : null,
   };
 }

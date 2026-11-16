@@ -313,3 +313,68 @@ describe('openrouter error unwrapping', () => {
     expect(wrapped.message).toBe('openai: 400 you must provide a model parameter');
   });
 });
+
+describe('createGemini thinking enforcement and leaked-prefix stripping', () => {
+  it('refuses construction when thinkingVisible is false', async () => {
+    const { createGemini } = await import('../src/providers/gemini.js');
+    expect(() =>
+      createGemini({
+        apiKey: 'AIza-fake',
+        model: 'gemini-4-carbon',
+        maxTokens: 4096,
+        thinkingVisible: false,
+      }),
+    ).toThrow(/Gemini requires thinking enabled/);
+  });
+
+  it('always sends thinkingConfig.includeThoughts=true and strips leaked düşünceler header if present', async () => {
+    const { createGemini } = await import('../src/providers/gemini.js');
+    const calls = [];
+    const fakeClient = {
+      models: {
+        async generateContentStream(params) {
+          calls.push(params);
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      { thought: true, text: 'structured reasoning' },
+                      { text: ' düşünceler\nClean answer.\n```da_ops\n{"ops":[]}\n```' },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+              usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 20, thoughtsTokenCount: 10 },
+            };
+          })();
+        },
+      },
+    };
+
+    const g = createGemini({
+      apiKey: 'AIza-fake',
+      model: 'gemini-4-carbon',
+      maxTokens: 4096,
+      thinkingVisible: true,
+      client: fakeClient,
+    });
+
+    const events = await collect(
+      g.send({
+        system: 'SYS',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      }),
+    );
+
+    expect(calls[0].config.thinkingConfig).toEqual({ includeThoughts: true });
+    expect(events.filter((e) => e.t === 'thinking').map((e) => e.delta)).toEqual([
+      'structured reasoning',
+    ]);
+    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toBe(
+      'Clean answer.\n```da_ops\n{"ops":[]}\n```',
+    );
+  });
+});

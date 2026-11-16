@@ -535,6 +535,51 @@ describe('paste capture', () => {
     ]);
     app.unmount();
   });
+
+  it('coalesces a multi-chunk DECSET 2004 bracketed paste without premature flush when steering', async () => {
+    const stdout = fakeStdout();
+    const stdin = fakeStdin();
+    const steered = [];
+    session.agent.run = () => new Promise(() => {});
+    session.agent.steer = (text, segments) => {
+      steered.push({ text, segments });
+      return true;
+    };
+
+    const app = render(<App session={session} initialInput="start working" />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+    session.agent.emit('turn-start');
+    await flush();
+
+    // Terminal sends \x1b[200~ in chunk 1, plain body in chunk 2 (no ESC!), and \x1b[201~ in chunk 3.
+    // Previously chunk 1 armed `b.timer`, and chunk 2 saw `b.timer` truthy and prematurely flushed
+    // chunk 1, dropping bracketed state so chunk 3's \x1b[201~ and newlines corrupted the steer!
+    stdin.write('fix ');
+    await flush();
+    stdin.write('\x1b[200~trace line 1\n');
+    stdin.write('trace line 2 without esc\n');
+    stdin.write('trace line 3\x1b[201~');
+    await flush();
+    stdin.write('\r');
+    await flush();
+
+    expect(session.pastes.n).toBe(1);
+    expect(steered).toHaveLength(1);
+    expect(steered[0].text).toBe('fix [paste#1]');
+    expect(steered[0].segments).toEqual([
+      expect.objectContaining({
+        type: 'paste',
+        label: 'paste#1 (3 lines)',
+        text: '[paste#1]\ntrace line 1\ntrace line 2 without esc\ntrace line 3',
+      }),
+    ]);
+    app.unmount();
+  });
 });
 
 describe('thinking panel', () => {

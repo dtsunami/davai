@@ -98,14 +98,36 @@ export function clipboardImage(tmpDir) {
  * "what's wrong with @shots/error.png" just works.
  * @returns {{text: string, images: string[]}}
  */
+const TRAILING_PUNCT = /[.,;:!?)\]}]+$/;
+
+function splitTrailingPunct(token) {
+  const m = TRAILING_PUNCT.exec(token);
+  if (!m) return { ref: token, suffix: '' };
+  return { ref: token.slice(0, -m[0].length), suffix: m[0] };
+}
+
 export function extractImageRefs(input, sandbox) {
   const images = [];
-  const text = input.replace(/@([^\s"']+)/g, (match, p) => {
-    if (!isImagePath(p)) return match;
+  const text = input.replace(/@(?:"([^"]+)"|'([^']+)'|([^\s"']+))/g, (match, dq, sq, bare) => {
+    if (dq != null || sq != null) {
+      const p = dq ?? sq;
+      if (!isImagePath(p)) return match;
+      try {
+        sandbox.resolveForRead(p);
+        images.push(p);
+        return `[image: ${p}]`;
+      } catch {
+        return match;
+      }
+    }
+    const { ref, suffix } = splitTrailingPunct(bare);
+    const candidate = isImagePath(bare) ? bare : isImagePath(ref) ? ref : null;
+    const trail = candidate === ref ? suffix : '';
+    if (!candidate) return match;
     try {
-      sandbox.resolveForRead(p);
-      images.push(p);
-      return `[image: ${p}]`;
+      sandbox.resolveForRead(candidate);
+      images.push(candidate);
+      return `[image: ${candidate}]${trail}`;
     } catch {
       return match; // unreadable: leave the text alone and let the model see it
     }

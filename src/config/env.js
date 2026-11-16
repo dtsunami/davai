@@ -449,7 +449,28 @@ export function loadConfig(opts = {}) {
     agentsBudget,
     compactAt,
     maxCost,
-    thinkingVisible: bool(merged.DAVAI_THINKING, false),
+    // Gemini defaults to `thinkingVisible: true` when DAVAI_THINKING is unset, because
+    // omitting `includeThoughts: true` on Gemini 4 leaks raw reasoning into `part.text`.
+    // Explicitly setting `DAVAI_THINKING=false` with `provider=gemini` fails fast below
+    // via `assertValidProviderConfig` (and in `createGemini`).
+    ...(() => {
+      const thinkingExplicitlyFalse =
+        merged.DAVAI_THINKING !== undefined &&
+        String(merged.DAVAI_THINKING).trim() !== '' &&
+        !bool(merged.DAVAI_THINKING, false);
+      const thinkingVisible =
+        merged.DAVAI_THINKING === undefined || String(merged.DAVAI_THINKING).trim() === ''
+          ? provider === 'gemini'
+          : bool(merged.DAVAI_THINKING, false);
+      if (provider === 'gemini' && !thinkingVisible) {
+        throw new Error(
+          'Gemini cannot run with DAVAI_THINKING=false: Gemini models leak raw reasoning ' +
+            '("düşünceler\\n…") into the text channel and corrupt da_ops fences when thinking ' +
+            'is disabled. Set DAVAI_THINKING=true or remove DAVAI_THINKING=false from your .env.',
+        );
+      }
+      return { thinkingVisible, thinkingExplicitlyFalse };
+    })(),
     // Turn a half-wired event into a loud failure instead of a counter nobody reads.
     strictEvents: bool(merged.DAVAI_STRICT_EVENTS, false),
     openaiApi,
@@ -509,6 +530,20 @@ export function requireKey(cfg) {
     );
   }
   return key;
+}
+
+/**
+ * Guard provider-specific invariants before starting a session or building an adapter.
+ * Called alongside `loadConfig` so mutated configs are checked too.
+ */
+export function assertValidProviderConfig(cfg) {
+  if (cfg.provider === 'gemini' && !cfg.thinkingVisible) {
+    throw new Error(
+      'Gemini cannot run with DAVAI_THINKING=false: Gemini models leak raw reasoning ' +
+        '("düşünceler\\n…") into the text channel and corrupt da_ops fences when thinking ' +
+        'is disabled. Set DAVAI_THINKING=true or remove DAVAI_THINKING=false from your .env.',
+    );
+  }
 }
 
 /** Ensure $DAVAI_HOME and its subdirectories exist. */

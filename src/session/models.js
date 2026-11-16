@@ -17,7 +17,7 @@ import {
   fetchOpenRouterCatalog,
 } from '../config/models.js';
 import { listRemoteModels, createProvider } from '../providers/index.js';
-import { loadConfig, applyModelLimits } from '../config/env.js';
+import { loadConfig, applyModelLimits, assertValidProviderConfig } from '../config/env.js';
 import { saveSettings } from '../config/settings.js';
 
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -162,9 +162,13 @@ export async function applyModelChange(session, want = {}, opts = {}) {
   });
   await refineModel(next.model, { apiKey: cfg.keys[provider], baseURL: next.baseURL });
 
+  assertValidProviderConfig(next);
+
   cfg.provider = provider;
   cfg.model = next.model;
   cfg.effort = effort;
+  cfg.thinkingVisible = next.thinkingVisible;
+  cfg.thinkingExplicitlyFalse = next.thinkingExplicitlyFalse;
   cfg.baseURL = next.baseURL;
   cfg.baseURLOrigin = next.baseURLOrigin;
   cfg.openaiApi = next.openaiApi;

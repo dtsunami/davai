@@ -278,3 +278,34 @@ describe('saveSettings', () => {
     expect(loadSettings(base)).toEqual({ compactAt: 0.8 });
   });
 });
+
+describe('Gemini thinking invariant', () => {
+  it('defaults thinkingVisible to true when provider is gemini and DAVAI_THINKING is unset', () => {
+    const cfg = loadConfig({
+      cwd: base,
+      overrides: { DAVAI_PROVIDER: 'gemini', DAVAI_MODEL: 'gemini-3-pro-preview' },
+    });
+    expect(cfg.thinkingVisible).toBe(true);
+  });
+
+  it('defaults thinkingVisible to false on non-gemini providers when DAVAI_THINKING is unset', () => {
+    const cfg = loadConfig({
+      cwd: base,
+      overrides: { DAVAI_PROVIDER: 'anthropic', DAVAI_MODEL: 'claude-opus-5-5' },
+    });
+    expect(cfg.thinkingVisible).toBe(false);
+  });
+
+  it('errors out immediately when DAVAI_THINKING=false and provider is gemini', () => {
+    expect(() =>
+      loadConfig({
+        cwd: base,
+        overrides: {
+          DAVAI_PROVIDER: 'gemini',
+          DAVAI_MODEL: 'gemini-3-pro-preview',
+          DAVAI_THINKING: 'false',
+        },
+      }),
+    ).toThrow(/Gemini cannot run with DAVAI_THINKING=false/);
+  });
+});
