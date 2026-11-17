@@ -20,7 +20,7 @@ const CYAN = `${ESC}[36m`;
  */
 export function renderMarkdown(text, { syntax = true } = {}) {
   if (!text) return '';
-  const lines = text.split('\n');
+  const lines = text.replace(/\r\n?/g, '\n').replace(/\t/g, '  ').split('\n');
   const out = [];
   let inFence = false;
   let fenceLang = '';

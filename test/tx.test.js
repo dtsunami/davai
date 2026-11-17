@@ -442,4 +442,20 @@ describe('operator interactive tx REPL and atomic turn-boundary queueing', () =>
     expect(session.pendingPrompts).not.toBeNull();
     expect(ledger.system).toContain('Code Mode (`tx` op — enabled)');
   });
+
+  it('truncates oversized return values without splitting UTF-16 surrogate pairs', async () => {
+    // Place an astral emoji ('🚀' = 2 UTF-16 code units) straddling index 63,999..64,000:
+    const out = await run([
+      {
+        op: 'tx',
+        code: 'return "a".repeat(63999) + "🚀" + "b".repeat(100);',
+      },
+    ]);
+    expect(out.status).toBe('ok');
+    const s = out.results[0].result.output;
+    expect(s.length).toBe(63_999);
+    // Last code unit must NOT be an orphaned high surrogate (0xD800..0xDBFF):
+    const last = s.charCodeAt(s.length - 1);
+    expect(last < 0xd800 || last > 0xdbff).toBe(true);
+  });
 });

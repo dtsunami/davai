@@ -851,3 +851,282 @@ describe('escape cancellation', () => {
     app.unmount();
   });
 });
+
+describe('tx Code Mode TUI rendering regressions (blenderbot session 2531b2cee2)', () => {
+  it('bounds 64KB single-line JSON tx outputs and strips raw ANSI/CRLF/tabs in App.jsx', async () => {
+    session.cfg.codeMode = true;
+    const stdout = fakeStdout(100);
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin: fakeStdin(),
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    const beforeLen = stdout.frames.join('').length;
+    // Exact shape from blenderbot session: JSON.stringify(out, null, 2) where 2 keys hold
+    // 8KB + 55KB escaped source strings on single lines, plus ANSI/CR/tab hazards.
+    const hugeJson = JSON.stringify(
+      {
+        'davag/src/davag/agent/parser.py': 'x'.repeat(8500) + '\r\n\t\u001b[2J\u001b[31mBOOM',
+        'davag/src/davag/agent/executor.py': 'y'.repeat(55_000),
+      },
+      null,
+      2,
+    ).slice(0, 64_000);
+
+    const op = {
+      op: 'tx',
+      description: 'read davag agent, context, providers, session, cli, tui',
+      code: 'const files = ["a.py", "b.py"];\nconst out = {};\nfor (const f of files) out[f] = read(f);\nreturn out;',
+    };
+    session.agent.emit('ops-parsed', [op]);
+    session.agent.emit('ops-result', {
+      ops: [op],
+      outcome: {
+        status: 'ok',
+        errors: [],
+        results: [
+          {
+            index: 0,
+            op: 'tx',
+            ok: true,
+            result: {
+              opsCount: 10,
+              changes: [],
+              logs: ['loaded\tfiles\r\n\u001b[2Jclear-attempt ' + 'z'.repeat(500)],
+              output: hugeJson,
+            },
+          },
+        ],
+      },
+    });
+    await waitForText(stdout, '/tx for full output');
+
+    const delta = stdout.frames.join('').slice(beforeLen);
+    // Must not dump 64KB into Ink <Static> or pass raw clear-screen CSI sequences through:
+    expect(delta.length).toBeLessThan(4000);
+    expect(delta).not.toContain('\u001b[2J');
+    expect(delta).toContain('tx: read davag agent');
+    expect(delta).toContain('10 fs ops (read-only)');
+    expect(delta).toContain('63.6k chars, 4 lines');
+    // Does not duplicate raw op.code lines underneath `ops` in chat scrollback:
+    expect(delta).not.toContain('for (const f of files) out[f] = read(f);');
+    app.unmount();
+  });
+
+  it('keeps full <App /> live region (TxPane + StatusBar) <= stdout.rows at 80x24 and 100x30', async () => {
+    const { sanitizeTerminalText } = await import('../src/ui/theme.js');
+    session.cfg.codeMode = true;
+    const hugeJson = JSON.stringify(
+      {
+        'a.py': 'a'.repeat(12_000),
+        'b.py': 'b'.repeat(52_000),
+      },
+      null,
+      2,
+    ).slice(0, 64_000);
+    session.agent.txSnapshot = () => ({
+      codeMode: true,
+      queued: [{ position: 1, code: 'state.x = 1', ts: Date.now() }],
+      stateKeys: ['cache', 'files'],
+      statePreview: { cache: 'v'.repeat(300), files: '["a.py","b.py"]' },
+      entries: Array.from({ length: 12 }, (_, idx) => ({
+        seq: idx + 1,
+        origin: idx % 2 === 0 ? 'agent' : 'operator',
+        turn: idx + 1,
+        description: `batch #${idx + 1} reading davag modules`,
+        code: Array.from({ length: 20 }, (__, i) => `const line${i} = ${i};`).join('\r\n'),
+        ok: true,
+        opsCount: 10,
+        changes: [],
+        logs: ['step1\tstep2\u001b[31m'],
+        output: hugeJson,
+      })),
+    });
+
+    for (const [cols, rows] of [
+      [80, 24],
+      [100, 30],
+    ]) {
+      const stdout = fakeStdout(cols);
+      stdout.rows = rows;
+      const stdin = fakeStdin();
+      const app = render(<App session={session} />, {
+        stdout,
+        stdin,
+        exitOnCtrlC: false,
+        patchConsole: false,
+      });
+      await flush();
+
+      stdin.write('/tx');
+      await flush();
+      stdin.write('\r');
+      await waitForText(stdout, 'Code Mode REPL');
+
+      const rawFrame = [...stdout.frames].reverse().find((f) => f.includes('Code Mode REPL')) || '';
+      const frame = sanitizeTerminalText(rawFrame);
+      const renderedRows = frame.split('\n').length;
+      // Invariant: full dynamic region (<TxPane> + <StatusBar>) MUST fit inside stdout.rows
+      // so Ink's cursor-up erase never overflows the viewport and smears scrollback.
+      expect(renderedRows).toBeLessThanOrEqual(rows);
+      expect(frame).toContain('64.0k chars');
+      expect(frame).toContain('more line(s)');
+      expect(frame).not.toContain('\t');
+      app.unmount();
+    }
+  });
+
+  it('bounds and sanitizes operator tx-eval (tx-applied) entries with CRLF, tabs, ANSI, and 64KB output', async () => {
+    const stdout = fakeStdout(90);
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin: fakeStdin(),
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    const beforeLen = stdout.frames.join('').length;
+    session.agent.emit('tx-applied', {
+      applied: 1,
+      immediate: true,
+      entries: [
+        {
+          seq: 1,
+          origin: 'operator',
+          ok: true,
+          opsCount: 4,
+          durationMs: 12,
+          changes: Array.from({ length: 14 }, (_, i) => ({
+            path: `src/mod${i}.js`,
+            action: 'replaced',
+            delta: 2,
+          })),
+          logs: ['\u001b[2Jtab\there\r\nline2 ' + 'q'.repeat(400)],
+          output: JSON.stringify({ big: 'w'.repeat(63_900) }, null, 2),
+        },
+      ],
+    });
+    await waitForText(stdout, 'tx (operator):');
+
+    const delta = stdout.frames.join('').slice(beforeLen);
+    expect(delta.length).toBeLessThan(5000);
+    expect(delta).not.toContain('\u001b[2J');
+    expect(delta).not.toContain('\t');
+    expect(delta).toContain('+4 more file(s)');
+    expect(delta).toContain('/tx for full output');
+    app.unmount();
+  });
+
+  it('never column-shreds StatusBar or live Spinner meter row when overflowing 80 or 100 cols', async () => {
+    const { StatusBar } = await import('../src/ui/StatusBar.jsx');
+    const { sanitizeTerminalText } = await import('../src/ui/theme.js');
+    const cfg = {
+      ...session.cfg,
+      cwd: path.join(base, 'blenderbot'),
+      codeMode: true,
+      yolo: true,
+      model: { ...session.cfg.model, id: 'gemini-4-carbon', effort: true },
+      effort: 'high',
+    };
+    const fakeLedger = { tokens: 207_878, limit: 1_000_000 };
+    const stats = { turns: 17, ops: 39, cost: 1.646, costEstimated: true };
+    const throughput = {
+      snapshot: () => ({
+        active: true,
+        currentTps: 54,
+        avgTps: 54,
+        series: [10, 20, 35, 50, 60, 55, 48, 52, 54, 54],
+      }),
+    };
+
+    for (const cols of [80, 100]) {
+      const stdout = fakeStdout(cols);
+      const app = render(
+        <StatusBar
+          cfg={cfg}
+          ledger={fakeLedger}
+          stats={stats}
+          throughput={throughput}
+          width={cols}
+          exitArmed={false}
+        />,
+        {
+          stdout,
+          stdin: fakeStdin(),
+          exitOnCtrlC: false,
+          patchConsole: false,
+        },
+      );
+      await flush();
+
+      const rawFrame = [...stdout.frames].reverse().find((f) => f.includes('blenderbot')) || '';
+      const lines = sanitizeTerminalText(rawFrame)
+        .split('\n')
+        .filter((l) => l.trim().length > 0);
+      // Invariant: horizontal status chrome must stay strictly 1 row, never flex-shrunk strips.
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('blenderbot');
+      expect(lines[0]).toContain('tx');
+      expect(lines[0]).toContain('gemini-4-carbon');
+      app.unmount();
+    }
+
+    // Same 1-row invariant on the live Spinner + formatMeter + sparkline + steer hint bar:
+    session.cfg.codeMode = true;
+    session.agent.run = () => new Promise(() => {});
+    const stdout = fakeStdout(80);
+    const app = render(<App session={session} initialInput="run heavy turn" />, {
+      stdout,
+      stdin: fakeStdin(),
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+    session.agent.emit('turn-start');
+    session.agent.emit('thinking', 't'.repeat(25_000));
+    session.agent.emit('text', 'hello ');
+    await waitForText(stdout, 'thinking…');
+    await flush();
+
+    const rawLive = [...stdout.frames].reverse().find((f) => f.includes('thinking…')) || '';
+    const spinLines = sanitizeTerminalText(rawLive)
+      .split('\n')
+      .filter((l) => l.includes('thinking…'));
+    expect(spinLines).toHaveLength(1);
+    expect(spinLines[0].length).toBeLessThanOrEqual(80);
+    app.unmount();
+  });
+
+  it('toggles Composer ctrl+x tx REPL mode and submits prefixed tx snippets', async () => {
+    const submitted = [];
+    session.agent.runOperatorTx = (code) => {
+      submitted.push(code);
+      return { queued: false, entry: { ok: true, opsCount: 1, changes: [] } };
+    };
+    const stdout = fakeStdout(100);
+    const stdin = fakeStdin();
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    // Ctrl+X enters tx REPL mode:
+    stdin.write('\x18');
+    await waitForText(stdout, 'tx repl mode');
+
+    stdin.write('glob("src/**/*.js")');
+    await flush();
+    stdin.write('\r');
+    await flush();
+
+    expect(submitted).toEqual(['glob("src/**/*.js")']);
+    app.unmount();
+  });
+});

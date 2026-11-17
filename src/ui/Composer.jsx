@@ -77,7 +77,7 @@ export function Composer({ onSubmit, session, busy, active = true }) {
 
   if (!active) return null;
 
-  const prompt = shellMode ? '$' : txMode ? 'tx❯' : glyphs.prompt;
+  const prompt = shellMode ? '$' : txMode ? `tx${glyphs.prompt}` : glyphs.prompt;
   const promptColor = shellMode
     ? colors.warn
     : txMode

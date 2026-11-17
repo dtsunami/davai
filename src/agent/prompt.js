@@ -294,8 +294,10 @@ export const CODE_MODE_PROTOCOL = [
   '- `state` (object persisted across turns in memory), `preview(val, maxChars?)`, `log(...args)`',
   '',
   'Return a compact summary object/string from `tx` rather than raw file contents so the',
-  'context window stays lean. For simple 1–3 file reads or edits, prefer ordinary `read` /',
-  '`replace` ops.',
+  'context window stays lean — never dump full files via `out[f] = read(f); return out`',
+  '(JSON-escaping bloats them and truncates at 64KB; batch ordinary `read` ops when you',
+  'need verbatim files in context, and use `tx` to filter/extract/edit in JS first). For',
+  'simple 1–3 file reads or edits, prefer ordinary `read` / `replace` ops.',
 ].join('\n');
 
 /**

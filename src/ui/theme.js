@@ -120,3 +120,92 @@ export function formatTokens(n) {
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
 }
+
+/**
+ * Slice a UTF-16 string without splitting a surrogate pair at the boundary.
+ * @param {string} s
+ * @param {number} max
+ */
+export function safeSlice(s, max) {
+  if (max <= 0) return '';
+  if (s.length <= max) return s;
+  const code = s.charCodeAt(max - 1);
+  const end = code >= 0xd800 && code <= 0xdbff ? max - 1 : max;
+  return s.slice(0, Math.max(0, end));
+}
+
+// eslint-disable-next-line no-control-regex
+const ANSI_SEQ = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-Z\\-_])/g;
+// eslint-disable-next-line no-control-regex
+const CTRL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+const LONE_SURROGATE = /(?<![\ud800-\udbff])[\udc00-\udfff]|[\ud800-\udbff](?![\udc00-\udfff])/g;
+
+/**
+ * Make one line safe for Ink / terminal rendering:
+ * - strips raw ANSI/CSI/OSC sequences so file contents cannot mutate terminal state
+ * - expands `\t` to spaces (`string-width` scores `\t` as 0 cols while terminals jump
+ *   up to 8, which causes uncounted line wraps and smears Ink's dynamic region)
+ * - strips `\r` and C0/C1 control characters
+ * - replaces lone UTF-16 surrogates with `?`
+ */
+export function sanitizeTerminalLine(s) {
+  return String(s ?? '')
+    .replace(ANSI_SEQ, '')
+    .replace(/\r/g, '')
+    .replace(/\t/g, '  ')
+    .replace(CTRL_CHARS, '')
+    .replace(LONE_SURROGATE, '?');
+}
+
+/** Sanitize multi-line text while preserving `\n` breaks. */
+export function sanitizeTerminalText(s) {
+  return String(s ?? '')
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(sanitizeTerminalLine)
+    .join('\n');
+}
+
+/** Flatten arbitrary text onto a single sanitized, width-capped line. */
+export function truncateInline(s, maxCols = 80) {
+  const flat = sanitizeTerminalLine(String(s ?? '').replace(/[\r\n]+/g, ' '))
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (flat.length <= maxCols) return flat;
+  const keep = Math.max(1, maxCols - glyphs.ellipsis.length);
+  return `${safeSlice(flat, keep)}${glyphs.ellipsis}`;
+}
+
+/**
+ * Bound a multi-line `tx` code/output string in BOTH dimensions (line count AND columns).
+ *
+ * `JSON.stringify(obj, null, 2)` escapes entire multi-kilobyte file contents onto single
+ * lines (`"path.py": "...55,000 chars..."`). Splitting on `\n` and taking `.slice(0, 8)`
+ * without a column cap dumped all 64KB into Ink `<Text>`, wrapping into hundreds of rows
+ * and overflowing `TxPane` past `stdout.rows`.
+ *
+ * @param {string} raw
+ * @param {{maxLines?: number, maxCols?: number}} [opts]
+ */
+export function formatPreviewBlock(raw, { maxLines = 8, maxCols = 80 } = {}) {
+  const str = String(raw ?? '').replace(/\r\n?/g, '\n');
+  const rawLines = str.split('\n');
+  const cols = Math.max(16, maxCols);
+  let clippedCols = false;
+  const lines = rawLines.slice(0, maxLines).map((line) => {
+    const clean = sanitizeTerminalLine(line);
+    if (clean.length <= cols) return clean;
+    clippedCols = true;
+    const keep = Math.max(1, cols - glyphs.ellipsis.length);
+    return `${safeSlice(clean, keep)}${glyphs.ellipsis}`;
+  });
+  const hiddenLines = Math.max(0, rawLines.length - maxLines);
+  return {
+    lines,
+    totalLines: rawLines.length,
+    totalChars: str.length,
+    hiddenLines,
+    clippedCols,
+    truncated: hiddenLines > 0 || clippedCols,
+  };
+}

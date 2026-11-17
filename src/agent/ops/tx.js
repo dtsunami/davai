@@ -52,6 +52,15 @@ function formatValue(v) {
   }
 }
 
+/** Slice without splitting a UTF-16 surrogate pair at `max`. */
+function sliceCodePoints(s, max) {
+  if (max <= 0) return '';
+  if (s.length <= max) return s;
+  const code = s.charCodeAt(max - 1);
+  const end = code >= 0xd800 && code <= 0xdbff ? max - 1 : max;
+  return s.slice(0, Math.max(0, end));
+}
+
 /**
  * In-memory Copy-on-Write filesystem view backed by `Sandbox`.
  *
@@ -612,7 +621,9 @@ export function evaluateTx(op, ctx) {
     fileset: (patternOrPaths, root) => staged.fileset(patternOrPaths, root),
     preview: (val, maxChars = 1000) => {
       const s = formatValue(val);
-      return s.length <= maxChars ? s : `${s.slice(0, maxChars)}… (${s.length} chars total)`;
+      return s.length <= maxChars
+        ? s
+        : `${sliceCodePoints(s, maxChars)}… (${s.length} chars total)`;
     },
     state: stateObj,
     log: logFn,
@@ -730,7 +741,7 @@ export function opTx(op, ctx) {
     const serialized =
       typeof rawReturn === 'string' ? rawReturn : JSON.stringify(rawReturn, null, 2);
     if (serialized && serialized.length > MAX_RETURN_BYTES) {
-      output = serialized.slice(0, MAX_RETURN_BYTES);
+      output = sliceCodePoints(serialized, MAX_RETURN_BYTES);
       note = `return value truncated at ${MAX_RETURN_BYTES} chars (${serialized.length} total)`;
     } else {
       output = serialized;

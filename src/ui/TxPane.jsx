@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { colors, glyphs } from './theme.js';
+import {
+  colors,
+  glyphs,
+  formatPreviewBlock,
+  formatTokens,
+  truncateInline,
+} from './theme.js';
 import { HighlightedInput } from './highlight.jsx';
 import { useLineEditor } from './editor.js';
 
@@ -9,7 +15,7 @@ import { useLineEditor } from './editor.js';
  * operator `tx` runs, live `state` scratchpad inspection, queued turn-boundary items,
  * and an interactive JS prompt sharing `agent.txState` and Copy-on-Write `StagedFS`.
  */
-export function TxPane({ session, width, onClose, onSubmit }) {
+export function TxPane({ session, width, rows = 30, onClose, onSubmit }) {
   const { agent, cfg } = session;
   const snap = agent?.txSnapshot ? agent.txSnapshot() : { entries: [], queued: [], stateKeys: [], statePreview: {} };
   const entries = snap.entries || [];
@@ -73,12 +79,39 @@ export function TxPane({ session, width, onClose, onSubmit }) {
     { isActive: true },
   );
 
+  const paneWidth = Math.max(40, (width || 80) - 2);
+  const innerCols = Math.max(24, paneWidth - 8);
   const current = entries[sel];
   const stateKeys = snap.stateKeys || [];
 
+  // Budget dynamic rows so <TxPane> + <StatusBar> stays strictly <= stdout.rows.
+  // Any Ink dynamic region taller than the terminal viewport breaks cursor-up erase and
+  // stamps duplicate borders into scrollback on every keystroke or meter tick.
+  const fixedChrome = 19 + (snap.queued?.length ? 1 : 0);
+  const spareRows = Math.max(5, (rows || 30) - fixedChrome);
+  const maxEntries = Math.min(8, Math.max(2, Math.floor(spareRows * 0.35)));
+  const maxCode = Math.min(8, Math.max(2, Math.floor(spareRows * 0.35)));
+  const maxOut = Math.min(6, Math.max(1, spareRows - maxEntries - maxCode));
+
+  const codePreview =
+    expanded && current?.code
+      ? formatPreviewBlock(current.code, { maxLines: maxCode, maxCols: innerCols - 2 })
+      : null;
+  const outPreview =
+    expanded && current?.output !== undefined
+      ? formatPreviewBlock(current.output, { maxLines: maxOut, maxCols: innerCols - 4 })
+      : null;
+
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={colors.op} paddingX={1}>
-      <Box>
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={colors.op}
+      paddingX={1}
+      marginLeft={1}
+      width={paneWidth}
+    >
+      <Text wrap="truncate-end">
         <Text bold color={colors.op}>
           Code Mode REPL (tx)
         </Text>
@@ -87,20 +120,20 @@ export function TxPane({ session, width, onClose, onSubmit }) {
           {cfg.codeMode ? 'llm + operator enabled' : 'operator active · llm tx off (--code-mode to enable)'}
           {agent?.busy ? ` ${glyphs.bullet} turn running (inputs queue for next boundary)` : ''}
         </Text>
-      </Box>
+      </Text>
 
       <Box marginTop={1} flexDirection="column">
-        <Text color={colors.dim}>
+        <Text color={colors.dim} wrap="truncate-end">
           state ({stateKeys.length} key{stateKeys.length === 1 ? '' : 's'}):{' '}
           {stateKeys.length
             ? stateKeys
                 .slice(0, 6)
-                .map((k) => `${k}=${ truncateInline(snap.statePreview[k], 28) }`)
+                .map((k) => `${truncateInline(k, 18)}=${truncateInline(snap.statePreview[k], 24)}`)
                 .join(` ${glyphs.bullet} `) + (stateKeys.length > 6 ? ` ${glyphs.ellipsis}` : '')
             : '(empty — assign properties on `state` to persist across turns)'}
         </Text>
         {snap.queued?.length ? (
-          <Text color={colors.warn}>
+          <Text color={colors.warn} wrap="truncate-end">
             {glyphs.warn} {snap.queued.length} operator tx snippet{snap.queued.length > 1 ? 's' : ''} queued for next turn boundary
           </Text>
         ) : null}
@@ -108,11 +141,11 @@ export function TxPane({ session, width, onClose, onSubmit }) {
 
       <Box marginTop={1} flexDirection="column">
         {!entries.length ? (
-          <Text color={colors.dim}>
+          <Text color={colors.dim} wrap="truncate-end">
             No tx runs yet. Globals: read, exists, list, glob, grep, write, replace, remove, move, fileset, state, log, preview
           </Text>
         ) : (
-          entries.slice(-8).map((e) => {
+          entries.slice(-maxEntries).map((e) => {
             const idx = entries.indexOf(e);
             const active = !editing && idx === sel;
             const badge = e.origin === 'operator' ? 'you' : `llm${e.turn ? `#${e.turn}` : ''}`;
@@ -120,18 +153,19 @@ export function TxPane({ session, width, onClose, onSubmit }) {
             const statusColor = e.ok ? colors.ok : colors.err;
             const summary = e.ok
               ? `${e.changes?.length || 0} changed, ${e.opsCount || 0} fs ops`
-              : truncateInline(e.error || 'failed', 44);
+              : truncateInline(e.error || 'failed', 36);
+            const descBudget = Math.max(16, innerCols - summary.length - badge.length - 14);
             return (
-              <Box key={e.seq}>
+              <Text key={e.seq} wrap="truncate-end">
                 <Text color={active ? colors.accent : colors.dim}>
                   {active ? glyphs.prompt : ' '} #{e.seq} [{badge}]{' '}
                 </Text>
                 <Text color={statusColor}>{statusGlyph} </Text>
                 <Text color={active ? colors.accent : undefined}>
-                  {truncateInline(e.description || firstLine(e.code), Math.max(20, width - 48))}
+                  {truncateInline(e.description || firstLine(e.code), descBudget)}
                 </Text>
                 <Text color={colors.dim}>{'  '}{summary}</Text>
-              </Box>
+              </Text>
             );
           })
         )}
@@ -145,35 +179,43 @@ export function TxPane({ session, width, onClose, onSubmit }) {
           borderColor={colors.dim}
           paddingX={1}
         >
-          <Text color={colors.op}>
+          <Text color={colors.op} wrap="truncate-end">
             #{current.seq} ({current.origin}) {glyphs.bullet}{' '}
             {current.ok
               ? `${current.changes?.length || 0} file(s) changed (${current.opsCount || 0} fs ops)`
-              : `error: ${current.error}`}
+              : `error: ${truncateInline(current.error, innerCols - 16)}`}
           </Text>
-          {String(current.code || '')
-            .split('\n')
-            .slice(0, 10)
-            .map((line, i) => (
-              <Text key={`c-${i}`} color={colors.dim}>
-                {'  '}
-                {line}
-              </Text>
-            ))}
-          {current.logs?.length ? (
-            <Text color={colors.accent}>
-              logs: {truncateInline(current.logs.join(' | '), Math.max(30, width - 14))}
+          {codePreview
+            ? codePreview.lines.map((line, i) => (
+                <Text key={`c-${i}`} color={colors.dim} wrap="truncate-end">
+                  {'  '}
+                  {line}
+                </Text>
+              ))
+            : null}
+          {codePreview?.hiddenLines ? (
+            <Text color={colors.dim} wrap="truncate-end">
+              {'  '}
+              {glyphs.ellipsis} +{codePreview.hiddenLines} more line(s)
             </Text>
           ) : null}
-          {current.output !== undefined ? (
-            String(current.output)
-              .split('\n')
-              .slice(0, 8)
-              .map((line, i) => (
-                <Text key={`o-${i}`} color={colors.ok}>
+          {current.logs?.length ? (
+            <Text color={colors.accent} wrap="truncate-end">
+              logs: {truncateInline(current.logs.join(' | '), Math.max(20, innerCols - 8))}
+            </Text>
+          ) : null}
+          {outPreview
+            ? outPreview.lines.map((line, i) => (
+                <Text key={`o-${i}`} color={colors.ok} wrap="truncate-end">
                   {i === 0 ? `${glyphs.arrow} ${line}` : `  ${line}`}
                 </Text>
               ))
+            : null}
+          {outPreview?.truncated ? (
+            <Text color={colors.dim} wrap="truncate-end">
+              {'  '}
+              {glyphs.ellipsis} ({formatTokens(outPreview.totalChars)} chars, {outPreview.totalLines} line{outPreview.totalLines === 1 ? '' : 's'})
+            </Text>
           ) : null}
         </Box>
       ) : null}
@@ -186,11 +228,11 @@ export function TxPane({ session, width, onClose, onSubmit }) {
           mode="plain"
           prefix={
             <Text color={editing ? colors.op : colors.dim} bold>
-              {'tx❯ '}
+              {`tx${glyphs.prompt} `}
             </Text>
           }
         />
-        <Text color={colors.dim}>
+        <Text color={colors.dim} wrap="truncate-end">
           {editing
             ? 'enter run/queue · shift+enter newline · tab browse history · esc close'
             : '↑/↓ select · v toggle detail · tab/i focus prompt · esc/q close'}
@@ -201,10 +243,5 @@ export function TxPane({ session, width, onClose, onSubmit }) {
 }
 
 function firstLine(s) {
-  return String(s || '').trim().split('\n')[0] || '';
-}
-
-function truncateInline(s, max) {
-  const flat = String(s ?? '').replace(/\s+/g, ' ').trim();
-  return flat.length > max ? `${flat.slice(0, Math.max(1, max - 1))}${glyphs.ellipsis}` : flat;
+  return String(s || '').replace(/\r\n?/g, '\n').trim().split('\n')[0] || '';
 }

@@ -12,11 +12,15 @@ export function StatusBar({ cfg, ledger, stats, throughput, width, exitArmed }) 
 
   const snap = throughput ? throughput.snapshot(Date.now(), { seriesPoints: 10 }) : null;
   const tpsVal = snap ? (snap.active ? snap.currentTps : snap.avgTps) : 0;
-  const spark = snap && snap.series.length ? renderSparkline(snap.series, { width: compact ? 6 : 10 }) : '';
+  const sparkWidth = compact || cfg.codeMode || cfg.yolo ? 6 : 10;
+  const spark = snap && snap.series.length ? renderSparkline(snap.series, { width: sparkWidth }) : '';
 
   return (
-    <Box paddingX={1} marginTop={1} flexDirection="column">
-      <Box>
+    <Box width={width} paddingX={1} marginTop={1} flexDirection="column">
+      {/* Nested inside a single <Text wrap="truncate-end"> rather than sibling <Text>
+          children of a flex-row <Box>: when `· tx` + context + cost + tok/s exceeded
+          `width`, Yoga flex-shrank each sibling <Text> into 1-6 char vertical columns. */}
+      <Text wrap="truncate-end">
         <Text color={colors.dim}>{dir}</Text>
         {cfg.codeMode ? (
           <>
@@ -63,7 +67,7 @@ export function StatusBar({ cfg, ledger, stats, throughput, width, exitArmed }) 
             </Text>
           </>
         ) : null}
-      </Box>
+      </Text>
       {exitArmed ? (
         <Text color={colors.warn}>{glyphs.warn} press ctrl+c again to exit</Text>
       ) : null}

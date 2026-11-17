@@ -14,7 +14,15 @@ import { ThroughputPane } from './ThroughputPane.jsx';
 import { PerfHud } from './PerfHud.jsx';
 import { ThinkingBox } from './ThinkingBox.jsx';
 import { renderMarkdown } from './markdown.js';
-import { colors, glyphs, formatMeter } from './theme.js';
+import {
+  colors,
+  glyphs,
+  formatMeter,
+  formatPreviewBlock,
+  formatTokens,
+  sanitizeTerminalText,
+  truncateInline,
+} from './theme.js';
 import { ThroughputTracker, renderSparkline } from './throughput.js';
 import { createDispatcher } from '../session/dispatch.js';
 
@@ -470,7 +478,9 @@ export function App({ session, initialInput }) {
 
   return (
     <Box flexDirection="column" width={width}>
-      <Static items={history}>{(item) => <HistoryItem key={item.key} item={item} />}</Static>
+      <Static items={history}>
+        {(item) => <HistoryItem key={item.key} item={item} width={width} />}
+      </Static>
 
       {!pane ? <PerfHud tracker={throughput} width={width} /> : null}
 
@@ -483,24 +493,26 @@ export function App({ session, initialInput }) {
       ) : null}
 
       {status ? (
-        <Box paddingX={1}>
-          <Text color={colors.accent}>
-            <Spinner type="dots" />
-          </Text>
-          <Text color={colors.dim}> {status}… </Text>
-          {runStartedAt ? (
-            <Text color={colors.dim}>
-              {formatMeter({
-                ms: Date.now() - runStartedAt,
-                chars: runRef.current.chars,
-                thought: runRef.current.thought,
-                ops: Math.max(0, stats.ops - runRef.current.ops0),
-                tps: liveSnap?.currentTps || 0,
-                spark: liveSnap?.series?.length ? renderSparkline(liveSnap.series, { width: 10 }) : '',
-              })}{' '}
+        <Box paddingX={1} width={width}>
+          <Text wrap="truncate-end">
+            <Text color={colors.accent}>
+              <Spinner type="dots" />
             </Text>
-          ) : null}
-          <Text color={colors.dim}>(esc to cancel{busy ? ', type to steer, ctrl+t plot' : ''})</Text>
+            <Text color={colors.dim}> {status}… </Text>
+            {runStartedAt ? (
+              <Text color={colors.dim}>
+                {formatMeter({
+                  ms: Date.now() - runStartedAt,
+                  chars: runRef.current.chars,
+                  thought: runRef.current.thought,
+                  ops: Math.max(0, stats.ops - runRef.current.ops0),
+                  tps: liveSnap?.currentTps || 0,
+                  spark: liveSnap?.series?.length ? renderSparkline(liveSnap.series, { width: 10 }) : '',
+                })}{' '}
+              </Text>
+            ) : null}
+            <Text color={colors.dim}>(esc to cancel{busy ? ', type to steer, ctrl+t plot' : ''})</Text>
+          </Text>
         </Box>
       ) : null}
 
@@ -564,6 +576,7 @@ export function App({ session, initialInput }) {
         <TxPane
           session={session}
           width={width}
+          rows={stdout?.rows || 30}
           onClose={() => setPane(null)}
           onSubmit={submit}
         />
@@ -593,15 +606,17 @@ export function App({ session, initialInput }) {
   );
 }
 
-function HistoryItem({ item }) {
+function HistoryItem({ item, width = 80 }) {
+  const maxDetailCols = Math.max(24, width - 12);
+
   switch (item.type) {
     case 'user':
       return (
         <Box paddingX={1} marginTop={1}>
-          <Text color={colors.user} bold>
-            {glyphs.prompt}{' '}
+          <Text color={colors.user}>
+            <Text bold>{glyphs.prompt} </Text>
+            {sanitizeTerminalText(item.text)}
           </Text>
-          <Text color={colors.user}>{item.text}</Text>
         </Box>
       );
 
@@ -617,29 +632,10 @@ function HistoryItem({ item }) {
       return (
         <Box flexDirection="column" paddingX={1}>
           {item.ops.map((op, i) => (
-            <Box key={i} flexDirection="column">
-              <Text color={colors.op}>
-                {'  '}
-                {glyphs.bullet} {describeOp(op)}
-              </Text>
-              {op.op === 'tx' && op.code
-                ? String(op.code)
-                    .split('\n')
-                    .slice(0, 12)
-                    .map((line, li) => (
-                      <Text key={li} color={colors.dim}>
-                        {'      '}
-                        {line}
-                      </Text>
-                    ))
-                : null}
-              {op.op === 'tx' && op.code && String(op.code).split('\n').length > 12 ? (
-                <Text color={colors.dim}>
-                  {'      '}
-                  {glyphs.ellipsis} ({String(op.code).split('\n').length} lines total — /tx for full REPL log)
-                </Text>
-              ) : null}
-            </Box>
+            <Text key={i} color={colors.op} wrap="truncate-end">
+              {'  '}
+              {glyphs.bullet} {describeOp(op, Math.max(24, width - 8))}
+            </Text>
           ))}
         </Box>
       );
@@ -651,30 +647,59 @@ function HistoryItem({ item }) {
           <Box flexDirection="column" paddingX={1}>
             {outcome.results
               .filter((r) => r.result && MUTATING.has(r.op))
-              .map((r, i) => (
-                <Box key={i} flexDirection="column">
-                  <Text color={colors.ok}>
-                    {'  '}
-                    {glyphs.check} {summarizeResult(r)}
-                  </Text>
-                  {r.op === 'tx' && r.result?.logs?.length ? (
-                    <Text color={colors.accent}>
-                      {'      '}logs: {r.result.logs.slice(0, 3).join(' | ')}
+              .map((r, i) => {
+                const txChanges = r.op === 'tx' ? r.result?.changes || [] : [];
+                const txOut =
+                  r.op === 'tx' && r.result?.output !== undefined
+                    ? formatPreviewBlock(r.result.output, {
+                        maxLines: 4,
+                        maxCols: maxDetailCols,
+                      })
+                    : null;
+                return (
+                  <Box key={i} flexDirection="column">
+                    <Text color={colors.ok} wrap="truncate-end">
+                      {'  '}
+                      {glyphs.check} {summarizeResult(r, Math.max(24, width - 8))}
                     </Text>
-                  ) : null}
-                  {r.op === 'tx' && r.result?.output !== undefined
-                    ? String(r.result.output)
-                        .split('\n')
-                        .slice(0, 8)
-                        .map((line, li) => (
-                          <Text key={li} color={colors.dim}>
+                    {txChanges.slice(0, 6).map((c, ci) => (
+                      <Text key={`ch-${ci}`} color={colors.dim} wrap="truncate-end">
+                        {'      '}
+                        {truncateInline(c.path, Math.max(16, maxDetailCols - 24))} {c.action} (
+                        {c.delta >= 0 ? '+' : ''}
+                        {c.delta} lines)
+                      </Text>
+                    ))}
+                    {txChanges.length > 6 ? (
+                      <Text color={colors.dim} wrap="truncate-end">
+                        {'      '}
+                        {glyphs.ellipsis} +{txChanges.length - 6} more file(s)
+                      </Text>
+                    ) : null}
+                    {r.op === 'tx' && r.result?.logs?.length ? (
+                      <Text color={colors.accent} wrap="truncate-end">
+                        {'      '}logs:{' '}
+                        {truncateInline(r.result.logs.slice(0, 3).join(' | '), maxDetailCols - 6)}
+                      </Text>
+                    ) : null}
+                    {txOut
+                      ? txOut.lines.map((line, li) => (
+                          <Text key={li} color={colors.dim} wrap="truncate-end">
                             {'      '}
                             {li === 0 ? `${glyphs.arrow} ${line}` : `  ${line}`}
                           </Text>
                         ))
-                    : null}
-                </Box>
-              ))}
+                      : null}
+                    {txOut?.truncated ? (
+                      <Text color={colors.dim} wrap="truncate-end">
+                        {'      '}
+                        {glyphs.ellipsis} ({formatTokens(txOut.totalChars)} chars, {txOut.totalLines}{' '}
+                        line{txOut.totalLines === 1 ? '' : 's'} — /tx for full output)
+                      </Text>
+                    ) : null}
+                  </Box>
+                );
+              })}
           </Box>
         );
       }
@@ -683,7 +708,7 @@ function HistoryItem({ item }) {
           {outcome.errors.map((e, i) => (
             <Text key={i} color={colors.err}>
               {'  '}
-              {glyphs.cross} [{e.index}] {e.op}: {e.message}
+              {glyphs.cross} [{e.index}] {e.op}: {sanitizeTerminalText(e.message)}
             </Text>
           ))}
           <Text color={colors.dim}>
@@ -705,44 +730,60 @@ function HistoryItem({ item }) {
           <Box flexDirection="column" paddingX={1}>
             <Text color={colors.err}>
               {'  '}
-              {glyphs.cross} tx (operator): {e.error}
+              {glyphs.cross} tx (operator): {sanitizeTerminalText(e.error)}
             </Text>
           </Box>
         );
       }
+      const changes = e.changes || [];
+      const outBlock =
+        e.output !== undefined
+          ? formatPreviewBlock(e.output, { maxLines: 12, maxCols: maxDetailCols })
+          : null;
       return (
         <Box flexDirection="column" paddingX={1}>
-          <Text color={colors.ok}>
+          <Text color={colors.ok} wrap="truncate-end">
             {'  '}
             {glyphs.check} tx (operator):{' '}
-            {e.changes?.length
-              ? `${e.changes.length} file(s) modified (${e.opsCount || 0} fs ops, ${e.durationMs || 0}ms)`
+            {changes.length
+              ? `${changes.length} file(s) modified (${e.opsCount || 0} fs ops, ${e.durationMs || 0}ms)`
               : `${e.opsCount || 0} fs ops (read-only, ${e.durationMs || 0}ms)`}
             {' · added to context'}
           </Text>
-          {(e.changes || []).map((c, ci) => (
-            <Text key={`ch-${ci}`} color={colors.dim}>
+          {changes.slice(0, 10).map((c, ci) => (
+            <Text key={`ch-${ci}`} color={colors.dim} wrap="truncate-end">
               {'      '}
-              {c.path} {c.action} ({c.delta >= 0 ? '+' : ''}
+              {truncateInline(c.path, Math.max(16, maxDetailCols - 24))} {c.action} (
+              {c.delta >= 0 ? '+' : ''}
               {c.delta} lines)
             </Text>
           ))}
-          {e.logs?.length ? (
-            <Text color={colors.accent}>
-              {'      '}logs: {e.logs.join(' | ')}
+          {changes.length > 10 ? (
+            <Text color={colors.dim} wrap="truncate-end">
+              {'      '}
+              {glyphs.ellipsis} +{changes.length - 10} more file(s)
             </Text>
           ) : null}
-          {e.output !== undefined
-            ? String(e.output)
-                .split('\n')
-                .slice(0, 12)
-                .map((line, li) => (
-                  <Text key={`out-${li}`} color={colors.dim}>
-                    {'      '}
-                    {li === 0 ? `${glyphs.arrow} ${line}` : `  ${line}`}
-                  </Text>
-                ))
+          {e.logs?.length ? (
+            <Text color={colors.accent} wrap="truncate-end">
+              {'      '}logs: {truncateInline(e.logs.join(' | '), maxDetailCols - 6)}
+            </Text>
+          ) : null}
+          {outBlock
+            ? outBlock.lines.map((line, li) => (
+                <Text key={`out-${li}`} color={colors.dim} wrap="truncate-end">
+                  {'      '}
+                  {li === 0 ? `${glyphs.arrow} ${line}` : `  ${line}`}
+                </Text>
+              ))
             : null}
+          {outBlock?.truncated ? (
+            <Text color={colors.dim} wrap="truncate-end">
+              {'      '}
+              {glyphs.ellipsis} ({formatTokens(outBlock.totalChars)} chars, {outBlock.totalLines}{' '}
+              line{outBlock.totalLines === 1 ? '' : 's'} — /tx for full output)
+            </Text>
+          ) : null}
         </Box>
       );
     }
@@ -841,42 +882,57 @@ function HistoryItem({ item }) {
 
 const MUTATING = new Set(['write', 'replace', 'delete', 'move', 'tx', 'shell']);
 
-function describeOp(op) {
+function describeOp(op, maxCols = 120) {
+  let raw;
   switch (op.op) {
     case 'shell':
-      return `shell: ${op.cmd}`;
+      raw = `shell: ${op.cmd}`;
+      break;
     case 'tx':
-      return `tx: ${op.description || `${(op.code || '').split('\n').length} line(s) JS`}`;
+      raw = `tx: ${op.description || `${String(op.code || '').replace(/\r\n?/g, '\n').split('\n').length} line(s) JS`}`;
+      break;
     case 'move':
-      return `move: ${op.from} ${glyphs.arrow} ${op.to}`;
+      raw = `move: ${op.from} ${glyphs.arrow} ${op.to}`;
+      break;
     case 'grep':
     case 'glob':
-      return `${op.op}: "${op.pattern}" in ${op.path}`;
+      raw = `${op.op}: "${op.pattern}" in ${op.path}`;
+      break;
     case 'read':
-      return `read: ${op.path}${op.lines ? ` [${op.lines[0]}-${op.lines[1]}]` : ''}`;
+      raw = `read: ${op.path}${op.lines ? ` [${op.lines[0]}-${op.lines[1]}]` : ''}`;
+      break;
     default:
-      return `${op.op}: ${op.path}`;
+      raw = `${op.op}: ${op.path}`;
   }
+  return truncateInline(raw, maxCols);
 }
 
-function summarizeResult(r) {
+function summarizeResult(r, maxCols = 120) {
   const x = r.result;
+  let raw;
   switch (r.op) {
     case 'write':
-      return `${x.path} ${x.action} (${x.lines} lines)`;
+      raw = `${x.path} ${x.action} (${x.lines} lines)`;
+      break;
     case 'replace':
-      return `${x.path} edited (${x.delta >= 0 ? '+' : ''}${x.delta} lines)`;
+      raw = `${x.path} edited (${x.delta >= 0 ? '+' : ''}${x.delta} lines)`;
+      break;
     case 'delete':
-      return `${x.path} deleted`;
+      raw = `${x.path} deleted`;
+      break;
     case 'move':
-      return `${x.from} ${glyphs.arrow} ${x.to}`;
+      raw = `${x.from} ${glyphs.arrow} ${x.to}`;
+      break;
     case 'tx':
-      return x.changes?.length
+      raw = x.changes?.length
         ? `tx: ${x.changes.length} file(s) modified (${x.opsCount} fs ops)`
         : `tx: ${x.opsCount} fs ops (read-only)`;
+      break;
     case 'shell':
-      return `$ ${x.cmd} (exit ${x.exitCode}, ${x.durationMs}ms)`;
+      raw = `$ ${x.cmd} (exit ${x.exitCode}, ${x.durationMs}ms)`;
+      break;
     default:
-      return r.op;
+      raw = r.op;
   }
+  return truncateInline(raw, maxCols);
 }
