@@ -169,6 +169,29 @@ export function drainPendingPrompts(session) {
   return applyPrompts(session);
 }
 
+/**
+ * Toggle Code Mode (`cfg.codeMode`) for the running session and rebuild (or stage at the
+ * next step boundary if a turn is in flight) the system prompt so `CODE_MODE_PROTOCOL`
+ * enters or leaves `ledger.system` cleanly without mutating an in-flight request.
+ *
+ * @param {object} session
+ * @param {boolean} enabled
+ * @returns {{codeMode: boolean, staged: boolean, applied: boolean, after?: number, reason?: string}}
+ */
+export function setSessionCodeMode(session, enabled) {
+  const { cfg, agent } = session;
+  cfg.codeMode = Boolean(enabled);
+  if (cfg.overrides && typeof cfg.overrides === 'object') {
+    cfg.overrides.DAVAI_CODE_MODE = cfg.codeMode ? 'true' : 'false';
+  }
+  if (agent?.busy) {
+    stageApply(session);
+    return { codeMode: cfg.codeMode, staged: true, applied: false };
+  }
+  const r = applyPrompts(session);
+  return { codeMode: cfg.codeMode, staged: false, ...r };
+}
+
 function resolveSpec(key) {
   const spec = PROMPT_SPECS.find((s) => s.key === key);
   if (!spec) throw new Error(`unknown prompt "${key}"`);

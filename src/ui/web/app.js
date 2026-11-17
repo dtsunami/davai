@@ -841,6 +841,9 @@ function renderPrompts(d) {
     layers.appendChild(el('span', 'tag', `${key}: ${layer}`));
     layers.lastChild.title = `${key} comes from ${(d.sources || {})[key] || layer}`;
   }
+  const cmActive = Boolean(state.session?.codeMode);
+  const cmTag = el('span', cmActive ? 'live-tag' : 'muted', cmActive ? '● codeMode (tx): active in prompt' : '○ codeMode (tx): off');
+  layers.appendChild(cmTag);
   box.appendChild(layers);
 
   // Saved-but-not-live. Without this the editor and the session disagree silently,
@@ -1564,8 +1567,11 @@ async function loadTx() {
 function renderTx() {
   const s = txRepl.snap || { codeMode: false, queued: [], stateKeys: [], statePreview: {}, entries: [] };
   $('tx-mode-note').textContent = s.codeMode
-    ? '· LLM + operator enabled'
-    : '· operator active (launch with --code-mode to expose tx to the LLM)';
+    ? '· LLM + operator enabled (CODE_MODE_PROTOCOL in system prompt)'
+    : '· LLM tx prompt is OFF — click "enable LLM tx" or run /tx on so the model can emit tx';
+  const tog = $('tx-toggle-llm');
+  tog.textContent = s.codeMode ? 'disable LLM tx' : 'enable LLM tx';
+  tog.setAttribute('aria-pressed', String(Boolean(s.codeMode)));
 
   const keys = s.stateKeys || [];
   $('tx-state').textContent = keys.length
@@ -2512,6 +2518,17 @@ function bind() {
   $('codemode-badge').onclick = () => setTab('tx');
   $('tx-run').onclick = sendTx;
   $('tx-refresh').onclick = loadTx;
+  $('tx-toggle-llm').onclick = async () => {
+    const want = !(txRepl.snap?.codeMode);
+    try {
+      await api('/api/submit', { text: want ? '/tx on' : '/tx off' });
+      await refreshSession();
+      await loadPrompts();
+      await loadTx();
+    } catch (e) {
+      pushEntry({ type: 'error', message: e.message });
+    }
+  };
   $('tx-clear-state').onclick = async () => {
     try {
       await api('/api/submit', { text: '/tx --clear-state' });

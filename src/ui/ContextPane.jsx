@@ -12,9 +12,12 @@ import { dropSegment, pinSegment } from '../context/manage.js';
  * this component left the status bar and any attached browser showing figures this pane
  * had already changed.
  */
+const PAGE_LINES = 32;
+
 export function ContextPane({ ledger, width, onChange, onClose }) {
   const [sel, setSel] = useState(0);
   const [viewing, setViewing] = useState(null);
+  const [scroll, setScroll] = useState(0);
   const [, force] = useState(0);
 
   const rows = ledger.breakdown();
@@ -30,7 +33,15 @@ export function ContextPane({ ledger, width, onChange, onClose }) {
 
   useInput((input, key) => {
     if (viewing !== null) {
-      if (key.escape || input === 'q' || key.return) setViewing(null);
+      if (key.escape || input === 'q') {
+        setViewing(null);
+        setScroll(0);
+        return;
+      }
+      if (key.upArrow || input === 'k') setScroll((s) => Math.max(0, s - 4));
+      if (key.downArrow || input === 'j') setScroll((s) => s + 4);
+      if (key.pageUp) setScroll((s) => Math.max(0, s - PAGE_LINES));
+      if (key.pageDown || input === ' ') setScroll((s) => s + PAGE_LINES);
       return;
     }
     if (key.escape || input === 'q') return onClose();
@@ -56,6 +67,7 @@ export function ContextPane({ ledger, width, onChange, onClose }) {
       return;
     }
     if (input === 'v' || key.return) {
+      setScroll(0);
       setViewing(row.id);
     }
   });
@@ -63,19 +75,21 @@ export function ContextPane({ ledger, width, onChange, onClose }) {
   if (viewing !== null) {
     const seg = viewing === 0 ? { part: { type: 'text', text: ledger.system } } : ledger.get(viewing);
     const text = seg?.part?.type === 'text' ? seg.part.text : `(${seg?.part?.type || 'binary'} content)`;
-    const lines = text.split('\n').slice(0, 40);
+    const allLines = text.split('\n');
+    const maxScroll = Math.max(0, allLines.length - PAGE_LINES);
+    const top = Math.min(scroll, maxScroll);
+    const lines = allLines.slice(top, top + PAGE_LINES);
     return (
       <Box flexDirection="column" borderStyle="round" borderColor={colors.accent} paddingX={1}>
         <Text bold color={colors.accent}>
-          Segment #{viewing}
+          Segment #{viewing} (lines {top + 1}-{Math.min(allLines.length, top + lines.length)} of {allLines.length})
         </Text>
         {lines.map((l, i) => (
           <Text key={i}>{l.slice(0, width - 6)}</Text>
         ))}
-        {text.split('\n').length > 40 ? (
-          <Text color={colors.dim}>{glyphs.ellipsis} truncated</Text>
-        ) : null}
-        <Text color={colors.dim}>esc to go back</Text>
+        <Text color={colors.dim}>
+          j/k or space to scroll {glyphs.bullet} esc/q to go back
+        </Text>
       </Box>
     );
   }

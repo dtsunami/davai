@@ -5,7 +5,8 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_PROMPTS, PROMPT_SPECS, promptDirs } from '../agent/prompt.js';
+import { CODE_MODE_PROTOCOL, DEFAULT_PROMPTS, PROMPT_SPECS, promptDirs } from '../agent/prompt.js';
+import { setSessionCodeMode } from '../session/promptedit.js';
 import { checkForks, stampFork, snapshot, hashText } from '../agent/promptfork.js';
 import { runShell } from '../agent/ops/shell.js';
 import { gateShell } from '../agent/ops/executor.js';
@@ -19,7 +20,7 @@ import { formatTokens, glyphs } from './theme.js';
 const HELP = `Commands
   sh <cmd>            run a shell command; output is added to context (sudo asks for a password)
   tx <code>           run JS in the CoW tx REPL (queues for next turn boundary if busy)
-  /tx [code|--state]  open the interactive Code Mode REPL pane, or run/inspect tx state
+  /tx [on|off|code]   toggle LLM Code Mode, open the tx REPL pane, or run/inspect tx
   /model [id|query]   model and settings pane (--save to remember it for next time)
   /tps                token/s and time-to-first-token, per turn and per model (also ctrl+t)
   /context            context breakdown (also ctrl+g)
@@ -329,6 +330,38 @@ export async function handleCommand(text, deps) {
       const trimmedArg = arg.trim();
       if (!trimmedArg) {
         setPane('tx');
+        return { handled: true };
+      }
+      if (/^(--on|on|--enable|enable|--off|off|--disable|disable)$/i.test(trimmedArg)) {
+        const want = /^(--on|on|--enable|enable)$/i.test(trimmedArg);
+        try {
+          const r = setSessionCodeMode(session, want);
+          log?.event?.('code-mode', { enabled: want, staged: r.staged });
+          push({
+            type: 'notice',
+            message: want
+              ? r.staged
+                ? 'Code Mode enabled — LLM tx protocol queued for next turn boundary (rebuilds prompt cache)'
+                : `Code Mode enabled — LLM tx protocol injected into system prompt (~${formatTokens(r.after || ledger.systemTokens)} tokens)`
+              : r.staged
+                ? 'Code Mode disabled — system prompt rebuild queued for next turn boundary'
+                : 'Code Mode disabled — LLM tx protocol removed from system prompt',
+          });
+          refresh();
+        } catch (err) {
+          push({ type: 'error', message: err.message });
+        }
+        return { handled: true };
+      }
+      if (trimmedArg === '--prompt' || trimmedArg === 'prompt') {
+        push({
+          type: 'info',
+          text: [
+            `Code Mode LLM Addendum — ${cfg.codeMode ? 'ACTIVE in system prompt' : 'INACTIVE (enable with /tx on or --code-mode)'}`,
+            '',
+            CODE_MODE_PROTOCOL,
+          ].join('\n'),
+        });
         return { handled: true };
       }
       if (trimmedArg === '--state' || trimmedArg === 'state') {
@@ -735,6 +768,13 @@ export async function handleCommand(text, deps) {
           const where = layer === 'default' ? 'built-in' : cfg.promptSources?.[s.key];
           return `  ${s.key.padEnd(10)} ${layer.padEnd(8)} ${driftOf(s.key).padEnd(10)} ${where}`;
         });
+        lines.push(
+          `  ${'codeMode'.padEnd(10)} ${(cfg.codeMode ? 'active' : 'off').padEnd(8)} ${''.padEnd(10)} ${
+            cfg.codeMode
+              ? 'CODE_MODE_PROTOCOL appended after protocol (/tx --prompt to view)'
+              : 'inactive — enable with /tx on, --code-mode, or DAVAI_CODE_MODE=true'
+          }`,
+        );
         push({
           type: 'info',
           text: [

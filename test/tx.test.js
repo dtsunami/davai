@@ -15,6 +15,8 @@ import { Ledger } from '../src/context/ledger.js';
 import { Artifacts } from '../src/context/artifacts.js';
 import { resolveModel } from '../src/config/models.js';
 import { replaySegments } from '../src/session/resume.js';
+import { setSessionCodeMode } from '../src/session/promptedit.js';
+import { promptDirs, resolvePrompts } from '../src/agent/prompt.js';
 
 let base;
 let root;
@@ -399,5 +401,45 @@ describe('operator interactive tx REPL and atomic turn-boundary queueing', () =>
     const snap = agent.txSnapshot();
     expect(snap.entries.map((e) => e.origin)).toEqual(['operator', 'agent']);
     expect(snap.entries[1].output).toBe('42');
+  });
+
+  it('toggles LLM Code Mode live via setSessionCodeMode (rebuilding system prompt immediately or staging mid-turn)', () => {
+    const dummyProvider = { async *send() {} };
+    const { agent, ledger } = makeTestAgent(dummyProvider);
+    const resolved = resolvePrompts();
+    const session = {
+      cfg: {
+        ...agent.cfg,
+        codeMode: false,
+        overrides: {},
+        prompts: resolved.values,
+        promptSources: resolved.sources,
+        promptLayers: resolved.layers,
+        promptDirs: promptDirs(base, root),
+        roDirs: [],
+        contextLimit: 200_000,
+      },
+      agent,
+      ledger,
+      sandbox: ctx.sandbox,
+      pendingPrompts: null,
+    };
+    agent.cfg = session.cfg;
+    ledger.setSystem(buildSystemPrompt({ grounding: 'G', prompts: resolved.values, codeMode: false }));
+    expect(ledger.system).not.toContain('Code Mode (`tx` op — enabled)');
+
+    // Enable while idle -> rebuilds system prompt immediately with CODE_MODE_PROTOCOL:
+    const onRes = setSessionCodeMode(session, true);
+    expect(onRes.staged).toBe(false);
+    expect(onRes.applied).toBe(true);
+    expect(session.cfg.codeMode).toBe(true);
+    expect(ledger.system).toContain('Code Mode (`tx` op — enabled)');
+
+    // Disable while busy -> stages for next turn boundary without mutating in-flight system prompt:
+    agent.busy = true;
+    const offStaged = setSessionCodeMode(session, false);
+    expect(offStaged.staged).toBe(true);
+    expect(session.pendingPrompts).not.toBeNull();
+    expect(ledger.system).toContain('Code Mode (`tx` op — enabled)');
   });
 });

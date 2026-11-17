@@ -219,6 +219,10 @@ function completeSlashArgs(value, cursor, session, { cwd } = {}) {
       return null;
     }
 
+    case '/tx':
+    case '/repl':
+      return matchWords(['on', 'off', '--prompt', '--state', '--clear-state']);
+
     case '/yolo':
       return matchWords(['on', 'off']);
 
