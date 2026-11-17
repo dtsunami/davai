@@ -41,6 +41,7 @@ const FORWARD = [
   'steered',
   'tx-queued',
   'tx-applied',
+  'prompts-applied',
 ];
 
 export class SessionBus extends EventEmitter {

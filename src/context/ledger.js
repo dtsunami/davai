@@ -141,6 +141,25 @@ export class Ledger {
     return true;
   }
 
+  /**
+   * Replace a text segment's body and label in place, recalculating its token weight.
+   * Used to compress a superseded rejected/malformed `da_ops` turn into a 1-line stub
+   * once the model's recovery turn succeeds — preserving alternating conversation roles
+   * and an honest trace of what failed without re-billing multi-kilobyte dead payloads.
+   * @param {number} id
+   * @param {{text: string, label?: string, clearThinking?: boolean}} patch
+   * @returns {boolean}
+   */
+  replaceText(id, { text, label, clearThinking = false }) {
+    const s = this.get(id);
+    if (!s || PROTECTED.has(s.type) || s.pinned || s.part?.type !== 'text') return false;
+    s.part = { type: 'text', text: String(text ?? '') };
+    if (label !== undefined) s.label = label;
+    if (clearThinking && 'thinking' in s) delete s.thinking;
+    s.tokens = estimate(s.part.text);
+    return true;
+  }
+
   pin(id, value = true) {
     const s = this.get(id);
     if (!s) return false;

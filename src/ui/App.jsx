@@ -232,6 +232,14 @@ export function App({ session, initialInput }) {
     };
     const onError = (e) => {
       throughput.endTurn();
+      // Clear buffered live/thinking regions on error just like `onTurnEnd` and
+      // `onCancelled` do — otherwise a socket drop mid-turn leaves the orphaned live
+      // `da_ops` block stuck above the prompt forever.
+      clearTimeout(frameRef.current);
+      frameRef.current = null;
+      liveRef.current = '';
+      setLive('');
+      clearThinking();
       push({ type: 'error', message: e.message, detail: e.detail });
       setApproval(null);
       setBusy(false);

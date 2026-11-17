@@ -499,6 +499,10 @@ export class Agent extends EventEmitter {
     this.busy = true;
     this.degenerate = null;
     this.controller = new AbortController();
+    this.log?.flight?.mark('run:start', {
+      promptChars: (input || '').length,
+      contextTokens: this.ledger?.tokens ?? null,
+    });
 
     try {
       if (input) {
@@ -510,6 +514,14 @@ export class Agent extends EventEmitter {
       let nudges = 0;
       let nudgedAt = -1;
       let empties = 0;
+      /**
+       * Rejected/rolled-back or parse-failed turn pairs waiting for a clean recovery
+       * step before their multi-kilobyte payloads are compressed into 1-line stubs.
+       * Kept verbatim for the immediate retry turn so the model can see what failed,
+       * then collapsed once a subsequent turn succeeds or concludes.
+       * @type {Array<{assistantId: number, resultId: number, prose: string, summary: string, label: string}>}
+       */
+      const pendingFailedTurns = [];
 
       for (let step = 0; step < MAX_STEPS; step++) {
         if (this.controller.signal.aborted) {
@@ -620,7 +632,7 @@ export class Agent extends EventEmitter {
         // Reasoning is attached to the segment for Chat Completions backends (e.g.
         // Nebius serving Beam via OpenRouter) that require `reasoning_content` on
         // prior assistant turns and reject requests that drop it.
-        this.ledger.add({
+        const assistantSeg = this.ledger.add({
           type: 'assistant',
           label:
             firstLine(prose || turn.text) || (native.block ? 'native da_ops call' : 'assistant turn'),
@@ -640,11 +652,18 @@ export class Agent extends EventEmitter {
             return;
           }
           this.emit('repair', { error: parseError, attempt: repairs });
-          this.ledger.add({
+          const repairSeg = this.ledger.add({
             type: 'op-result',
             label: 'parse error',
             role: 'user',
             text: repairPrompt(parseError, this.prompts),
+          });
+          pendingFailedTurns.push({
+            assistantId: assistantSeg.id,
+            resultId: repairSeg.id,
+            prose: prose || '',
+            summary: `malformed da_ops (${firstLine(parseError)})`,
+            label: 'parse error (compressed)',
           });
           continue;
         }
@@ -683,6 +702,7 @@ export class Agent extends EventEmitter {
               this.log.event('nudge-wasted', { prose: firstLine(prose) });
             }
             if (this.steers.length || this.pendingTx.length) continue;
+            this.#compressSupersededFailures(pendingFailedTurns);
             this.emit('done', { prose });
             return;
           }
@@ -713,13 +733,27 @@ export class Agent extends EventEmitter {
           return;
         }
 
-        const outcome = await this.#executeOps(
+        const execOut = await this.#executeOps(
           ops,
           native.ops ? salvageNote(native.unusable) : '',
         );
-        if (outcome === 'cancelled') {
+        if (execOut.status === 'cancelled') {
           this.emit('cancelled');
           return;
+        }
+        if (execOut.zeroEffectFailure) {
+          pendingFailedTurns.push({
+            assistantId: assistantSeg.id,
+            resultId: execOut.resultId,
+            prose: prose || '',
+            summary: execOut.failureSummary,
+            label: `${execOut.status} (compressed)`,
+          });
+        } else {
+          // A batch succeeded (or partially committed before a shell stop/denial): any
+          // earlier zero-effect rejected/malformed attempts have done their job steering
+          // the model back to reality and can now shrink to 1-line factual stubs.
+          this.#compressSupersededFailures(pendingFailedTurns);
         }
         nudgedAt = -1;
         nudges = 0; // real progress: the next stall gets a fresh budget
@@ -744,6 +778,7 @@ export class Agent extends EventEmitter {
       this.#applyPendingTx();
       this.busy = false;
       this.controller = null;
+      this.log?.flight?.mark('idle', { turns: this.stats.turns, ops: this.stats.ops });
     }
   }
 
@@ -945,6 +980,14 @@ export class Agent extends EventEmitter {
       // Opened before the request: from here on, everything streamed reaches disk as it
       // arrives rather than at turn end (session/stream.js).
       this.log.stream?.begin(this.stats.turns, attemptBase + attempt);
+      this.log.flight?.mark('llm:await-first-byte', {
+        turn: this.stats.turns,
+        attempt: attemptBase + attempt,
+        provider: provider.name || this.cfg?.provider,
+        model: provider.model || this.cfg?.model?.id,
+        messages: messages.length,
+        contextTokens: this.ledger?.tokens ?? null,
+      });
       const requestAt = Date.now();
       let firstDeltaAt = null;
       // Logged per attempt, before the request: an attachment the provider rejects is
@@ -970,6 +1013,12 @@ export class Agent extends EventEmitter {
           // starts long before the answer does, and that gap is the interesting one.
           if (firstDeltaAt === null && (ev.t === 'text' || ev.t === 'thinking')) {
             firstDeltaAt = Date.now();
+            this.log.flight?.mark('llm:streaming', {
+              turn: this.stats.turns,
+              attempt: attemptBase + attempt,
+              channel: ev.t,
+              ttftMs: firstDeltaAt - requestAt,
+            });
           }
           switch (ev.t) {
             case 'text':
@@ -1001,8 +1050,23 @@ export class Agent extends EventEmitter {
         // until the turn ends, and the first delta's arrival is all the state needed.
         ttftMs = firstDeltaAt === null ? null : firstDeltaAt - requestAt;
         durationMs = Date.now() - requestAt;
+        this.log.flight?.mark('llm:stream-done', {
+          turn: this.stats.turns,
+          durationMs,
+          ttftMs,
+          textChars: text.length,
+          thinkingChars: thinking.length,
+          stop: stop?.reason ?? null,
+        });
         break;
       } catch (err) {
+        this.log.flight?.note('llm:stream-error', {
+          turn: this.stats.turns,
+          attempt: attemptBase + attempt,
+          cancelled: Boolean(err?.cancelled),
+          status: err?.status ?? null,
+          message: err?.message,
+        });
         // Close the stream record first: it holds the deltas themselves, and every path
         // out of this catch either returns, throws or retries.
         this.log.stream?.end({
@@ -1024,13 +1088,38 @@ export class Agent extends EventEmitter {
             ...(outgoingMedia.length ? { ledgerMedia: outgoingMedia } : {}),
           });
         }
+        // If the stream dropped *after* emitting a complete, valid `da_ops` block (e.g.
+        // Node undici `terminated` right as the HTTP chunked trailer closes), salvage the
+        // turn instead of failing the run or duplicating prose on a retry.
+        if (!err?.cancelled && text.trim()) {
+          const salvaged = extract(text);
+          if (salvaged.ops && !salvaged.parseError) {
+            ttftMs = firstDeltaAt === null ? null : firstDeltaAt - requestAt;
+            durationMs = Date.now() - requestAt;
+            stop = { reason: 'end_turn' };
+            this.log.flight?.note('llm:stream-salvaged', {
+              turn: this.stats.turns,
+              ops: salvaged.ops.length,
+              error: err?.message,
+            });
+            this.log.event('stream-salvaged', {
+              turn: this.stats.turns,
+              ops: salvaged.ops.length,
+              error: err?.message,
+            });
+            this.emit('warning', {
+              message: `stream dropped at close (${err?.message || 'network error'}), but the da_ops batch was complete — continuing`,
+            });
+            break;
+          }
+        }
         // Whatever streamed before the failure is otherwise lost: the assistant event
         // below is never reached, and the UI drops the partial turn on cancel.
         this.#logPartial(err?.cancelled ? 'cancelled' : 'error', text, thinking, err);
         if (err?.cancelled) return { cancelled: true, text, usage, attempts: attempt + 1 };
-        // Retry only a transient failure that produced nothing: re-sending after the
-        // model has already streamed half an answer would duplicate it. A 429 with
-        // "limit: 0" is marked unretryable upstream precisely so it lands here.
+        // Retry a transient failure when no visible text was emitted yet (or when only
+        // internal thinking streamed before the socket died). Re-sending after visible
+        // prose streamed would duplicate it on screen, unless we have nothing to lose.
         if (!err?.retryable || text || attempt >= MAX_PROVIDER_RETRIES) throw err;
         // Already logged above; the retry streams a fresh turn.
         thinking = '';
@@ -1123,6 +1212,34 @@ export class Agent extends EventEmitter {
     return native;
   }
 
+  /**
+   * Collapse superseded zero-effect failed turns (`parse-error`, `plan-failed`, or
+   * rolled-back non-shell `apply-failed`) into compact stubs once a later turn succeeds.
+   *
+   * Never touches a batch where file edits were kept (`denied` or failed `shell`),
+   * because disk state actually changed there and the model needs the exact record.
+   * @param {Array<{assistantId: number, resultId: number, prose: string, summary: string, label: string}>} queue
+   */
+  #compressSupersededFailures(queue) {
+    if (!queue.length) return;
+    const items = queue.splice(0, queue.length);
+    for (const item of items) {
+      const proseHead = item.prose.trim();
+      const assistantStub = proseHead
+        ? `${proseHead}\n\n[superseded da_ops payload omitted — failed: ${item.summary}; nothing was applied]`
+        : `[superseded da_ops batch omitted — failed: ${item.summary}; nothing was applied]`;
+      const resultStub = `Batch not applied (${item.summary}). Disk was unchanged; resolved in the following turn.`;
+      this.ledger.replaceText(item.assistantId, {
+        text: assistantStub,
+        label: `superseded: ${firstLine(item.summary)}`,
+      });
+      this.ledger.replaceText(item.resultId, {
+        text: resultStub,
+        label: item.label,
+      });
+    }
+  }
+
   /** @param {string} [note] prefixed to the results, e.g. for a salvaged native call */
   async #executeOps(rawOps, note = '') {
     const { ops, errors } = normalizeBatch(rawOps);
@@ -1132,16 +1249,27 @@ export class Agent extends EventEmitter {
       const outcome = { status: 'plan-failed', results: [], errors };
       this.emit('ops-result', { outcome, ops: [] });
       this.log.event('ops-rejected', { errors });
-      this.ledger.add({
+      const rejSeg = this.ledger.add({
         type: 'op-result',
         label: `batch rejected (${errors.length} error${errors.length > 1 ? 's' : ''})`,
         role: 'user',
         text: withNote(note, opsResultPrompt(formatResults(outcome), this.prompts)),
       });
-      return outcome.status;
+      return {
+        status: outcome.status,
+        resultId: rejSeg.id,
+        zeroEffectFailure: true,
+        failureSummary: summarizeBatchErrors(errors),
+      };
     }
 
     this.emit('ops-parsed', ops);
+    const opSummary = ops.map((o) => o.op);
+    this.log.flight?.mark('ops:execute', {
+      turn: this.stats.turns,
+      count: ops.length,
+      ops: opSummary,
+    });
     this.log.event('ops', {
       ops: ops.map((o) => ({ ...o, text: undefined, new: undefined, code: undefined, edits: undefined })),
     });
@@ -1208,15 +1336,23 @@ export class Agent extends EventEmitter {
       text,
     });
 
-    this.ledger.add({
+    const resultSeg = this.ledger.add({
       type: 'op-result',
       label,
       role: 'user',
       text,
     });
 
-    if (this.controller.signal.aborted) return 'cancelled';
-    return outcome.status;
+    if (this.controller.signal.aborted) return { status: 'cancelled', resultId: resultSeg.id };
+    const shellStopped = (outcome.errors || []).some((e) => e.op === 'shell');
+    const zeroEffectFailure =
+      outcome.status === 'plan-failed' || (outcome.status === 'apply-failed' && !shellStopped);
+    return {
+      status: outcome.status,
+      resultId: resultSeg.id,
+      zeroEffectFailure,
+      ...(zeroEffectFailure ? { failureSummary: summarizeBatchErrors(outcome.errors) } : {}),
+    };
   }
 
   /** Sleep, unless the operator cancels first. @returns {Promise<boolean>} false if cancelled */
@@ -1251,9 +1387,14 @@ export class Agent extends EventEmitter {
         signal?.removeEventListener('abort', onAbort);
         resolve(decision);
       };
-      const req = { op, index, ...extra, respond: finish };
+      const finishTracked = (decision) => {
+        this.log?.flight?.mark('ops:shell-run', { index, cmd: op?.cmd });
+        finish(decision);
+      };
+      const req = { op, index, ...extra, respond: finishTracked };
       const onAbort = () => req.respond({ allow: false, reason: 'cancelled' });
       signal?.addEventListener('abort', onAbort, { once: true });
+      this.log?.flight?.mark('approval-wait', { index, cmd: op?.cmd });
       this.emit('approval-request', req);
     });
   }
@@ -1265,11 +1406,16 @@ export class Agent extends EventEmitter {
     // before finding out would leave the status line stuck on "compacting".
     if (this.ledger.compacting) return;
     this.emit('compact-start', { tokens: this.ledger.tokens, limit: this.ledger.limit });
+    this.log?.flight?.mark('compact:run', {
+      tokens: this.ledger.tokens,
+      limit: this.ledger.limit,
+    });
     try {
       const result = await this.ledger.withCompactionLock(() =>
         compact(this.ledger, {
           cfg: this.cfg,
           makeProvider: this.makeProvider,
+          signal: this.controller?.signal,
           onEvent: (e) => this.emit('warning', e),
         }),
       );
@@ -1346,6 +1492,21 @@ function firstLine(text) {
   if (!text) return '';
   const line = text.trim().split('\n')[0];
   return line.length > 70 ? line.slice(0, 67) + '…' : line;
+}
+
+/**
+ * Format planner/apply error list into a compact `op[n] <op>: <reason>` summary.
+ * @param {Array<{index: number, op: string, message: string}>} [errors]
+ */
+function summarizeBatchErrors(errors = []) {
+  if (!errors.length) return 'batch failed';
+  const head = errors.slice(0, 3).map((e) => {
+    const clean = String(e.message || 'failed').split('\n')[0].trim();
+    const short = clean.length > 120 ? `${clean.slice(0, 117)}…` : clean;
+    return `op[${e.index}] ${e.op}: ${short}`;
+  });
+  if (errors.length > 3) head.push(`+${errors.length - 3} more`);
+  return head.join('; ');
 }
 
 /**

@@ -271,7 +271,19 @@ export function wrapError(err, provider) {
   }
 
   const { message, status, retryAfterMs, raw, upstream } = unwrapError(err);
-  let retryable = status === 408 || status === 409 || status === 429 || status >= 500;
+  // Node undici / fetch socket drops carry no HTTP status (`TypeError: terminated`,
+  // `fetch failed`, `ECONNRESET`, `ETIMEDOUT`, `UND_ERR_SOCKET`). They are transient
+  // transport failures and should be retryable just like a 502/503 or 408.
+  const causeCode = String(err?.cause?.code || err?.code || '');
+  const isNetworkDrop =
+    status == null &&
+    (/^terminated$/i.test(message) ||
+      /\b(?:fetch failed|socket hang up|network error|connection reset)\b/i.test(message) ||
+      /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|UND_ERR_)/i.test(
+        causeCode,
+      ));
+  let retryable =
+    isNetworkDrop || status === 408 || status === 409 || status === 429 || status >= 500;
   // A proxy's own message is a routing-layer placeholder. When the upstream said
   // something, that is the sentence the operator needs.
   const primary = upstream?.message || message;

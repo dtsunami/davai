@@ -50,18 +50,42 @@ export async function startTui({ input, cwd, overrides, resume, acceptStalePromp
     exitOnCtrlC: false,
   });
 
-  const onSignal = () => {
+  log.flight?.mark('idle', { ui: 'tui', web: Boolean(sidecar) });
+
+  const onSignal = (sig) => {
     if (process.stdout.isTTY) process.stdout.write('\x1b[?2004l');
+    log.flight?.note('signal', { signal: sig || 'SIGTERM' });
     log.close('signal');
     instance.unmount();
   };
+  const onUncaught = (err) => {
+    if (process.stdout.isTTY) process.stdout.write('\x1b[?2004l');
+    log.flight?.crash('uncaughtException', err);
+    log.event('crash', { kind: 'uncaughtException', message: err?.message, stack: err?.stack });
+    if (!log.meta.endedAt) log.close('crash');
+    process.stderr.write(`\n[davai crash — uncaughtException in session ${log.id}]\n${err?.stack || err}\n`);
+    process.exit(1);
+  };
+  const onUnhandledRejection = (reason) => {
+    const err = reason instanceof Error ? reason : new Error(String(reason));
+    // Log as a durable breadcrumb instead of letting an unawaited rejection vanish
+    // silently or kill the TUI with zero context in the session dir.
+    log.flight?.crash('unhandledRejection', err);
+    log.event('unhandled-rejection', { message: err.message, stack: err.stack });
+  };
   process.on('SIGTERM', onSignal);
+  process.on('SIGHUP', onSignal);
+  process.on('uncaughtException', onUncaught);
+  process.on('unhandledRejection', onUnhandledRejection);
 
   try {
     await instance.waitUntilExit();
   } finally {
     if (process.stdout.isTTY) process.stdout.write('\x1b[?2004l');
     process.off('SIGTERM', onSignal);
+    process.off('SIGHUP', onSignal);
+    process.off('uncaughtException', onUncaught);
+    process.off('unhandledRejection', onUnhandledRejection);
     if (sidecar) await sidecar.stop();
     if (!log.meta.endedAt) log.close('exit');
   }

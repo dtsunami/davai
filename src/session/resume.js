@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { listSessions, readTranscript } from './log.js';
+import { extract } from '../agent/parser.js';
 import { DEFAULT_PROMPTS, steerPrompt } from '../agent/prompt.js';
 import { estimate } from '../context/tokens.js';
 import { loadImage } from '../context/images.js';
@@ -134,15 +135,48 @@ export function replaySegments(dir, opts = {}) {
         if (Array.isArray(ev.ops) && ev.ops.length) pendingOps = ev.ops;
         break;
 
-      case 'ops-result':
+      case 'ops-rejected': {
         pendingOps = null;
+        const errSummary = summarizeReplayErrors(ev.errors);
+        specs.push({
+          type: 'op-result',
+          label: 'batch rejected',
+          role: 'user',
+          text: `Batch not applied (${errSummary}). Disk was unchanged.`,
+          _zeroEffectSummary: errSummary,
+        });
+        break;
+      }
+
+      case 'parse-error': {
+        pendingOps = null;
+        const errSummary = `malformed da_ops (${firstLine(ev.error || 'parse error')})`;
+        specs.push({
+          type: 'op-result',
+          label: 'parse error',
+          role: 'user',
+          text: `Malformed da_ops block (${ev.error || 'parse error'}). Nothing was executed.`,
+          _zeroEffectSummary: errSummary,
+        });
+        break;
+      }
+
+      case 'ops-result': {
+        pendingOps = null;
+        const shellStopped = (ev.errors || []).some((e) => e.op === 'shell');
+        const zeroEffect =
+          ev.status === 'plan-failed' || (ev.status === 'apply-failed' && !shellStopped);
+        const errSummary = zeroEffect ? summarizeReplayErrors(ev.errors) : null;
+        if (!zeroEffect) compressPriorReplayFailures(specs);
         specs.push({
           type: 'op-result',
           label: ev.label || `batch ${ev.status || 'result'}`,
           role: 'user',
           text: ev.text || synthesizeResults(ev),
+          ...(errSummary ? { _zeroEffectSummary: errSummary } : {}),
         });
         break;
+      }
 
       case 'native-calls':
         // A batch that arrived as a native tool call is not in the logged assistant
@@ -446,6 +480,41 @@ function specTokens(spec) {
   if (spec.video) return spec.video.tokens ?? 0;
   if (spec.image) return spec.image.tokens ?? 0;
   return estimate(spec.text || '');
+}
+
+function summarizeReplayErrors(errors = []) {
+  if (!Array.isArray(errors) || !errors.length) return 'batch failed';
+  const head = errors.slice(0, 3).map((e) => {
+    const clean = String(e.message || 'failed').split('\n')[0].trim();
+    const short = clean.length > 120 ? `${clean.slice(0, 117)}…` : clean;
+    return `op[${e.index}] ${e.op}: ${short}`;
+  });
+  if (errors.length > 3) head.push(`+${errors.length - 3} more`);
+  return head.join('; ');
+}
+
+/**
+ * Compress earlier zero-effect failed turns (`plan-failed`, `ops-rejected`, `parse-error`,
+ * or rolled-back non-shell `apply-failed`) in the replay list once a later turn succeeds.
+ */
+function compressPriorReplayFailures(specs) {
+  for (let i = 0; i < specs.length; i++) {
+    const res = specs[i];
+    if (!res?._zeroEffectSummary) continue;
+    const summary = res._zeroEffectSummary;
+    delete res._zeroEffectSummary;
+    res.text = `Batch not applied (${summary}). Disk was unchanged; resolved in a later turn.`;
+    res.label = 'batch rejected (compressed)';
+
+    const prev = i > 0 ? specs[i - 1] : null;
+    if (prev && prev.type === 'assistant' && prev.text) {
+      const prose = (extract(prev.text).prose || '').trim();
+      prev.text = prose
+        ? `${prose}\n\n[superseded da_ops payload omitted — failed: ${summary}; nothing was applied]`
+        : `[superseded da_ops batch omitted — failed: ${summary}; nothing was applied]`;
+      prev.label = `superseded: ${firstLine(summary)}`;
+    }
+  }
 }
 
 /** Older transcripts logged per-op status but not the formatted result text. */

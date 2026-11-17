@@ -214,7 +214,10 @@ function handle(type, d) {
       if (currentTab === 'tx') loadTx();
       break;
     case 'error':
-      setBusy(false); setStatus(null); stopLiveMeter();
+      commitThinking();
+      live = '';
+      setLive(''); setBusy(false); setStatus(null); flushPaint();
+      stopLiveMeter();
       break;
     case 'steer-queued':
       state.queuedSteers = d.queued || 0;

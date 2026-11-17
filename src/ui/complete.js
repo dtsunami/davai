@@ -23,7 +23,7 @@ import {
  * Aliases the switch in commands.js accepts but HELP does not list. They are worth
  * completing and not worth documenting twice.
  */
-const ALIASES = ['/perf', '/throughput', '/speed', '/quit', '/q', '/?', '/providers', '/profile', '/repl'];
+const ALIASES = ['/perf', '/throughput', '/speed', '/quit', '/q', '/?', '/providers', '/profile', '/repl', '/flight'];
 
 /**
  * Derived from the same table the help text and the web client use, rather than kept

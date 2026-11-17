@@ -432,14 +432,25 @@ export async function refineModel(spec, { apiKey, baseURL, fetchImpl } = {}) {
   }
 
   // Gemini's models list carries the real limits — the one provider besides Anthropic
-  // whose metadata is available without guessing.
+  // whose metadata is available without guessing. Bound both probes with an 8s timeout:
+  // `refineModel` runs before Ink mounts, so a blackholed socket without a timeout hangs
+  // startup on a blank terminal before the banner ever prints.
   if (spec.provider === 'gemini' && apiKey) {
     try {
       const { GoogleGenAI } = await import('@google/genai');
-      const client = new GoogleGenAI({ apiKey });
+      const client = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          ...(baseURL ? { baseUrl: baseURL } : {}),
+          timeout: 8000,
+        },
+      });
       // The list response shape varies with SDK version: an array of models, a plain
       // `{ models: [...] }` envelope, or a paginated object. Normalise all three.
-      const listResp = await client.models.list();
+      const listResp = await Promise.race([
+        client.models.list(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 8000).unref?.()),
+      ]);
       const models = Array.isArray(listResp)
         ? listResp
         : Array.isArray(listResp?.models)
@@ -461,7 +472,7 @@ export async function refineModel(spec, { apiKey, baseURL, fetchImpl } = {}) {
   } else if (spec.provider === 'anthropic' && apiKey) {
     try {
       const { default: Anthropic } = await import('@anthropic-ai/sdk');
-      const client = new Anthropic({ apiKey, maxRetries: 1 });
+      const client = new Anthropic({ apiKey, maxRetries: 1, timeout: 8000 });
       const m = await client.models.retrieve(spec.id);
       const caps = m.capabilities || {};
       if (m.max_input_tokens) spec.context = m.max_input_tokens;

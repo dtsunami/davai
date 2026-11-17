@@ -11,6 +11,7 @@
  */
 import Anthropic from '@anthropic-ai/sdk';
 import { videoUnsupported, wrapError } from './base.js';
+import { iterateWithIdleTimeout } from './watchdog.js';
 
 export function createAnthropic({ apiKey, model, maxTokens, effort, temperature, thinkingVisible }) {
   const client = new Anthropic({ apiKey, maxRetries: 3, timeout: 10 * 60 * 1000 });
@@ -48,7 +49,7 @@ export function createAnthropic({ apiKey, model, maxTokens, effort, temperature,
       }
 
       try {
-        for await (const event of stream) {
+        for await (const event of iterateWithIdleTimeout(stream, { signal })) {
           if (event.type === 'content_block_delta') {
             if (event.delta.type === 'text_delta') {
               yield { t: 'text', delta: event.delta.text };

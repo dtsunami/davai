@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { StreamLog } from './stream.js';
+import { FlightRecorder } from './flight.js';
 
 /** Anything that looks like a credential is redacted on the way in. */
 const SECRET = /\b(sk-[A-Za-z0-9_-]{16,}|xai-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{20,})\b/g;
@@ -56,9 +57,10 @@ export class SessionLog {
     this.dir = path.join(home, 'sessions', `${stamp}-${this.id}`);
     fs.mkdirSync(this.dir, { recursive: true });
     this.transcriptFile = path.join(this.dir, 'transcript.jsonl');
-    // Owned here so every consumer of a SessionLog gets streamed output persisted
-    // without opting in. Test fakes omit it; call sites use `log.stream?.`.
+    // Owned here so every consumer of a SessionLog gets streamed output and hang/crash
+    // breadcrumbs persisted without opting in. Test fakes omit both; call sites use `?.`.
     this.stream = new StreamLog({ dir: this.dir });
+    this.flight = new FlightRecorder({ dir: this.dir });
     this.startedAt = Date.now();
     this.totals = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0, ops: 0 };
 
@@ -145,6 +147,7 @@ export class SessionLog {
 
   close(reason = 'exit') {
     this.stream.close();
+    this.flight?.close(reason);
     this.meta.endedAt = new Date().toISOString();
     this.meta.durationMs = Date.now() - this.startedAt;
     this.meta.closeReason = reason;

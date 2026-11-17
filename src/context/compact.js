@@ -22,7 +22,7 @@ const KEEP_RECENT_TURNS = 3;
  * @param {{cfg: object, makeProvider: (model: string) => any, onEvent?: Function}} deps
  * @returns {Promise<{freed: number, actions: string[]}>}
  */
-export async function compact(ledger, { cfg, makeProvider, onEvent }) {
+export async function compact(ledger, { cfg, makeProvider, signal, onEvent }) {
   const before = ledger.tokens;
   const actions = [];
   // Action figures are reported in the same units as `freed` and the status bar: the
@@ -81,8 +81,9 @@ export async function compact(ledger, { cfg, makeProvider, onEvent }) {
 
       let summary = null;
       try {
-        summary = await summarize(transcript, { cfg, makeProvider });
+        summary = await summarize(transcript, { cfg, makeProvider, signal });
       } catch (err) {
+        if (err?.cancelled || signal?.aborted) throw err;
         onEvent?.({ type: 'compact-warning', message: `summarizer failed: ${err.message}` });
       }
 
@@ -138,7 +139,7 @@ function currentExchangeIds(ledger) {
   return ids;
 }
 
-export async function summarize(transcript, { cfg, makeProvider }) {
+export async function summarize(transcript, { cfg, makeProvider, signal }) {
   const model = SUMMARIZER_MODEL[cfg.provider];
   const provider = makeProvider(model);
   const system =
@@ -155,6 +156,7 @@ export async function summarize(transcript, { cfg, makeProvider }) {
         content: [{ type: 'text', text: `Summarize:\n\n${transcript}` }],
       },
     ],
+    ...(signal ? { signal } : {}),
   })) {
     if (ev.t === 'text') out += ev.delta;
   }

@@ -124,6 +124,44 @@ describe('replaySegments', () => {
     expect(seg.text).toContain('! [1] shell: exit 1');
   });
 
+  it('compresses superseded plan-failed batches on resume once a subsequent batch succeeds', () => {
+    const bigPayload = 'x'.repeat(4000);
+    const dir = writeSession('dddd555556', {
+      startedAt: '2026-09-05T10:30:00.000Z',
+      events: [
+        { type: 'user', text: 'update a.js' },
+        {
+          type: 'assistant',
+          text: `Trying edit.\n\`\`\`da_ops\n{"ops":[{"op":"replace","path":"a.js","old":"${bigPayload}","new":"y"}]}\n\`\`\``,
+        },
+        {
+          type: 'ops-result',
+          status: 'plan-failed',
+          errors: [{ index: 0, op: 'replace', message: '"old" text not found in a.js' }],
+          label: 'batch plan-failed',
+          text: 'BATCH REJECTED',
+        },
+        {
+          type: 'assistant',
+          text: 'Reading and fixing.\n```da_ops\n{"ops":[{"op":"read","path":"a.js"}]}\n```',
+        },
+        {
+          type: 'ops-result',
+          status: 'ok',
+          results: [{ index: 0, op: 'read', ok: true }],
+          errors: [],
+          label: '1 op ok',
+          text: 'a.js lines 1-1\nok',
+        },
+      ],
+    });
+
+    const specs = replaySegments(dir);
+    expect(specs[1].text).not.toContain(bigPayload);
+    expect(specs[1].text).toContain('op[0] replace: "old" text not found in a.js');
+    expect(specs[2].text).toContain('Disk was unchanged');
+  });
+
   it('synthesizes an interrupted op-result when a session died mid-batch with no ops-result', () => {
     const dir = writeSession('dddd666666', {
       startedAt: '2026-09-05T11:00:00.000Z',

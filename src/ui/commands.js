@@ -31,6 +31,7 @@ const HELP = `Commands
   /compact            compact the context now
   /sessions           recent sessions
   /stream [n]         streamed reasoning + text for a turn, read back from disk
+  /breadcrumbs [n]    flight-recorder phase & hang/lag breadcrumbs for this session
   /keys [provider]    enable a provider: see, paste or save API keys
   /env [name]         provider blocks in your .env; /env <name> switches to one
   /config             resolved configuration
@@ -732,6 +733,42 @@ export async function handleCommand(text, deps) {
         if (t.text) lines.push('', '--- text ---', t.text);
       }
       lines.push('', `${turns.length} turn(s) in ${path.join(log.dir, 'stream.jsonl')}`);
+      push({ type: 'info', text: lines.join('\n') });
+      return { handled: true };
+    }
+
+    case 'breadcrumbs':
+    case 'flight': {
+      const { readBreadcrumbs } = await import('../session/flight.js');
+      const rows = readBreadcrumbs(log.dir);
+      if (!rows.length) {
+        push({ type: 'info', text: 'no breadcrumbs recorded yet this session' });
+        return { handled: true };
+      }
+      const limit = Number.parseInt(arg, 10);
+      const picked = rows.slice(-(Number.isFinite(limit) && limit > 0 ? limit : 25));
+      const lines = picked.map((r) => {
+        const time = String(r.ts || '').slice(11, 23);
+        if (r.kind === 'phase') {
+          const prev = r.prev ? ` (after ${r.prev} ${r.prevMs}ms)` : '';
+          const extra = Object.entries(r)
+            .filter(([k]) => !['ts', 'pid', 'kind', 'phase', 'prev', 'prevMs'].includes(k))
+            .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+            .join(' ');
+          return `  ${time}  phase  ${r.phase}${prev}${extra ? `  ${extra}` : ''}`;
+        }
+        if (r.kind === 'event-loop-lag') {
+          return `  ${time}  ${glyphs.warn} LAG ${r.lagMs}ms during ${r.phase} (${r.phaseElapsedMs}ms in phase, heap ${r.heapMb}MB)`;
+        }
+        if (r.kind === 'stall-heartbeat') {
+          return `  ${time}  ${glyphs.warn} STALL ${Math.round(r.elapsedMs / 1000)}s in ${r.phase} (heap ${r.heapMb}MB)`;
+        }
+        if (r.kind === 'crash') {
+          return `  ${time}  ${glyphs.cross} CRASH ${r.crashType} in ${r.phase}: ${r.message}`;
+        }
+        return `  ${time}  ${r.kind}  ${r.event || r.reason || ''} (${r.phase || r.lastPhase || ''})`;
+      });
+      lines.push('', `${rows.length} record(s) in ${path.join(log.dir, 'breadcrumbs.jsonl')}`);
       push({ type: 'info', text: lines.join('\n') });
       return { handled: true };
     }

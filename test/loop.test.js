@@ -894,3 +894,77 @@ describe('cancelling a stuck shell op mid-batch', () => {
     expect(agent.busy).toBe(false);
   });
 });
+
+describe('superseded failed-op context compression', () => {
+  it('keeps a failed replace verbatim for the immediate retry, then compresses it to op[n] reason once recovered', async () => {
+    const hugePayload = 'const line = "x";\n'.repeat(300);
+    const badBatch =
+      'Updating index.js.\n```da_ops\n' +
+      '{"ops": [{"op": "replace", "path": "index.js", "old": "@1", "new": "@2"}]}\n' +
+      `--davai:1--\nexport const wrongName = 999;\n${hugePayload}--davai:end--\n` +
+      `--davai:2--\nexport const wrongName = 1000;\n${hugePayload}--davai:end--\n` +
+      '```';
+    const goodBatch =
+      'Reading first and applying exact replace.\n```da_ops\n' +
+      JSON.stringify({
+        ops: [
+          { op: 'replace', path: 'index.js', old: 'export const x = 1;', new: 'export const x = 42;' },
+        ],
+      }) +
+      '\n```';
+
+    const provider = stubProvider([badBatch, goodBatch, 'Updated x to 42.']);
+    const { agent, ledger } = makeAgent(provider);
+    const events = await drive(agent, 'set x to 42');
+
+    expect(events.done[0].prose).toBe('Updated x to 42.');
+    expect(fs.readFileSync(path.join(root, 'index.js'), 'utf8')).toContain('export const x = 42;');
+
+    // On request #1 (the immediate retry right after the rejection), the model saw the
+    // full verbatim failed turn and BATCH REJECTED error so it could course-correct.
+    const retryPrompt = requestText(provider, 1);
+    expect(retryPrompt).toContain(hugePayload);
+    expect(retryPrompt).toContain('BATCH REJECTED');
+    expect(retryPrompt).toContain('[0] replace: "old" text not found in index.js');
+
+    // On request #2 (after `goodBatch` succeeded), the giant failed payload was compressed
+    // to a compact stub naming `op[0] replace` and confirming nothing was applied!
+    const afterRecoveryPrompt = requestText(provider, 2);
+    expect(afterRecoveryPrompt).not.toContain(hugePayload);
+    expect(afterRecoveryPrompt).toContain('op[0] replace: "old" text not found in index.js');
+    expect(afterRecoveryPrompt).toContain('nothing was applied');
+
+    // Alternating conversation roles stay intact, and live ledger tokens dropped sharply.
+    expect(ledger.segments.some((s) => s.part.text?.includes(hugePayload))).toBe(false);
+  });
+
+  it('never compresses a batch where earlier file ops were kept before a failed shell op', async () => {
+    const partialBatch =
+      'Editing and testing.\n```da_ops\n' +
+      JSON.stringify({
+        ops: [
+          { op: 'replace', path: 'index.js', old: 'export const x = 1;', new: 'export const x = 7;' },
+          { op: 'shell', cmd: 'node -e "process.exit(1)"' },
+        ],
+      }) +
+      '\n```';
+    const fixBatch =
+      'Fixing.\n```da_ops\n' +
+      JSON.stringify({
+        ops: [
+          { op: 'replace', path: 'index.js', old: 'export const x = 7;', new: 'export const x = 8;' },
+        ],
+      }) +
+      '\n```';
+
+    const provider = stubProvider([partialBatch, fixBatch, 'All green.']);
+    const { agent } = makeAgent(provider);
+    await drive(agent, 'edit and run');
+
+    // Because op[0] mutated disk before op[1] shell failed, the model must keep the full
+    // record of `partialBatch` on turn 3 so it knows `x = 7` actually landed.
+    const turn3 = requestText(provider, 2);
+    expect(turn3).toContain('export const x = 7;');
+    expect(turn3).not.toContain('superseded da_ops');
+  });
+});

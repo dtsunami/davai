@@ -4,6 +4,7 @@
  */
 import { GoogleGenAI } from '@google/genai';
 import { wrapError } from './base.js';
+import { iterateWithIdleTimeout } from './watchdog.js';
 
 /**
  * Leak header Gemini 4 emits at index 0 of `part.text` when an upstream gateway fails to
@@ -37,7 +38,10 @@ export function createGemini({
     injectedClient ||
     new GoogleGenAI({
       apiKey,
-      ...(baseURL ? { httpOptions: { baseUrl: baseURL } } : {}),
+      httpOptions: {
+        ...(baseURL ? { baseUrl: baseURL } : {}),
+        timeout: 10 * 60 * 1000,
+      },
     });
 
   return {
@@ -73,7 +77,7 @@ export function createGemini({
       let finish = 'end_turn';
       let sawText = false;
       try {
-        for await (const chunk of stream) {
+        for await (const chunk of iterateWithIdleTimeout(stream, { signal })) {
           if (chunk.usageMetadata) usage = chunk.usageMetadata;
           const cand = chunk.candidates?.[0];
           if (cand?.finishReason) finish = cand.finishReason;

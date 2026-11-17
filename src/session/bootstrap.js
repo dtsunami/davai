@@ -78,8 +78,15 @@ export async function createSession(opts = {}) {
   ensureHome(cfg);
   pruneSessions(cfg.home, prior ? { except: prior.dir } : {});
 
+  // Open the session log and flight recorder *before* network metadata calls (`refineModel`)
+  // or filesystem/git walks (`buildGrounding`), so a startup hang on a dead endpoint or a
+  // slow drive still leaves a breadcrumb trail on disk.
+  const log = new SessionLog({ home: cfg.home, cfg, resumedFrom: prior?.id });
+  const journal = new Journal({ dir: log.dir });
+
   // The registry is a seed; ask the provider for this model's real limits before we
   // size the context window around them.
+  log.flight?.mark('bootstrap:refine-model', { provider: cfg.provider, model: cfg.model.id });
   await refineModel(cfg.model, { apiKey, baseURL: cfg.baseURL });
   // Re-derive from what was requested, now that the real limits are known. Overwriting
   // contextLimit with the model window here used to discard DAVAI_CONTEXT_LIMIT.
@@ -87,14 +94,13 @@ export async function createSession(opts = {}) {
   const ignore = DaIgnore.fromDir(cfg.cwd);
   const sandbox = new Sandbox({ cwd: cfg.cwd, roDirs: cfg.roDirs, ignore });
 
-  const log = new SessionLog({ home: cfg.home, cfg, resumedFrom: prior?.id });
-  const journal = new Journal({ dir: log.dir });
   if (limitNotices.length) log.event('limits-clamped', { notices: limitNotices });
   if (cfg.warnings.length) log.event('config-warnings', { warnings: cfg.warnings });
 
   const ledger = new Ledger({ limit: cfg.contextLimit, compactAt: cfg.compactAt });
   // After applyModelLimits, so the agents budget is clamped against the real context
   // window rather than the seed spec's guess at it.
+  log.flight?.mark('bootstrap:grounding', { cwd: cfg.cwd });
   const ground = buildGrounding({ sandbox, cfg });
   const grounding = ground.text;
   // A clipped or unreadable agents file is the operator's problem to fix, and the old

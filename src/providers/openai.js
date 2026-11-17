@@ -18,6 +18,7 @@
  */
 import OpenAI from 'openai';
 import { OPENAI_EFFORT, OPENROUTER_EFFORT, videoUnsupported, wrapError } from './base.js';
+import { iterateWithIdleTimeout } from './watchdog.js';
 
 export function createOpenAI({
   apiKey,
@@ -101,7 +102,7 @@ export function createOpenAI({
       /** @type {Map<number, {id?: string, name: string, args: string}>} */
       const toolCalls = new Map();
       try {
-        for await (const chunk of stream) {
+        for await (const chunk of iterateWithIdleTimeout(stream, { signal })) {
           if (chunk.usage) usage = chunk.usage;
           const choice = chunk.choices?.[0];
           if (!choice) continue;

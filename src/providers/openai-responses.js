@@ -19,6 +19,7 @@
  */
 import OpenAI from 'openai';
 import { OPENAI_EFFORT, videoUnsupported, wrapError } from './base.js';
+import { iterateWithIdleTimeout } from './watchdog.js';
 
 export function createOpenAIResponses({
   apiKey,
@@ -73,7 +74,7 @@ export function createOpenAIResponses({
         }
       }
 
-      yield* translateStream(stream, name);
+      yield* translateStream(stream, name, { signal });
     },
 
     async countTokens() {
@@ -91,13 +92,13 @@ export function createOpenAIResponses({
  * @param {AsyncIterable<object>|Iterable<object>} stream
  * @param {string} name provider name for error messages
  */
-export async function* translateStream(stream, name = 'openai') {
+export async function* translateStream(stream, name = 'openai', { signal } = {}) {
   let usage = null;
   let stop = null;
   let refusal = '';
 
   try {
-    for await (const event of stream) {
+    for await (const event of iterateWithIdleTimeout(stream, { signal })) {
       const type = event?.type || '';
 
       if (type === 'response.output_text.delta') {
