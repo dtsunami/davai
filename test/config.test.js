@@ -309,3 +309,28 @@ describe('Gemini thinking invariant', () => {
     ).toThrow(/Gemini cannot run with DAVAI_THINKING=false/);
   });
 });
+
+describe('timeout defaults and overrides', () => {
+  it('defaults shellTimeout to 300s and streamTimeout to 180s', () => {
+    const cfg = loadConfig({
+      cwd: base,
+      overrides: { DAVAI_PROVIDER: 'anthropic', DAVAI_MODEL: 'claude-opus-5-5' },
+    });
+    expect(cfg.shellTimeout).toBe(300_000);
+    expect(cfg.streamTimeout).toBe(180_000);
+  });
+
+  it('honours DAVAI_SHELL_TIMEOUT and DAVAI_STREAM_TIMEOUT in seconds', () => {
+    const cfg = loadConfig({
+      cwd: base,
+      overrides: {
+        DAVAI_PROVIDER: 'anthropic',
+        DAVAI_MODEL: 'claude-opus-5-5',
+        DAVAI_SHELL_TIMEOUT: '600',
+        DAVAI_STREAM_TIMEOUT: '240',
+      },
+    });
+    expect(cfg.shellTimeout).toBe(600_000);
+    expect(cfg.streamTimeout).toBe(240_000);
+  });
+});

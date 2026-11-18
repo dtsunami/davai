@@ -89,13 +89,20 @@ export async function runHeadless(input, opts = {}) {
     }
   });
 
-  agent.on('nudge', ({ attempt, nativeCalls }) => {
-    emit({ type: 'nudge', attempt, ...(nativeCalls?.length ? { nativeCalls } : {}) });
+  agent.on('nudge', ({ attempt, nativeCalls, reason }) => {
+    emit({
+      type: 'nudge',
+      attempt,
+      ...(reason ? { reason } : {}),
+      ...(nativeCalls?.length ? { nativeCalls } : {}),
+    });
     if (!opts.json) {
       process.stderr.write(
-        nativeCalls?.length
-          ? `  · native tool call ${nativeCalls.join(', ')} not run — told the model to use da_ops\n`
-          : `  · no ops in that turn — asking it to continue\n`,
+        reason === 'stream-stalled'
+          ? `  · stream cut off mid-turn — nudged the model to continue\n`
+          : nativeCalls?.length
+            ? `  · native tool call ${nativeCalls.join(', ')} not run — told the model to use da_ops\n`
+            : `  · no ops in that turn — asking it to continue\n`,
       );
     }
   });

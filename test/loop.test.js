@@ -615,8 +615,37 @@ describe('provider retries', () => {
     expect(events.error[0].message).toContain('no quota');
   });
 
-  it('does not retry once text has already streamed', async () => {
-    // Re-sending mid-answer would duplicate what the operator already saw.
+  it('nudges 1x instead of retrying in-place once text has already streamed, and completes', async () => {
+    let call = 0;
+    const sent = [];
+    const provider = {
+      calls: 0,
+      sent,
+      async *send({ system, messages }) {
+        sent.push({ system, messages });
+        call++;
+        if (call === 1) {
+          yield { t: 'text', delta: 'half an answer```da_ops\n{"ops": [{"op": "shell", "cmd": "py' };
+          throw transient('gemini: stream timeout: stream stalled with no data for 180s mid-response');
+        }
+        yield { t: 'text', delta: 'Completed after nudge.' };
+        yield { t: 'usage', in: 100, out: 20, cacheRead: 0, cacheWrite: 0 };
+        yield { t: 'stop', reason: 'end_turn' };
+      },
+    };
+    const { agent } = makeAgent(provider);
+    const events = await drive(agent, 'go');
+
+    expect(events.retry).toHaveLength(0);
+    expect(events.nudge).toHaveLength(1);
+    expect(events.nudge[0]).toMatchObject({ attempt: 1, reason: 'stream-stalled' });
+    expect(events.error).toHaveLength(0);
+    expect(events.done[0].prose).toBe('Completed after nudge.');
+    expect(call).toBe(2);
+    expect(requestText(provider, 1)).toMatch(/cut off mid-turn/i);
+  });
+
+  it('gives up after 1 mid-stream stall nudge if the second turn also stalls mid-stream', async () => {
     let call = 0;
     const provider = {
       calls: 0,
@@ -624,15 +653,17 @@ describe('provider retries', () => {
       async *send() {
         call++;
         yield { t: 'text', delta: 'half an answer' };
-        throw transient();
+        throw transient('gemini: stream timeout: stream stalled with no data for 180s mid-response');
       },
     };
     const { agent } = makeAgent(provider);
     const events = await drive(agent, 'go');
 
     expect(events.retry).toHaveLength(0);
+    expect(events.nudge).toHaveLength(1);
     expect(events.error).toHaveLength(1);
-    expect(call).toBe(1);
+    expect(events.error[0].message).toContain('stream stalled');
+    expect(call).toBe(2);
   });
 });
 

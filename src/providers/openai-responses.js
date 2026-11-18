@@ -29,6 +29,7 @@ export function createOpenAIResponses({
   temperature,
   thinkingVisible,
   baseURL = undefined,
+  streamTimeout = undefined,
   name = 'openai',
   client = new OpenAI({ apiKey, baseURL, maxRetries: 3, timeout: 10 * 60 * 1000 }),
 }) {
@@ -74,7 +75,7 @@ export function createOpenAIResponses({
         }
       }
 
-      yield* translateStream(stream, name, { signal });
+      yield* translateStream(stream, name, { signal, streamTimeout });
     },
 
     async countTokens() {
@@ -92,13 +93,18 @@ export function createOpenAIResponses({
  * @param {AsyncIterable<object>|Iterable<object>} stream
  * @param {string} name provider name for error messages
  */
-export async function* translateStream(stream, name = 'openai', { signal } = {}) {
+export async function* translateStream(stream, name = 'openai', { signal, streamTimeout } = {}) {
   let usage = null;
   let stop = null;
   let refusal = '';
 
+  const watchdogOpts = {
+    signal,
+    ...(streamTimeout != null ? { firstChunkMs: streamTimeout, idleMs: streamTimeout } : {}),
+  };
+
   try {
-    for await (const event of iterateWithIdleTimeout(stream, { signal })) {
+    for await (const event of iterateWithIdleTimeout(stream, watchdogOpts)) {
       const type = event?.type || '';
 
       if (type === 'response.output_text.delta') {

@@ -3,7 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { FlightRecorder, readBreadcrumbs } from '../src/session/flight.js';
-import { iterateWithIdleTimeout } from '../src/providers/watchdog.js';
+import {
+  DEFAULT_FIRST_CHUNK_TIMEOUT_MS,
+  DEFAULT_IDLE_CHUNK_TIMEOUT_MS,
+  iterateWithIdleTimeout,
+} from '../src/providers/watchdog.js';
 import { wrapError } from '../src/providers/base.js';
 
 let dir;
@@ -137,6 +141,11 @@ describe('FlightRecorder', () => {
 });
 
 describe('iterateWithIdleTimeout', () => {
+  it('defaults both first-chunk and mid-stream idle timeout to 180s', () => {
+    expect(DEFAULT_FIRST_CHUNK_TIMEOUT_MS).toBe(180_000);
+    expect(DEFAULT_IDLE_CHUNK_TIMEOUT_MS).toBe(180_000);
+  });
+
   it('breaks a hung half-open stream with a retryable 408 error', async () => {
     const hungStream = {
       [Symbol.asyncIterator]() {

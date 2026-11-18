@@ -28,6 +28,7 @@ export function createOpenAI({
   temperature,
   baseURL = undefined,
   defaultHeaders = undefined,
+  streamTimeout = undefined,
   name = 'openai',
   client = new OpenAI({
     apiKey,
@@ -101,8 +102,12 @@ export function createOpenAI({
       let finish = null;
       /** @type {Map<number, {id?: string, name: string, args: string}>} */
       const toolCalls = new Map();
+      const watchdogOpts = {
+        signal,
+        ...(streamTimeout != null ? { firstChunkMs: streamTimeout, idleMs: streamTimeout } : {}),
+      };
       try {
-        for await (const chunk of iterateWithIdleTimeout(stream, { signal })) {
+        for await (const chunk of iterateWithIdleTimeout(stream, watchdogOpts)) {
           if (chunk.usage) usage = chunk.usage;
           const choice = chunk.choices?.[0];
           if (!choice) continue;

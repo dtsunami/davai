@@ -172,6 +172,7 @@ export function createProvider(cfg, override = {}) {
     temperature: cfg.temperature,
     thinkingVisible: cfg.thinkingVisible,
     baseURL: cfg.baseURL,
+    streamTimeout: cfg.streamTimeout,
   };
 
   return withAuthDiagnostics(adapterFor(cfg, common), cfg, common.model);

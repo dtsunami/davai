@@ -15,14 +15,14 @@
  * `iterateWithIdleTimeout` races every `iter.next()` against BOTH:
  *   - `signal` abort -> settles immediately with an `AbortError` (`wrapError` maps it
  *     to `{ cancelled: true }`), and calls `iter.return()` in the background.
- *   - an idle timer (`idleMs`, default 90s between chunks; `firstChunkMs`, default 180s
+ *   - an idle timer (`idleMs`, default 180s between chunks; `firstChunkMs`, default 180s
  *     before the first chunk so deep reasoning models have room to think before
  *     emitting their first delta) -> rejects with a retryable `408` timeout error so
  *     `#streamOnce` can retry cleanly or report the stall instead of hanging forever.
  */
 
 export const DEFAULT_FIRST_CHUNK_TIMEOUT_MS = 180_000;
-export const DEFAULT_IDLE_CHUNK_TIMEOUT_MS = 90_000;
+export const DEFAULT_IDLE_CHUNK_TIMEOUT_MS = 180_000;
 
 function makeAbortError() {
   const err = new Error('Request was aborted.');

@@ -22,6 +22,8 @@ const MAX_STEPS = 60;
 const MAX_NUDGES = 2;
 /** Empty turns tolerated in a row before the run is stopped. */
 const MAX_EMPTY = 2;
+/** Mid-stream timeout/drop stalls tolerated in a row via a recovery nudge. */
+const MAX_STREAM_NUDGES = 1;
 const MAX_PROVIDER_RETRIES = 2;
 const RETRY_BASE_MS = 1000;
 const RETRY_CAP_MS = 30_000;
@@ -514,6 +516,7 @@ export class Agent extends EventEmitter {
       let nudges = 0;
       let nudgedAt = -1;
       let empties = 0;
+      let streamNudges = 0;
       /**
        * Rejected/rolled-back or parse-failed turn pairs waiting for a clean recovery
        * step before their multi-kilobyte payloads are compressed into 1-line stubs.
@@ -564,6 +567,51 @@ export class Agent extends EventEmitter {
           this.emit('cancelled');
           return;
         }
+
+        if (turn.stalledError) {
+          const err = turn.stalledError;
+          if (streamNudges++ >= MAX_STREAM_NUDGES) throw err;
+          this.stats.nudges++;
+          const partialProse = extract(turn.text || '').prose || '';
+          const stubText = `${turn.text}\n\n[stream cut off before completion]`;
+          const assistantSeg = this.ledger.add({
+            type: 'assistant',
+            label: firstLine(partialProse || turn.text) || 'interrupted turn',
+            role: 'assistant',
+            text: stubText,
+            ...(turn.thinking ? { thinking: turn.thinking } : {}),
+          });
+          this.emit('warning', {
+            message: `${err.message} — nudging the model to continue (1/${MAX_STREAM_NUDGES})`,
+          });
+          this.emit('nudge', {
+            attempt: streamNudges,
+            prose: partialProse,
+            reason: 'stream-stalled',
+          });
+          const nudgeText = streamStallPrompt(err.message);
+          this.log.event('stream-stall-nudge', {
+            turn: this.stats.turns,
+            attempt: streamNudges,
+            message: err.message,
+            text: turn.text,
+          });
+          const nudgeSeg = this.ledger.add({
+            type: 'op-result',
+            label: 'stream stalled (nudge)',
+            role: 'user',
+            text: nudgeText,
+          });
+          pendingFailedTurns.push({
+            assistantId: assistantSeg.id,
+            resultId: nudgeSeg.id,
+            prose: partialProse,
+            summary: `stream interrupted (${firstLine(err.message)})`,
+            label: 'stream stalled (compressed)',
+          });
+          continue;
+        }
+        streamNudges = 0;
 
         // An empty assistant turn (typically max_tokens spent entirely on thinking) must
         // never reach the ledger. Anthropic rejects an empty text block with a 400, and
@@ -838,8 +886,17 @@ export class Agent extends EventEmitter {
       // Returning without accounting reported a killed turn as free — $0.0000 in the
       // footer after a minute of output. Best-effort by nature: a provider that only
       // sends usage at the end of the stream sends none at all on a mid-stream abort.
-      if (turn.cancelled) {
+      if (turn.cancelled || turn.stalledError) {
         if (turn.usage) this.#accountUsage(turn.usage);
+        if (turn.stalledError) {
+          this.emit('turn-end', {
+            text: turn.text,
+            usage: turn.usage,
+            ttftMs: turn.ttftMs,
+            durationMs: turn.durationMs,
+            effort: this.cfg?.model?.effort ? effort : null,
+          });
+        }
         return turn;
       }
 
@@ -1120,9 +1177,23 @@ export class Agent extends EventEmitter {
         this.#logPartial(err?.cancelled ? 'cancelled' : 'error', text, thinking, err);
         if (err?.cancelled) return { cancelled: true, text, usage, attempts: attempt + 1 };
         // Retry a transient failure when no visible text was emitted yet (or when only
-        // internal thinking streamed before the socket died). Re-sending after visible
-        // prose streamed would duplicate it on screen, unless we have nothing to lose.
-        if (!err?.retryable || text || attempt >= MAX_PROVIDER_RETRIES) throw err;
+        // internal thinking streamed before the socket died). Once visible prose has
+        // streamed, a retryable mid-stream stall/drop returns `stalledError` so `run()`
+        // can nudge the model once to continue cleanly instead of aborting the whole run.
+        if (err?.retryable && text) {
+          ttftMs = firstDeltaAt === null ? null : firstDeltaAt - requestAt;
+          durationMs = Date.now() - requestAt;
+          return {
+            stalledError: err,
+            text,
+            thinking,
+            usage,
+            attempts: attempt + 1,
+            ttftMs,
+            durationMs,
+          };
+        }
+        if (!err?.retryable || attempt >= MAX_PROVIDER_RETRIES) throw err;
         // Already logged above; the retry streams a fresh turn.
         thinking = '';
 
@@ -1473,6 +1544,18 @@ function emptyTurnPrompt(reason, maxTokens, thinkingChars = 0) {
     `Your previous turn produced no visible output (${why}). Nothing was executed.\n` +
     'Continue from where you were, but keep this turn small: one modest da_ops batch or a ' +
     'short answer. Split large edits across several turns rather than planning them all at once.'
+  );
+}
+
+/**
+ * Sent after a response stream stalled or dropped mid-turn once visible text had already
+ * arrived (so no `da_ops` batch in that turn ran).
+ */
+function streamStallPrompt(errorMessage) {
+  return (
+    `Your previous response stream stalled and was cut off mid-turn (${errorMessage || 'stream timeout'}). ` +
+    'Nothing from that partial turn was executed.\n' +
+    'Continue from where you left off: emit the complete `da_ops` block (or concise conclusion) cleanly.'
   );
 }
 

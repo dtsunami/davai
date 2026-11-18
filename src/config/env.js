@@ -252,6 +252,7 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
  * @property {number} maxTokens
  * @property {number|undefined} temperature
  * @property {number} shellTimeout
+ * @property {number} streamTimeout
  * @property {number} contextLimit
  * @property {{maxTokens?: number, contextLimit?: number}} limitsRequested  as configured, before clamping
  * @property {number} compactAt
@@ -439,7 +440,8 @@ export function loadConfig(opts = {}) {
       merged.DAVAI_TEMPERATURE === undefined || merged.DAVAI_TEMPERATURE === ''
         ? undefined
         : num(merged.DAVAI_TEMPERATURE, undefined),
-    shellTimeout: num(merged.DAVAI_SHELL_TIMEOUT, 120) * 1000,
+    shellTimeout: num(merged.DAVAI_SHELL_TIMEOUT, 300) * 1000,
+    streamTimeout: num(merged.DAVAI_STREAM_TIMEOUT, 180) * 1000,
     // How long a verified sudo password stays in memory, in seconds; each use slides
     // it, as sudo's own timestamp does. 0 asks every time. Never persisted.
     sudoTtlMs: Math.max(0, num(merged.DAVAI_SUDO_TTL, 900)) * 1000,

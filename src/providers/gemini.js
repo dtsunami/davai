@@ -19,6 +19,7 @@ export function createGemini({
   temperature,
   thinkingVisible,
   baseURL,
+  streamTimeout,
   client: injectedClient,
 }) {
   if (!thinkingVisible) {
@@ -76,8 +77,12 @@ export function createGemini({
       let usage = null;
       let finish = 'end_turn';
       let sawText = false;
+      const watchdogOpts = {
+        signal,
+        ...(streamTimeout != null ? { firstChunkMs: streamTimeout, idleMs: streamTimeout } : {}),
+      };
       try {
-        for await (const chunk of iterateWithIdleTimeout(stream, { signal })) {
+        for await (const chunk of iterateWithIdleTimeout(stream, watchdogOpts)) {
           if (chunk.usageMetadata) usage = chunk.usageMetadata;
           const cand = chunk.candidates?.[0];
           if (cand?.finishReason) finish = cand.finishReason;

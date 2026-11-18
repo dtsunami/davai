@@ -161,6 +161,28 @@ export function replaySegments(dir, opts = {}) {
         break;
       }
 
+      case 'stream-stall-nudge': {
+        pendingOps = null;
+        const msg = ev.message || 'stream timeout';
+        const errSummary = `stream interrupted (${firstLine(msg)})`;
+        if (ev.text) {
+          specs.push({
+            type: 'assistant',
+            label: 'interrupted turn',
+            role: 'assistant',
+            text: `${ev.text}\n\n[stream cut off before completion]`,
+          });
+        }
+        specs.push({
+          type: 'op-result',
+          label: 'stream stalled (nudge)',
+          role: 'user',
+          text: `Response stream stalled mid-turn (${msg}). Nothing from that partial turn was executed.`,
+          _zeroEffectSummary: errSummary,
+        });
+        break;
+      }
+
       case 'ops-result': {
         pendingOps = null;
         const shellStopped = (ev.errors || []).some((e) => e.op === 'shell');

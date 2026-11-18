@@ -289,12 +289,15 @@ export function App({ session, initialInput }) {
     };
     const onRepair = ({ error, attempt }) =>
       push({ type: 'warning', message: `malformed da_ops (repair ${attempt}): ${error}` });
-    const onNudge = ({ attempt, nativeCalls }) =>
+    const onNudge = ({ attempt, nativeCalls, reason }) =>
       push({
         type: 'notice',
-        message: nativeCalls?.length
-          ? `native tool call ${nativeCalls.join(', ')} not run — told the model to use da_ops (${attempt})`
-          : `no ops in that turn — asking it to continue (${attempt})`,
+        message:
+          reason === 'stream-stalled'
+            ? `stream cut off mid-turn — nudged the model to continue (${attempt})`
+            : nativeCalls?.length
+              ? `native tool call ${nativeCalls.join(', ')} not run — told the model to use da_ops (${attempt})`
+              : `no ops in that turn — asking it to continue (${attempt})`,
       });
 
     // Registered from a map so the cleanup can remove exactly these. It used to call
