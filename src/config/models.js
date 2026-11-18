@@ -109,7 +109,7 @@ export const MODELS = [
     maxOutput: 64_000,
     vision: true,
     video: true,
-    effort: false,
+    effort: true,
     thinking: true,
     inputPrice: 1.25,
     outputPrice: 10.0,
@@ -297,7 +297,11 @@ export function resolveModel(provider, id) {
     // An unrecognized Gemini id is still served by the adapter that can carry video, so
     // the capability follows the provider rather than the id. refineModel narrows it.
     video: provider === 'gemini',
-    effort: provider === 'anthropic' || provider === 'openai' || provider === 'openrouter',
+    effort:
+      provider === 'anthropic' ||
+      provider === 'openai' ||
+      provider === 'openrouter' ||
+      (provider === 'gemini' && /^gemini-(?:[3-9]|\d{2})/i.test(wanted)),
     thinking: provider !== 'grok',
     inputPrice: null,
     outputPrice: null,

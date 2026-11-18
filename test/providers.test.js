@@ -373,13 +373,150 @@ describe('createGemini thinking enforcement and leaked-prefix stripping', () => 
     expect(events.filter((e) => e.t === 'thinking').map((e) => e.delta)).toEqual([
       'structured reasoning',
     ]);
-    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toBe(
+    // Note: when `part.thought: true` already streamed on Part 0, Part 1 is already
+    // post-thought text, though `splitLeakedGeminiText` also handles unflagged turns.
+    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toContain(
       'Clean answer.\n```da_ops\n{"ops":[]}\n```',
     );
   });
 
-  it('also strips leaked sthought header at index 0 of part.text', async () => {
+  it('routes leaked sthought / 생각하는 과정: / 思考过程： reasoning onto thinking and splits cleanly at inline ```da_ops fences', async () => {
     const { createGemini } = await import('../src/providers/gemini.js');
+    const calls = [];
+    const fakeClient = {
+      models: {
+        async generateContentStream(params) {
+          calls.push(params);
+          return (async function* () {
+            // Chunked across header + inline `da_ops` boundary, matching real Gemini 4 streams
+            yield { candidates: [{ content: { parts: [{ text: ' 생각하는 ' }] } }] };
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text:
+                          "과정:\nLet's inspect `splat_ops.py` right now!```da_ops\n" +
+                          '{"ops":[{"op":"read","path":"a.py"}]}\n```',
+                      },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            };
+          })();
+        },
+      },
+    };
+
+    const g = createGemini({
+      apiKey: 'AIza-fake',
+      model: 'gemini-4-carbon',
+      maxTokens: 4096,
+      effort: 'xhigh',
+      thinkingVisible: true,
+      client: fakeClient,
+    });
+
+    const events = await collect(
+      g.send({
+        system: 'SYS',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      }),
+    );
+
+    expect(calls[0].config.thinkingConfig).toEqual({
+      includeThoughts: true,
+      thinkingLevel: 'HIGH',
+    });
+    expect(events.filter((e) => e.t === 'thinking').map((e) => e.delta).join('').trim()).toBe(
+      "Let's inspect `splat_ops.py` right now!",
+    );
+    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toBe(
+      '```da_ops\n{"ops":[{"op":"read","path":"a.py"}]}\n```',
+    );
+  });
+
+  it('splits leaked <ctrl95> prose glue (`...for the operator.Yes — ...`) into thinking + visible text and sanitizes prior history', async () => {
+    const { createGemini } = await import('../src/providers/gemini.js');
+    const calls = [];
+    const fakeClient = {
+      models: {
+        async generateContentStream(params) {
+          calls.push(params);
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        text:
+                          'sthought\nCheck `TexCoord.Object` in `splat_ops.py` first. ' +
+                          "Let's summarize concisely for the operator.Yes — P2 is complete and passing.",
+                      },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            };
+          })();
+        },
+      },
+    };
+
+    const g = createGemini({
+      apiKey: 'AIza-fake',
+      model: 'gemini-4-hydrogen',
+      maxTokens: 4096,
+      effort: 'medium',
+      thinkingVisible: true,
+      client: fakeClient,
+    });
+
+    const events = await collect(
+      g.send({
+        system: 'SYS',
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'text',
+                text:
+                  " 생각하는 과정:\nOld leaked monologue before ops!```da_ops\n" +
+                  '{"ops":[{"op":"read","path":"x.py"}]}\n```\n{% endraw %}\n',
+              },
+            ],
+          },
+          { role: 'user', content: [{ type: 'text', text: 'next' }] },
+        ],
+      }),
+    );
+
+    expect(calls[0].config.thinkingConfig).toEqual({
+      includeThoughts: true,
+      thinkingLevel: 'MEDIUM',
+    });
+    expect(events.filter((e) => e.t === 'thinking').map((e) => e.delta).join('')).toBe(
+      "Check `TexCoord.Object` in `splat_ops.py` first. Let's summarize concisely for the operator.",
+    );
+    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toBe(
+      'Yes — P2 is complete and passing.',
+    );
+    // Prior assistant turn in outgoing history has its entire leaked monologue + inline
+    // fence glue + `{% endraw %}` stripped, leaving only the clean `da_ops` block!
+    expect(calls[0].contents[1].parts[0].text.trim()).toBe(
+      '```da_ops\n{"ops":[{"op":"read","path":"x.py"}]}\n```',
+    );
+  });
+
+  it('strips post-fence {% endraw %} monologue and hallucinated [superseded da_ops ...] tail from both live streams and history', async () => {
+    const { createGemini, splitLeakedGeminiText } = await import('../src/providers/gemini.js');
     const fakeClient = {
       models: {
         async generateContentStream() {
@@ -388,7 +525,18 @@ describe('createGemini thinking enforcement and leaked-prefix stripping', () => 
               candidates: [
                 {
                   content: {
-                    parts: [{ text: 'sthought\nReasoning and answer.\n```da_ops\n{"ops":[]}\n```' }],
+                    parts: [
+                      {
+                        text:
+                          " 생각하는 과정:\nLet's edit app.js!```da_ops\n" +
+                          '{"ops":[{"op":"read","path":"app.js"}]}\n' +
+                          '```\n' +
+                          '{% endraw %}\n' +
+                          'Wait — check one math detail in vsSrc BEFORE running tests!\n' +
+                          '[superseded da_ops payload omitted — failed: op[2]…; nothing was applied]\n' +
+                          "Let's see the batch result!\n",
+                      },
+                    ],
                   },
                   finishReason: 'STOP',
                 },
@@ -414,57 +562,19 @@ describe('createGemini thinking enforcement and leaked-prefix stripping', () => 
       }),
     );
 
-    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toBe(
-      'Reasoning and answer.\n```da_ops\n{"ops":[]}\n```',
+    const visibleText = events.filter((e) => e.t === 'text').map((e) => e.delta).join('');
+    const thinkingText = events.filter((e) => e.t === 'thinking').map((e) => e.delta).join('');
+
+    expect(visibleText.trim()).toBe('```da_ops\n{"ops":[{"op":"read","path":"app.js"}]}\n```');
+    expect(visibleText).not.toContain('endraw');
+    expect(visibleText).not.toContain('superseded da_ops');
+    expect(thinkingText).toContain("Let's edit app.js!");
+    expect(thinkingText).toContain('Wait — check one math detail in vsSrc');
+
+    // Also verify `splitLeakedGeminiText` (used for history & --resume) drops the tail cleanly
+    const hist = splitLeakedGeminiText(
+      " 생각하는 과정:\nPlan!```da_ops\n{\"ops\":[]}\n```\n{% endraw %}\nPost-fence self-talk\n[superseded da_ops payload omitted — failed: op[2]];\nLet's see!\n",
     );
-  });
-
-  it('strips Korean 생각하는 과정: thought header on incoming text and sanitizes prior model history', async () => {
-    const { createGemini } = await import('../src/providers/gemini.js');
-    const calls = [];
-    const fakeClient = {
-      models: {
-        async generateContentStream(params) {
-          calls.push(params);
-          return (async function* () {
-            yield {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: ' 생각하는 과정:\nClean reply.' }],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-            };
-          })();
-        },
-      },
-    };
-
-    const g = createGemini({
-      apiKey: 'AIza-fake',
-      model: 'gemini-4-hydrogen',
-      maxTokens: 4096,
-      thinkingVisible: true,
-      client: fakeClient,
-    });
-
-    const events = await collect(
-      g.send({
-        system: 'SYS',
-        messages: [
-          { role: 'user', content: [{ type: 'text', text: 'hi' }] },
-          {
-            role: 'assistant',
-            content: [{ type: 'text', text: ' 생각하는 과정:\nOld leaked thought\n{% endraw %}\nActual text' }],
-          },
-          { role: 'user', content: [{ type: 'text', text: 'next' }] },
-        ],
-      }),
-    );
-
-    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toBe('Clean reply.');
-    expect(calls[0].contents[1].parts[0].text).toBe('Old leaked thought\nActual text');
+    expect(hist.text.trim()).toBe('```da_ops\n{"ops":[]}\n```');
   });
 });

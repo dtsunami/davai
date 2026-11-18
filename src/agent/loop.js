@@ -1298,9 +1298,17 @@ export class Agent extends EventEmitter {
     const items = queue.splice(0, queue.length);
     for (const item of items) {
       const proseHead = item.prose.trim();
-      const assistantStub = proseHead
-        ? `${proseHead}\n\n[superseded da_ops payload omitted — failed: ${item.summary}; nothing was applied]`
-        : `[superseded da_ops batch omitted — failed: ${item.summary}; nothing was applied]`;
+      // Keep the assistant stub as a minimal valid fenced comment rather than a prose
+      // `[superseded da_ops payload omitted — ...]` banner — Gemini 4 otherwise learns
+      // that bracketed banner from its own prior `model` turns and starts hallucinating
+      // it verbatim at the end of live turns! The user-role `resultStub` right below
+      // holds the factual failure summary so nothing is lost.
+      const oneLineSummary = String(item.summary || 'batch failed').replace(/\r?\n/g, ' ');
+      const stubBlock =
+        `\`\`\`da_ops\n` +
+        `// superseded failed batch omitted (${oneLineSummary}; nothing was applied)\n` +
+        `\`\`\``;
+      const assistantStub = proseHead ? `${proseHead}\n\n${stubBlock}` : stubBlock;
       const resultStub = `Batch not applied (${item.summary}). Disk was unchanged; resolved in the following turn.`;
       this.ledger.replaceText(item.assistantId, {
         text: assistantStub,

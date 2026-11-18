@@ -23,6 +23,7 @@ import { DEFAULT_PROMPTS, steerPrompt } from '../agent/prompt.js';
 import { estimate } from '../context/tokens.js';
 import { loadImage } from '../context/images.js';
 import { loadVideo, youtubeRef } from '../context/video.js';
+import { splitLeakedGeminiText } from '../providers/gemini.js';
 
 /** Fraction of the context limit a replayed conversation may occupy by default. */
 const REPLAY_BUDGET = 0.5;
@@ -119,14 +120,21 @@ export function replaySegments(dir, opts = {}) {
       case 'assistant':
         flushInterruptedOps();
         // The assistant text still carries its da_ops block verbatim, which is what
-        // lets the model reason about the results that follow it.
+        // lets the model reason about the results that follow it. If an earlier Gemini
+        // turn leaked an unsplit `<ctrl94>`...`<ctrl95>` monologue into `ev.text`,
+        // split the reasoning out onto `thinking` so resuming an older session cleans
+        // the ledger instead of carrying the leak forward.
         if (ev.text) {
+          const split = !ev.thinking ? splitLeakedGeminiText(ev.text) : null;
+          const cleanText = split?.leaked && split.text ? split.text : ev.text;
+          const cleanThinking =
+            ev.thinking || (split?.leaked && split.thinking ? split.thinking : undefined);
           specs.push({
             type: 'assistant',
             label: 'assistant',
             role: 'assistant',
-            text: ev.text,
-            ...(ev.thinking ? { thinking: ev.thinking } : {}),
+            text: cleanText,
+            ...(cleanThinking ? { thinking: cleanThinking } : {}),
           });
         }
         break;
@@ -531,9 +539,12 @@ function compressPriorReplayFailures(specs) {
     const prev = i > 0 ? specs[i - 1] : null;
     if (prev && prev.type === 'assistant' && prev.text) {
       const prose = (extract(prev.text).prose || '').trim();
-      prev.text = prose
-        ? `${prose}\n\n[superseded da_ops payload omitted — failed: ${summary}; nothing was applied]`
-        : `[superseded da_ops batch omitted — failed: ${summary}; nothing was applied]`;
+      const oneLineSummary = String(summary || 'batch failed').replace(/\r?\n/g, ' ');
+      const stubBlock =
+        `\`\`\`da_ops\n` +
+        `// superseded failed batch omitted (${oneLineSummary}; nothing was applied)\n` +
+        `\`\`\``;
+      prev.text = prose ? `${prose}\n\n${stubBlock}` : stubBlock;
       prev.label = `superseded: ${firstLine(summary)}`;
     }
   }

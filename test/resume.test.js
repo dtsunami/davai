@@ -105,6 +105,31 @@ describe('replaySegments', () => {
     expect(specs[1].thinking).toBe('let me reply pong');
   });
 
+  it('cleans leaked Gemini thought blocks (` 생각하는 과정:` / `sthought`) out of assistant text on resume', () => {
+    const dir = writeSession('cccc444446', {
+      startedAt: '2026-09-04T11:30:00.000Z',
+      events: [
+        { type: 'user', text: 'check splat' },
+        {
+          type: 'assistant',
+          text:
+            " 생각하는 과정:\nLet's read `splat_ops.py` right now!```da_ops\n" +
+            '{"ops":[{"op":"read","path":"splat_ops.py"}]}\n```',
+        },
+        { type: 'ops-result', status: 'ok', label: '1 op ok', text: 'ok' },
+        {
+          type: 'assistant',
+          text: 'sthought\nEverything passed cleanly!Yes — P2 is complete.',
+        },
+      ],
+    });
+    const specs = replaySegments(dir);
+    expect(specs[1].thinking).toBe("Let's read `splat_ops.py` right now!");
+    expect(specs[1].text).toBe('```da_ops\n{"ops":[{"op":"read","path":"splat_ops.py"}]}\n```');
+    expect(specs[3].thinking).toBe('Everything passed cleanly!');
+    expect(specs[3].text).toBe('Yes — P2 is complete.');
+  });
+
   it('synthesizes op-result text for transcripts written before it was logged', () => {
     const dir = writeSession('dddd555555', {
       startedAt: '2026-09-05T10:00:00.000Z',
