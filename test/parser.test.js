@@ -243,4 +243,41 @@ describe('extract', () => {
     expect(out.artifacts).toEqual([]);
     expect(out.prose).toBe(proseOnly);
   });
+
+  // gemini-4-hydrogen (`session 00353ba416` turns 19, 24, 25): glued `{% endraw %}` or
+  // `phenomenal!` straight onto the closing fence without a newline (` ```{% endraw %} `
+  // or ` ```phenomenal! `), and repeated identical `da_ops` blocks when self-correcting
+  // inside leaked thoughts.
+  it('recovers inline closing fences (` ```{% endraw %} ` / ` ```phenomenal! `) and deduplicates identical repeated da_ops blocks', () => {
+    const turn = [
+      "Let's run it!```da_ops",
+      '{"ops": [',
+      '  {"op": "write", "path": "tests/a.py", "overwrite": true, "text": "@1"},',
+      '  {"op": "shell", "cmd": "pytest tests/a.py"}',
+      ']}',
+      '--davai:1--',
+      'assert 1 + 1 == 2',
+      '--davai:end--',
+      '```phenomenal! Wait, let me emit only the clean block!```da_ops',
+      '{"ops": [',
+      '  {"op": "write", "path": "tests/a.py", "overwrite": true, "text": "@1"},',
+      '  {"op": "shell", "cmd": "pytest tests/a.py"}',
+      ']}',
+      '--davai:1--',
+      'assert 1 + 1 == 2',
+      '--davai:end--',
+      '```{% endraw %}',
+      'Oops, ignore that.',
+    ].join('\n');
+
+    const out = extract(turn);
+    expect(out.parseError).toBeNull();
+    expect(out.ops).toEqual([
+      { op: 'write', path: 'tests/a.py', overwrite: true, text: 'assert 1 + 1 == 2' },
+      { op: 'shell', cmd: 'pytest tests/a.py' },
+    ]);
+    expect(out.recovered).toContain('inline opening fence');
+    expect(out.recovered).toContain('inline closing fence');
+    expect(out.recovered).toContain('deduplicated 1 repeated da_ops block(s)');
+  });
 });

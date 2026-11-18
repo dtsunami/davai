@@ -1535,6 +1535,13 @@ function emptyTurnPrompt(reason, maxTokens, thinkingChars = 0) {
       'Anything about this machine or this codebase is cheaper to look up than to deduce.'
     );
   }
+  if (thinkingChars) {
+    return (
+      `Your previous turn ended (${reason}) after streaming internal thinking only, with zero ` +
+      'visible text in the reply channel — the operator saw nothing and no `da_ops` ran.\n' +
+      'Write your visible response or `da_ops` block directly in the reply text channel now.'
+    );
+  }
   const why =
     reason === 'max_tokens'
       ? `it hit the output limit (max_tokens ${maxTokens ?? 'unknown'}) before writing any ` +

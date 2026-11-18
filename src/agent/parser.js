@@ -35,6 +35,7 @@ const PAYLOAD_CLOSE = /^--davai:end--[ \t]*$/;
  * @property {number} start  line index in the source
  * @property {boolean} [unterminated]
  * @property {boolean} [inlineFence]
+ * @property {boolean} [inlineCloseFence]
  */
 
 /**
@@ -65,11 +66,15 @@ export function scanBlocks(text) {
     }
     const [, indent, fence, lang] = m;
     const closer = new RegExp(`^[ \\t]*${fence[0]}{${fence.length},}[ \\t]*$`);
+    const inlineOpsCloser = new RegExp(
+      `^[ \\t]*(${fence[0]}{${fence.length},})[ \\t]*(\\S.*)$`,
+    );
     const isOps = lang.toLowerCase() === 'da_ops';
     const start = i;
     const body = [];
     i++;
     let closed = false;
+    let inlineCloseFence = false;
     // Payload blocks are verbatim by definition, so a ``` inside one is content, not
     // the end of the da_ops block. Without this, writing any file that itself contains
     // a fenced code block (a README, this very protocol doc) truncates the envelope
@@ -86,6 +91,22 @@ export function scanBlocks(text) {
         i++;
         break;
       }
+      // When a model glues trailing text or template scaffolding straight onto the
+      // closing fence of a `da_ops` block without a newline (` ```{% endraw %} ` or
+      // ` ```phenomenal! `), recognize the close once the block has a complete envelope
+      // or closed payload, and feed the trailing text back to the outer prose scanner.
+      if (isOps && !inPayload && body.length > 0) {
+        const inlineClose = lines[i].match(inlineOpsCloser);
+        if (inlineClose) {
+          const prevTrim = body[body.length - 1].trim();
+          if (PAYLOAD_CLOSE.test(prevTrim) || prevTrim.endsWith('}') || prevTrim.endsWith(']')) {
+            closed = true;
+            inlineCloseFence = true;
+            lines[i] = inlineClose[2];
+            break;
+          }
+        }
+      }
       body.push(line);
       i++;
     }
@@ -97,6 +118,7 @@ export function scanBlocks(text) {
       start,
       unterminated: !closed,
       ...(inlineFence ? { inlineFence: true } : {}),
+      ...(inlineCloseFence ? { inlineCloseFence: true } : {}),
     });
   }
 
@@ -278,12 +300,33 @@ export function extract(text) {
     };
   }
 
+  // Deduplicate exact-identical consecutive `da_ops` blocks in the same turn (e.g. when
+  // leaked reasoning drafts a batch and then re-emits the exact same batch at the end),
+  // while still merging genuinely distinct blocks if a model splits ops across two.
+  const dedupedBlocks = [];
+  for (const b of opBlocks) {
+    const prev = dedupedBlocks[dedupedBlocks.length - 1];
+    if (prev && prev.body.trim() === b.body.trim()) continue;
+    dedupedBlocks.push(b);
+  }
+  let finalOps = merged;
+  if (dedupedBlocks.length < opBlocks.length) {
+    finalOps = [];
+    for (const b of dedupedBlocks) finalOps.push(...parseDaOps(b.body));
+  }
+
   const reasons = [];
   if (opBlocks.some((b) => b.inlineFence)) reasons.push('inline opening fence');
+  if (opBlocks.some((b) => b.inlineCloseFence)) reasons.push('inline closing fence');
   if (opBlocks.some((b) => b.unterminated)) reasons.push('no closing fence');
+  if (dedupedBlocks.length < opBlocks.length) {
+    reasons.push(
+      `deduplicated ${opBlocks.length - dedupedBlocks.length} repeated da_ops block(s)`,
+    );
+  }
 
   return {
-    ops: merged,
+    ops: finalOps,
     parseError: null,
     artifacts,
     prose,

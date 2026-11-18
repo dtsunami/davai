@@ -278,4 +278,28 @@ describe('a turn that produced only thinking', () => {
 
     expect(ev.warning.some((w) => /chars of thinking/.test(w.message))).toBe(false);
   });
+
+  it('explicitly tells the model to write in the visible reply channel when end_turn streamed thinking only', async () => {
+    const sent = [];
+    let calls = 0;
+    const p = {
+      sent,
+      async *send({ messages }) {
+        sent.push(messages);
+        if (calls++ === 0) {
+          yield { t: 'thinking', delta: 'Investigating query...' };
+          yield { t: 'usage', in: 10, out: 50, cacheRead: 0, cacheWrite: 0 };
+          yield { t: 'stop', reason: 'end_turn' };
+          return;
+        }
+        yield { t: 'text', delta: 'All done.' };
+        yield { t: 'usage', in: 10, out: 10, cacheRead: 0, cacheWrite: 0 };
+        yield { t: 'stop', reason: 'end_turn' };
+      },
+    };
+    await drive(makeAgent(p));
+    const said = textParts(sent[1]).map((c) => c.text).join('\n');
+    expect(said).toMatch(/streaming internal thinking only/);
+    expect(said).toMatch(/visible response or `da_ops` block directly in the reply text channel/);
+  });
 });

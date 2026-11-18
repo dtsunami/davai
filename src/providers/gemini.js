@@ -8,9 +8,10 @@ import { iterateWithIdleTimeout } from './watchdog.js';
 
 /**
  * Leak header Gemini 4 emits at index 0 of `part.text` when an upstream gateway fails to
- * split `thought` out of the text channel (`" düşünceler\n..."` or `"sthought\n..."`).
+ * split `thought` out of the text channel (`" düşünceler\n..."`, `"sthought\n..."`, or
+ * `" 생각하는 과정:\n..."`).
  */
-const LEAKED_THOUGHT_PREFIX = /^[ \t]*(?:düşünceler|sthought)\r?\n/;
+const LEAKED_THOUGHT_PREFIX = /^[ \t]*(?:düşünceler|sthought|생각하는 과정:?)\r?\n/;
 
 export function createGemini({
   apiKey,
@@ -183,9 +184,23 @@ function annotateMedia(err, media) {
   return err;
 }
 
+/**
+ * Strip leaked Gemini reasoning headers and Jinja `{% endraw %}` scaffolding from prior
+ * assistant turns before re-sending history to Gemini, so one leaked turn does not
+ * in-context-prime every subsequent turn in the session (or across `--resume`) to emit
+ * unsplit thoughts in `part.text`.
+ */
+function sanitizePriorModelText(text) {
+  if (!text) return text;
+  return text
+    .replace(LEAKED_THOUGHT_PREFIX, '')
+    .replace(/^[ \t]*\{%[ \t]*endraw[ \t]*%\}[ \t]*\r?\n?/gm, '');
+}
+
 function toGeminiContent(m) {
+  const isModel = m.role === 'assistant';
   return {
-    role: m.role === 'assistant' ? 'model' : 'user',
+    role: isModel ? 'model' : 'user',
     // Uploaded video rides the same inlineData envelope as an image — the mime type and
     // the billing differ, the wire shape does not.
     //
@@ -200,7 +215,7 @@ function toGeminiContent(m) {
       if (p.type === 'image' || p.type === 'video') {
         return { inlineData: { mimeType: p.mediaType, data: p.data } };
       }
-      return { text: p.text };
+      return { text: isModel ? sanitizePriorModelText(p.text) : p.text };
     }),
   };
 }

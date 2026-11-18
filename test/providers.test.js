@@ -418,4 +418,53 @@ describe('createGemini thinking enforcement and leaked-prefix stripping', () => 
       'Reasoning and answer.\n```da_ops\n{"ops":[]}\n```',
     );
   });
+
+  it('strips Korean 생각하는 과정: thought header on incoming text and sanitizes prior model history', async () => {
+    const { createGemini } = await import('../src/providers/gemini.js');
+    const calls = [];
+    const fakeClient = {
+      models: {
+        async generateContentStream(params) {
+          calls.push(params);
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: ' 생각하는 과정:\nClean reply.' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            };
+          })();
+        },
+      },
+    };
+
+    const g = createGemini({
+      apiKey: 'AIza-fake',
+      model: 'gemini-4-hydrogen',
+      maxTokens: 4096,
+      thinkingVisible: true,
+      client: fakeClient,
+    });
+
+    const events = await collect(
+      g.send({
+        system: 'SYS',
+        messages: [
+          { role: 'user', content: [{ type: 'text', text: 'hi' }] },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: ' 생각하는 과정:\nOld leaked thought\n{% endraw %}\nActual text' }],
+          },
+          { role: 'user', content: [{ type: 'text', text: 'next' }] },
+        ],
+      }),
+    );
+
+    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toBe('Clean reply.');
+    expect(calls[0].contents[1].parts[0].text).toBe('Old leaked thought\nActual text');
+  });
 });
