@@ -377,4 +377,45 @@ describe('createGemini thinking enforcement and leaked-prefix stripping', () => 
       'Clean answer.\n```da_ops\n{"ops":[]}\n```',
     );
   });
+
+  it('also strips leaked sthought header at index 0 of part.text', async () => {
+    const { createGemini } = await import('../src/providers/gemini.js');
+    const fakeClient = {
+      models: {
+        async generateContentStream() {
+          return (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [{ text: 'sthought\nReasoning and answer.\n```da_ops\n{"ops":[]}\n```' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            };
+          })();
+        },
+      },
+    };
+
+    const g = createGemini({
+      apiKey: 'AIza-fake',
+      model: 'gemini-4-carbon',
+      maxTokens: 4096,
+      thinkingVisible: true,
+      client: fakeClient,
+    });
+
+    const events = await collect(
+      g.send({
+        system: 'SYS',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+      }),
+    );
+
+    expect(events.filter((e) => e.t === 'text').map((e) => e.delta).join('')).toBe(
+      'Reasoning and answer.\n```da_ops\n{"ops":[]}\n```',
+    );
+  });
 });

@@ -1129,4 +1129,33 @@ describe('tx Code Mode TUI rendering regressions (blenderbot session 2531b2cee2)
     expect(submitted).toEqual(['glob("src/**/*.js")']);
     app.unmount();
   });
+
+  it('caps live streaming output to a viewport tail window while committing full text at turn-end', async () => {
+    const stdout = fakeStdout(80);
+    stdout.rows = 24;
+    const app = render(<App session={session} />, {
+      stdout,
+      stdin: fakeStdin(),
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    await flush();
+
+    const bigTurn = Array.from({ length: 200 }, (_, i) => `line-${i + 1}: payload content`).join('\n');
+    session.agent.emit('turn-start');
+    session.agent.emit('text', bigTurn);
+    await waitForText(stdout, 'line-200: payload content');
+    await waitForText(stdout, 'earlier streaming lines');
+
+    // Live frame shows the tail and the hidden-line banner, not all 200 lines at once:
+    const liveFrame = lastRender(stdout);
+    expect(liveFrame).toContain('earlier streaming lines');
+    expect(liveFrame).toContain('line-200: payload content');
+    expect(liveFrame).not.toContain('line-1: payload content');
+
+    // Once the turn finishes, the full untruncated assistant message commits to <Static>:
+    session.agent.emit('turn-end', { text: bigTurn, ttftMs: 10, durationMs: 50 });
+    await waitForText(stdout, 'line-1: payload content');
+    app.unmount();
+  });
 });

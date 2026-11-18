@@ -66,17 +66,38 @@ export function bar(fraction, width = 10) {
   return glyphs.bar.repeat(filled) + glyphs.barEmpty.repeat(width - filled);
 }
 
-/** Put the Windows console into a state where VT and UTF-8 both work. */
+/** Put the Windows console into a state where VT and UTF-8 both work without QuickEdit freezes. */
 export function prepareTerminal() {
   if (!isWin) return;
   try {
-    // Node enables VT on modern Windows automatically; the codepage is the part
-    // that still bites, and only for the legacy console host.
+    // Legacy conhost (outside Windows Terminal) has two traps:
+    //   1. Non-UTF8 active codepage corrupting box-drawing / glyphs (`chcp 65001`).
+    //   2. QuickEdit Mode (`ENABLE_QUICK_EDIT_MODE = 0x0040`): clicking anywhere in the
+    //      console enters Win32 selection mode, which synchronously blocks `WriteFile` on
+    //      stdout and freezes the entire Node event loop (including the web sidecar, SSE,
+    //      `/api/cancel`, and watchdog timers). Clear QuickEdit while keeping
+    //      `ENABLE_EXTENDED_FLAGS` (`0x0080`) set so Win32 honours the change.
     if (!process.env.WT_SESSION && process.stdout.isTTY) {
-      execFileSync('chcp.com', ['65001'], { stdio: 'ignore' });
+      execFileSync('chcp.com', ['65001'], { stdio: 'ignore', timeout: 2000 });
+      if (process.stdin.isTTY) {
+        const ps = [
+          '$t = Add-Type -PassThru -Name WinConsole -Namespace Davai -MemberDefinition @"',
+          '[DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int n);',
+          '[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr h, out uint m);',
+          '[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(IntPtr h, uint m);',
+          '"@;',
+          '$h = $t::GetStdHandle(-10); $m = 0;',
+          'if ($t::GetConsoleMode($h, [ref]$m)) { [void]$t::SetConsoleMode($h, ($m -band (-bnot 0x0040)) -bor 0x0080) }',
+        ].join(' ');
+        execFileSync(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-Command', ps],
+          { stdio: 'ignore', timeout: 3000 },
+        );
+      }
     }
   } catch {
-    /* cosmetic only */
+    /* cosmetic / best-effort only */
   }
 }
 

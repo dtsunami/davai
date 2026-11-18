@@ -1023,6 +1023,7 @@ export class Agent extends EventEmitter {
           switch (ev.t) {
             case 'text':
               text += ev.delta;
+              this.log.flight?.touch();
               this.log.stream?.write('text', ev.delta);
               this.emit('text', ev.delta);
               if (text.length - checked.text >= REPEAT_CHECK_EVERY) {
@@ -1032,6 +1033,7 @@ export class Agent extends EventEmitter {
               break;
             case 'thinking':
               thinking += ev.delta;
+              this.log.flight?.touch();
               this.log.stream?.write('thinking', ev.delta);
               this.emit('thinking', ev.delta);
               break;

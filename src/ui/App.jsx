@@ -20,6 +20,8 @@ import {
   formatMeter,
   formatPreviewBlock,
   formatTokens,
+  safeSlice,
+  sanitizeTerminalLine,
   sanitizeTerminalText,
   truncateInline,
 } from './theme.js';
@@ -482,7 +484,9 @@ export function App({ session, initialInput }) {
   );
 
   const width = stdout?.columns || 80;
+  const rows = stdout?.rows || 30;
   const liveSnap = runStartedAt ? throughput.snapshot(Date.now(), { seriesPoints: 12 }) : null;
+  const liveView = live ? formatLiveWindow(live, { width, rows }) : null;
 
   return (
     <Box flexDirection="column" width={width}>
@@ -494,9 +498,15 @@ export function App({ session, initialInput }) {
 
       {thinking ? <ThinkingBox text={thinking} width={width} /> : null}
 
-      {live ? (
+      {liveView ? (
         <Box flexDirection="column" paddingX={1}>
-          <Text>{renderMarkdown(live)}</Text>
+          {liveView.hiddenLines > 0 ? (
+            <Text color={colors.dim}>
+              {glyphs.ellipsis} +{liveView.hiddenLines} earlier streaming line
+              {liveView.hiddenLines === 1 ? '' : 's'}
+            </Text>
+          ) : null}
+          <Text>{renderMarkdown(liveView.text, { syntax: false })}</Text>
         </Box>
       ) : null}
 
@@ -943,4 +953,78 @@ function summarizeResult(r, maxCols = 120) {
       raw = r.op;
   }
   return truncateInline(raw, maxCols);
+}
+
+/**
+ * Bound the live streaming region in both lines and visual rows so Ink's dynamic
+ * repaint stays O(viewport) instead of O(turn_size) and never grows taller than
+ * `stdout.rows` (once Ink's dynamic region scrolls off the top of the viewport, ANSI
+ * cursor-up clamps at row 0 and duplicates lines into scrollback every 33ms, while
+ * Yoga layout + cli-highlight over 70KB batches spikes V8 heap past 1GB).
+ *
+ * Full untruncated markdown with syntax highlighting is still committed to `<Static>`
+ * once `onTurnEnd` fires.
+ *
+ * @param {string} raw
+ * @param {{width?: number, rows?: number}} [opts]
+ * @returns {{text: string, hiddenLines: number}}
+ */
+export function formatLiveWindow(raw, { width = 80, rows = 30 } = {}) {
+  const innerCols = Math.max(20, width - 4);
+  // Leave room for PerfHud, spinner, composer, status bar, and the "+N lines" banner.
+  const maxVisualRows = Math.max(8, Math.min(40, rows - 10));
+  // Cheap tail pre-slice on huge 70KB+ streams so we don't sanitize/split 2,000 earlier
+  // lines on every 33ms frame; count `\n` in the skipped prefix so hiddenLines stays exact.
+  const TAIL_CHARS = Math.max(4096, innerCols * maxVisualRows * 4);
+  let skippedNewlines = 0;
+  let tail = String(raw || '');
+  if (tail.length > TAIL_CHARS) {
+    const cut = tail.indexOf('\n', tail.length - TAIL_CHARS);
+    if (cut > 0) {
+      for (let i = 0; i <= cut; i++) {
+        if (tail.charCodeAt(i) === 10) skippedNewlines++;
+      }
+      tail = tail.slice(cut + 1);
+    }
+  }
+
+  const lines = tail.replace(/\r\n?/g, '\n').split('\n');
+  const maxLineChars = innerCols * 3;
+  const kept = [];
+  let usedRows = 0;
+  let i = lines.length - 1;
+  for (; i >= 0; i--) {
+    let clean = sanitizeTerminalLine(lines[i]);
+    if (clean.length > maxLineChars) {
+      const keep = Math.max(1, maxLineChars - glyphs.ellipsis.length);
+      clean = `${safeSlice(clean, keep)}${glyphs.ellipsis}`;
+    }
+    const visualRows = Math.max(1, Math.ceil((clean.length || 1) / innerCols));
+    if (kept.length > 0 && usedRows + visualRows > maxVisualRows) break;
+    kept.push(clean);
+    usedRows += visualRows;
+  }
+  kept.reverse();
+
+  // If truncating the head severed an open ``` fence, prepend a matching opener so
+  // `renderMarkdown` still styles the visible tail as inside-fence rather than flipping
+  // an upcoming closing ``` into an opening fence.
+  let fenceCount = 0;
+  let firstFenceLang = '';
+  for (const l of kept) {
+    const m = l.match(/^\s*(`{3,}|~{3,})\s*([\w+-]*)\s*$/);
+    if (m) {
+      if (fenceCount === 0) firstFenceLang = m[2] || '';
+      fenceCount++;
+    }
+  }
+  const hiddenLines = skippedNewlines + (i + 1);
+  if (hiddenLines > 0 && fenceCount % 2 === 1 && !firstFenceLang) {
+    kept.unshift('```');
+  }
+
+  return {
+    text: kept.join('\n'),
+    hiddenLines,
+  };
 }

@@ -89,7 +89,30 @@ describe('FlightRecorder', () => {
     expect(stalls[0]).toMatchObject({
       phase: 'llm:await-first-byte',
       elapsedMs: 16_000,
+      idleMs: 16_000,
       turn: 2,
+    });
+
+    // Active streaming that calls touch() every few seconds is NOT a stall even past 15s:
+    flight.mark('llm:streaming', { turn: 2 });
+    for (let i = 0; i < 10; i++) {
+      clock += 2000;
+      flight.touch();
+      flight.tick();
+    }
+    rows = readBreadcrumbs(dir);
+    expect(rows.filter((r) => r.kind === 'stall-heartbeat')).toHaveLength(1);
+
+    // Once chunks stop arriving (no touch()) for >= 15s, stall-heartbeat fires:
+    clock += 16_000;
+    flight.tick();
+    rows = readBreadcrumbs(dir);
+    const stallsAfterSilence = rows.filter((r) => r.kind === 'stall-heartbeat');
+    expect(stallsAfterSilence).toHaveLength(2);
+    expect(stallsAfterSilence[1]).toMatchObject({
+      phase: 'llm:streaming',
+      elapsedMs: 36_000,
+      idleMs: 16_000,
     });
 
     flight.close('done');

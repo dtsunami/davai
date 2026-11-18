@@ -60,6 +60,7 @@ export class FlightRecorder {
     this.phase = 'init';
     this.detail = {};
     this.phaseSince = t;
+    this.lastActivityAt = t;
     this.lastStallReportAt = 0;
     this.lastTickAt = t;
 
@@ -114,6 +115,7 @@ export class FlightRecorder {
     this.phase = phase;
     this.detail = detail;
     this.phaseSince = t;
+    this.lastActivityAt = t;
     this.lastStallReportAt = 0;
     this.#write({
       kind: 'phase',
@@ -121,6 +123,16 @@ export class FlightRecorder {
       ...(prevPhase && prevPhase !== 'init' ? { prev: prevPhase, prevMs: prevElapsedMs } : {}),
       ...detail,
     });
+  }
+
+  /**
+   * Refresh liveness within a long-running streaming phase without writing to disk, so
+   * `stall-heartbeat` measures genuine silence (time since last chunk) rather than normal
+   * multi-minute streaming turns.
+   */
+  touch() {
+    if (this.closed) return;
+    this.lastActivityAt = this.now();
   }
 
   /**
@@ -162,9 +174,10 @@ export class FlightRecorder {
     }
 
     if (!HUMAN_WAIT_PHASES.has(this.phase)) {
+      const idleMs = t - this.lastActivityAt;
       const elapsed = t - this.phaseSince;
       if (
-        elapsed >= this.stallMs &&
+        idleMs >= this.stallMs &&
         (this.lastStallReportAt === 0 || t - this.lastStallReportAt >= this.stallMs)
       ) {
         this.lastStallReportAt = t;
@@ -173,6 +186,7 @@ export class FlightRecorder {
           kind: 'stall-heartbeat',
           phase: this.phase,
           elapsedMs: elapsed,
+          idleMs,
           rssMb: Math.round(mem.rss / 1048576),
           heapMb: Math.round(mem.heapUsed / 1048576),
           ...this.detail,

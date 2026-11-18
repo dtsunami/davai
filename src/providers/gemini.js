@@ -8,9 +8,9 @@ import { iterateWithIdleTimeout } from './watchdog.js';
 
 /**
  * Leak header Gemini 4 emits at index 0 of `part.text` when an upstream gateway fails to
- * split `thought` out of the text channel (`" düşünceler\n..."` — Turkish for "thoughts").
+ * split `thought` out of the text channel (`" düşünceler\n..."` or `"sthought\n..."`).
  */
-const LEAKED_THOUGHT_PREFIX = /^[ \t]*düşünceler\r?\n/;
+const LEAKED_THOUGHT_PREFIX = /^[ \t]*(?:düşünceler|sthought)\r?\n/;
 
 export function createGemini({
   apiKey,
